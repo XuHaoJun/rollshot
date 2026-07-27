@@ -863,17 +863,15 @@ async fn persist_terminal_outcome(
                     budget_dimensions: std::collections::BTreeMap::new(),
                 },
             };
-            match current.record_ready_for_review(metadata, payload, now) {
-                Ok(s) => {
-                    // Store serialized proposal for later restore.
-                    match serde_json::to_vec(&ready.proposal) {
-                        Ok(proposal_bytes) => match s.with_proposal_payload(proposal_bytes) {
-                            Ok(s) => s,
-                            Err(e) => return Some(format!("attach proposal: {e}")),
-                        },
-                        Err(e) => return Some(format!("serialize proposal: {e}")),
-                    }
-                }
+            // Serialize proposal for persistence alongside the review payload.
+            let proposal_bytes = serde_json::to_vec(&ready.proposal)
+                .map_err(|e| format!("serialize proposal: {e}"));
+            let proposal_payload = match proposal_bytes {
+                Ok(b) => Some(b),
+                Err(e) => return Some(e),
+            };
+            match current.record_ready_for_review(metadata, payload, proposal_payload, now) {
+                Ok(s) => s,
                 Err(e) => return Some(format!("record ready: {e}")),
             }
         }
@@ -3232,7 +3230,7 @@ mod reducer_tests {
             },
         };
         let ready = running
-            .record_ready_for_review(metadata, payload, now2)
+            .record_ready_for_review(metadata, payload, None, now2)
             .unwrap();
         store.compare_and_swap(&running, &ready).unwrap();
 
@@ -3562,11 +3560,15 @@ mod reducer_tests {
             },
         };
 
-        let ready = running
-            .record_ready_for_review(metadata, payload, now + 2)
-            .unwrap();
         let proposal_bytes = serde_json::to_vec(&proposal).unwrap();
-        ready.with_proposal_payload(proposal_bytes).unwrap()
+        running
+            .record_ready_for_review(
+                metadata,
+                payload,
+                Some(proposal_bytes),
+                now + 2,
+            )
+            .unwrap()
     }
 
     #[test]

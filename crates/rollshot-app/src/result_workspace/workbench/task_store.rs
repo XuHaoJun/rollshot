@@ -943,7 +943,7 @@ mod tests {
         let running = running_task_fixture();
         let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
         running
-            .record_ready_for_review(meta, payload_fixture(), 30)
+            .record_ready_for_review(meta, payload_fixture(), None, 30)
             .unwrap()
     }
 
@@ -1446,7 +1446,7 @@ mod tests {
             let running = created.start_attempt(attempt, 20).unwrap();
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             running
-                .record_ready_for_review(meta, payload_fixture(), 30)
+                .record_ready_for_review(meta, payload_fixture(), None, 30)
                 .unwrap()
         };
         store.create_without_failpoint(&ready1).unwrap();
@@ -1472,7 +1472,7 @@ mod tests {
                 TaskAttemptId::new(1),
             );
             running
-                .record_ready_for_review(meta, payload_fixture(), 120)
+                .record_ready_for_review(meta, payload_fixture(), None, 120)
                 .unwrap()
         };
         store.create_without_failpoint(&ready2).unwrap();

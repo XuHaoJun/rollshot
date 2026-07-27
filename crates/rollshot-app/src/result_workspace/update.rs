@@ -2555,6 +2555,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::DiscardCandidates => {
+                    if workbench.review_operation_active {
+                        return Task::none();
+                    }
                     // Persist rejection before clearing UI.
                     if let Some(snapshot) = workbench.cached_task_snapshot.as_ref() {
                         if let Some(store) = workbench.task_store.clone() {

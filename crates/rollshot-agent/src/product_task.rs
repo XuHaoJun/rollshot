@@ -709,12 +709,14 @@ impl ProductTaskSnapshot {
         Ok(next)
     }
 
-    /// Transition: Running → ReadyForReview. Embeds artifact metadata,
+    /// Transition: Running → ReadyForReview with canonical review
     /// payload, and optionally the serialized EditProposal for restore.
+    /// Increments `snapshot_revision` exactly once.
     pub fn record_ready_for_review(
         &self,
         metadata: ProductArtifactMetadata,
         payload: SmartRedactionReviewPayload,
+        proposal_payload: Option<Vec<u8>>,
         now: i64,
     ) -> Result<Self, TaskContractError> {
         if self.status != TaskStatus::Running {
@@ -750,27 +752,12 @@ impl ProductTaskSnapshot {
         next.status = TaskStatus::ReadyForReview;
         next.artifact_metadata = Some(metadata);
         next.pending_artifact_payload = Some(payload_bytes);
+        next.pending_proposal_payload = proposal_payload;
         next.snapshot_revision += 1;
         next.updated_at_unix_ms = now;
         Ok(next)
     }
 
-    /// Attach serialized EditProposal bytes to a ReadyForReview snapshot.
-    /// Used by the workbench to persist the full proposal for later restore.
-    /// Returns `Err` if the snapshot is not in ReadyForReview status.
-    pub fn with_proposal_payload(
-        &self,
-        proposal_payload: Vec<u8>,
-    ) -> Result<Self, TaskContractError> {
-        if self.status != TaskStatus::ReadyForReview {
-            return Err(TaskContractError::IllegalTransition {
-                from: self.status.clone(),
-            });
-        }
-        let mut next = self.clone();
-        next.pending_proposal_payload = Some(proposal_payload);
-        Ok(next)
-    }
 
     /// Transition: Running → terminal Failed status.
     pub fn record_terminal(
@@ -874,6 +861,7 @@ impl ProductTaskSnapshot {
         next.status = TaskStatus::Completed;
         next.review_receipt = Some(receipt);
         next.pending_artifact_payload = None;
+        next.pending_proposal_payload = None;
         next.snapshot_revision += 1;
         next.updated_at_unix_ms = now;
         Ok(next)
@@ -896,6 +884,7 @@ impl ProductTaskSnapshot {
         next.status = TaskStatus::Rejected;
         next.review_receipt = Some(receipt);
         next.pending_artifact_payload = None;
+        next.pending_proposal_payload = None;
         next.snapshot_revision += 1;
         next.updated_at_unix_ms = now;
         Ok(next)
@@ -1422,7 +1411,7 @@ mod tests {
         let running = running_task_fixture();
         let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
         running
-            .record_ready_for_review(meta, payload_fixture(), 30)
+            .record_ready_for_review(meta, payload_fixture(), None, 30)
             .unwrap()
     }
 
@@ -1556,7 +1545,7 @@ mod tests {
         let wrong_run = RunId::parse("run-99999999-9999-4999-8999-999999999999").unwrap();
         let meta = metadata_fixture(wrong_run, TaskAttemptId::new(1));
         assert!(matches!(
-            running.record_ready_for_review(meta, payload_fixture(), 30),
+            running.record_ready_for_review(meta, payload_fixture(), None, 30),
             Err(TaskContractError::RunMismatch { .. })
         ));
     }
@@ -1628,8 +1617,15 @@ mod tests {
 
     #[test]
     fn mark_stale_clears_pending_payload() {
-        let ready = ready_task_fixture()
-            .with_proposal_payload(b"proposal-bytes".to_vec())
+        let running = running_task_fixture();
+        let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
+        let ready = running
+            .record_ready_for_review(
+                meta,
+                payload_fixture(),
+                Some(b"proposal-bytes".to_vec()),
+                30,
+            )
             .unwrap();
         let stale = ready.mark_stale(40).unwrap();
         assert_eq!(stale.status(), TaskStatus::Stale);
@@ -1881,7 +1877,7 @@ mod tests {
         let created = created_task_fixture();
         let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
         assert!(matches!(
-            created.record_ready_for_review(meta, payload_fixture(), 20),
+            created.record_ready_for_review(meta, payload_fixture(), None, 20),
             Err(TaskContractError::IllegalTransition { .. })
         ));
     }
@@ -1944,7 +1940,7 @@ mod tests {
         // running_task_fixture uses attempt_id=1; pass metadata with attempt_id=99
         let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(99));
         assert!(matches!(
-            running.record_ready_for_review(meta, payload_fixture(), 30),
+            running.record_ready_for_review(meta, payload_fixture(), None, 30),
             Err(TaskContractError::ConflictingAttempt {
                 expected: _,
                 got: _

@@ -1059,11 +1059,15 @@ mod tests {
                 budget_dimensions: std::collections::BTreeMap::new(),
             },
         };
-        let ready = running
-            .record_ready_for_review(metadata, payload, 30)
-            .unwrap();
         let proposal_bytes = serde_json::to_vec(&workbench_proposal_with_candidate()).unwrap();
-        ready.with_proposal_payload(proposal_bytes).unwrap()
+        running
+            .record_ready_for_review(
+                metadata,
+                payload,
+                Some(proposal_bytes),
+                30,
+            )
+            .unwrap()
     }
 
     #[test]
