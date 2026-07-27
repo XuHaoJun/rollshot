@@ -12,13 +12,10 @@ fn valid_uuid_suffix(value: &str, prefix: &str) -> bool {
         return false;
     };
     suffix.len() == 36
-        && suffix
-            .bytes()
-            .enumerate()
-            .all(|(i, b)| match i {
-                8 | 13 | 18 | 23 => b == b'-',
-                _ => b.is_ascii_hexdigit(),
-            })
+        && suffix.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]

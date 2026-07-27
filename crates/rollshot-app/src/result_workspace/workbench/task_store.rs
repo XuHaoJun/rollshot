@@ -19,9 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tracing::warn;
 
-use rollshot_agent::product_task::{
-    ProductTaskId, ProductTaskSnapshot, SourceBinding, TaskStatus,
-};
+use rollshot_agent::product_task::{ProductTaskId, ProductTaskSnapshot, SourceBinding, TaskStatus};
 
 // ============================================================================
 // Constants
@@ -179,8 +177,7 @@ impl TaskStore {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ =
-                    fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600));
+                let _ = fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600));
             }
         }
 
@@ -214,28 +211,18 @@ impl TaskStore {
 
         // Must start with task- prefix and end with .json-compatible suffix.
         if !id.starts_with(TASK_FILE_PREFIX) {
-            return Err(TaskStoreError::UnsafePath {
-                id: id.to_owned(),
-            });
+            return Err(TaskStoreError::UnsafePath { id: id.to_owned() });
         }
 
         // Reject path separators, null bytes, and .. sequences.
-        if id.contains('/')
-            || id.contains('\\')
-            || id.contains('\0')
-            || id.contains("..")
-        {
-            return Err(TaskStoreError::UnsafePath {
-                id: id.to_owned(),
-            });
+        if id.contains('/') || id.contains('\\') || id.contains('\0') || id.contains("..") {
+            return Err(TaskStoreError::UnsafePath { id: id.to_owned() });
         }
 
         // The suffix after "task-" must be exactly 36 characters (UUID format).
         let suffix = &id[TASK_FILE_PREFIX.len()..];
         if suffix.len() != 36 {
-            return Err(TaskStoreError::UnsafePath {
-                id: id.to_owned(),
-            });
+            return Err(TaskStoreError::UnsafePath { id: id.to_owned() });
         }
         // Validate UUID character set: hex digits and dashes at positions 8,13,18,23.
         for (i, b) in suffix.bytes().enumerate() {
@@ -244,9 +231,7 @@ impl TaskStore {
                 _ => b.is_ascii_hexdigit(),
             };
             if !valid {
-                return Err(TaskStoreError::UnsafePath {
-                    id: id.to_owned(),
-                });
+                return Err(TaskStoreError::UnsafePath { id: id.to_owned() });
             }
         }
 
@@ -254,23 +239,17 @@ impl TaskStore {
     }
 
     /// Validate the on-disk filename matches the expected `<task-id>.json`.
-    fn validate_filename(
-        path: &Path,
-        expected_id: &str,
-    ) -> Result<(), TaskStoreError> {
-        let filename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| TaskStoreError::UnsafePath {
+    fn validate_filename(path: &Path, expected_id: &str) -> Result<(), TaskStoreError> {
+        let filename = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+            TaskStoreError::UnsafePath {
                 id: format!("{}", path.display()),
-            })?;
+            }
+        })?;
 
         let expected_filename = format!("{expected_id}{TASK_FILE_SUFFIX}");
         if filename != expected_filename {
             return Err(TaskStoreError::UnsafePath {
-                id: format!(
-                    "filename mismatch: expected {expected_filename}, got {filename}"
-                ),
+                id: format!("filename mismatch: expected {expected_filename}, got {filename}"),
             });
         }
 
@@ -279,10 +258,7 @@ impl TaskStore {
 
     /// Validate file metadata: must be a regular file, not a symlink,
     /// and within size bounds.
-    fn validate_file_meta(
-        path: &Path,
-        check_size: bool,
-    ) -> Result<Option<usize>, TaskStoreError> {
+    fn validate_file_meta(path: &Path, check_size: bool) -> Result<Option<usize>, TaskStoreError> {
         let meta = fs::symlink_metadata(path).map_err(|e| TaskStoreError::Io {
             category: "stat".to_owned(),
             source: e,
@@ -348,11 +324,10 @@ impl TaskStore {
         })?;
 
         // Deserialize with bounded Debug for errors.
-        let snapshot: ProductTaskSnapshot =
-            serde_json::from_slice(&bytes).map_err(|e| {
-                let reason = truncate_error(&e.to_string());
-                TaskStoreError::Corrupt { reason }
-            })?;
+        let snapshot: ProductTaskSnapshot = serde_json::from_slice(&bytes).map_err(|e| {
+            let reason = truncate_error(&e.to_string());
+            TaskStoreError::Corrupt { reason }
+        })?;
 
         // Validate schema version.
         if snapshot.store_schema_version() > 1 {
@@ -391,10 +366,8 @@ impl TaskStore {
         snapshot: &ProductTaskSnapshot,
         failpoint: Option<Failpoint>,
     ) -> Result<StoreCommitOutcome, TaskStoreError> {
-        let bytes = serde_json::to_vec_pretty(snapshot).map_err(|e| {
-            TaskStoreError::PreCommit {
-                reason: format!("serialize: {}", truncate_error(&e.to_string())),
-            }
+        let bytes = serde_json::to_vec_pretty(snapshot).map_err(|e| TaskStoreError::PreCommit {
+            reason: format!("serialize: {}", truncate_error(&e.to_string())),
         })?;
 
         if bytes.len() > MAX_FILE_BYTES {
@@ -408,10 +381,9 @@ impl TaskStore {
 
         // Write temp file.
         {
-            let mut file =
-                fs::File::create(&tmp).map_err(|e| TaskStoreError::PreCommit {
-                    reason: format!("temp create: {}", e),
-                })?;
+            let mut file = fs::File::create(&tmp).map_err(|e| TaskStoreError::PreCommit {
+                reason: format!("temp create: {}", e),
+            })?;
 
             // Failpoint: TempWrite.
             if failpoint == Some(Failpoint::TempWrite) {
@@ -422,9 +394,10 @@ impl TaskStore {
                 });
             }
 
-            file.write_all(&bytes).map_err(|e| TaskStoreError::PreCommit {
-                reason: format!("temp write: {}", e),
-            })?;
+            file.write_all(&bytes)
+                .map_err(|e| TaskStoreError::PreCommit {
+                    reason: format!("temp write: {}", e),
+                })?;
 
             // Failpoint: FileSync.
             if failpoint == Some(Failpoint::FileSync) {
@@ -555,10 +528,7 @@ impl TaskStore {
     }
 
     /// Load a task snapshot by ID.
-    pub fn load(
-        &self,
-        task_id: &ProductTaskId,
-    ) -> Result<ProductTaskSnapshot, TaskStoreError> {
+    pub fn load(&self, task_id: &ProductTaskId) -> Result<ProductTaskSnapshot, TaskStoreError> {
         self.read_snapshot(task_id)
     }
 
@@ -579,14 +549,14 @@ impl TaskStore {
         let path = self.task_path(task_id)?;
 
         // Acquire exclusive lock.
-        let lock_file =
-            fs::File::open(&self.lock_path).map_err(|e| TaskStoreError::Io {
-                category: "open_lock".to_owned(),
-                source: e,
-            })?;
-        lock_file
-            .lock()
-            .map_err(|e| TaskStoreError::Io { category: "lock".to_owned(), source: e })?;
+        let lock_file = fs::File::open(&self.lock_path).map_err(|e| TaskStoreError::Io {
+            category: "open_lock".to_owned(),
+            source: e,
+        })?;
+        lock_file.lock().map_err(|e| TaskStoreError::Io {
+            category: "lock".to_owned(),
+            source: e,
+        })?;
 
         // Load current snapshot from disk.
         let current = match self.read_snapshot(task_id) {
@@ -687,11 +657,7 @@ impl TaskStore {
                         // Re-read to confirm current matches.
                         if let Ok(current) = self.read_snapshot(&task_id) {
                             if current == snapshot {
-                                if let Err(e) = self.atomic_write(
-                                    &path,
-                                    &reconciled,
-                                    None,
-                                ) {
+                                if let Err(e) = self.atomic_write(&path, &reconciled, None) {
                                     warn!(error = %e, task_id = task_id.as_str(), "reconcile interrupted: atomic_write failed");
                                 }
                             }
@@ -722,8 +688,7 @@ impl TaskStore {
                 }
                 TaskStatus::ReadyForReview => {
                     // Skip tasks with completely unrelated base images.
-                    if snapshot.source_binding().base_image_sha256()
-                        != binding.base_image_sha256()
+                    if snapshot.source_binding().base_image_sha256() != binding.base_image_sha256()
                     {
                         continue;
                     }
@@ -735,21 +700,16 @@ impl TaskStore {
                     {
                         // CAS mark stale.
                         if let Ok(stale) = snapshot.mark_stale(now) {
-                            let lock_file =
-                                match fs::File::open(&self.lock_path) {
-                                    Ok(f) => f,
-                                    Err(_) => continue,
-                                };
+                            let lock_file = match fs::File::open(&self.lock_path) {
+                                Ok(f) => f,
+                                Err(_) => continue,
+                            };
                             if lock_file.lock().is_err() {
                                 continue;
                             }
                             if let Ok(current) = self.read_snapshot(&task_id) {
                                 if current == snapshot {
-                                    if let Err(e) = self.atomic_write(
-                                        &path,
-                                        &stale,
-                                        None,
-                                    ) {
+                                    if let Err(e) = self.atomic_write(&path, &stale, None) {
                                         warn!(error = %e, task_id = task_id.as_str(), "mark stale: atomic_write failed");
                                     }
                                 }
@@ -763,9 +723,7 @@ impl TaskStore {
                     match &newest_ready {
                         None => newest_ready = Some(snapshot),
                         Some(existing) => {
-                            if snapshot.updated_at_unix_ms()
-                                > existing.updated_at_unix_ms()
-                            {
+                            if snapshot.updated_at_unix_ms() > existing.updated_at_unix_ms() {
                                 newest_ready = Some(snapshot);
                             }
                         }
@@ -781,11 +739,10 @@ impl TaskStore {
     fn sorted_task_entries(&self) -> Result<Vec<fs::DirEntry>, TaskStoreError> {
         let mut entries: Vec<fs::DirEntry> = Vec::new();
 
-        let dir_iter =
-            fs::read_dir(&self.tasks_dir).map_err(|e| TaskStoreError::Io {
-                category: "read_dir".to_owned(),
-                source: e,
-            })?;
+        let dir_iter = fs::read_dir(&self.tasks_dir).map_err(|e| TaskStoreError::Io {
+            category: "read_dir".to_owned(),
+            source: e,
+        })?;
 
         for entry in dir_iter {
             let entry = match entry {
@@ -806,17 +763,13 @@ impl TaskStore {
             }
 
             // Only consider task files.
-            if filename.starts_with(TASK_FILE_PREFIX)
-                && filename.ends_with(TASK_FILE_SUFFIX)
-            {
+            if filename.starts_with(TASK_FILE_PREFIX) && filename.ends_with(TASK_FILE_SUFFIX) {
                 entries.push(entry);
             }
         }
 
         // Sort deterministically by filename.
-        entries.sort_by(|a, b| {
-            a.file_name().cmp(&b.file_name())
-        });
+        entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
 
         Ok(entries)
     }
@@ -862,13 +815,12 @@ fn truncate_error(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rollshot_agent::product_task::{
-        ArtifactId, ArtifactKind, ArtifactRevision, PayloadMode,
-        PayloadConfigV1, PayloadProposalV1, PayloadSourceV1, PayloadDryRunV1,
-        ProductArtifactMetadata, RunConfigFingerprintV1, SmartRedactionReviewPayload,
-        TaskAttempt, TaskAttemptId, TaskKind, TaskTerminal,
-    };
     use rollshot_agent::domain::RunId;
+    use rollshot_agent::product_task::{
+        ArtifactId, ArtifactKind, ArtifactRevision, PayloadConfigV1, PayloadDryRunV1, PayloadMode,
+        PayloadProposalV1, PayloadSourceV1, ProductArtifactMetadata, RunConfigFingerprintV1,
+        SmartRedactionReviewPayload, TaskAttempt, TaskAttemptId, TaskKind, TaskTerminal,
+    };
     use sha2::{Digest, Sha256};
     use std::collections::BTreeMap;
 
@@ -893,13 +845,7 @@ mod tests {
     }
 
     fn source_binding_fixture() -> SourceBinding {
-        SourceBinding::new(
-            [1u8; 32],
-            [2u8; 32],
-            0,
-            "preset-001".to_owned(),
-            None,
-        )
+        SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None)
     }
 
     fn attempt_fixture() -> TaskAttempt {
@@ -913,8 +859,7 @@ mod tests {
                 validation_summary: "all_valid".to_owned(),
             },
             proposal: PayloadProposalV1 {
-                proposal_id: "proposal-00000000-0000-4000-8000-000000000001"
-                    .to_owned(),
+                proposal_id: "proposal-00000000-0000-4000-8000-000000000001".to_owned(),
                 candidate_count: 3,
             },
             dry_run: PayloadDryRunV1 {
@@ -936,13 +881,10 @@ mod tests {
         }
     }
 
-    fn metadata_fixture(
-        run_id: RunId,
-        attempt_id: TaskAttemptId,
-    ) -> ProductArtifactMetadata {
+    fn metadata_fixture(run_id: RunId, attempt_id: TaskAttemptId) -> ProductArtifactMetadata {
         let payload = payload_fixture();
-        let payload_bytes = rollshot_agent::product_task::canonical_payload_bytes(&payload)
-            .unwrap();
+        let payload_bytes =
+            rollshot_agent::product_task::canonical_payload_bytes(&payload).unwrap();
         let payload_sha = {
             let hash = Sha256::digest(&payload_bytes);
             hash.iter().map(|b| format!("{b:02x}")).collect::<String>()
@@ -959,8 +901,7 @@ mod tests {
                 m
             },
         };
-        let config_digest =
-            rollshot_agent::product_task::canonical_config_digest(&config).unwrap();
+        let config_digest = rollshot_agent::product_task::canonical_config_digest(&config).unwrap();
 
         ProductArtifactMetadata::new(
             artifact_id_fixture(),
@@ -1001,7 +942,8 @@ mod tests {
     fn ready_task_fixture() -> ProductTaskSnapshot {
         let running = running_task_fixture();
         let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
-        running.record_ready_for_review(meta, payload_fixture(), 30)
+        running
+            .record_ready_for_review(meta, payload_fixture(), 30)
             .unwrap()
     }
 
@@ -1167,7 +1109,10 @@ mod tests {
         // It may succeed or fail deserialization depending on content,
         // but it must NOT be rejected as too large.
         let result = store.load(expected.task_id());
-        assert!(!matches!(result, Err(TaskStoreError::SnapshotTooLarge { .. })));
+        assert!(!matches!(
+            result,
+            Err(TaskStoreError::SnapshotTooLarge { .. })
+        ));
     }
 
     #[test]
@@ -1193,8 +1138,7 @@ mod tests {
 
         // Overwrite with a file that has schema_version = 99.
         let path = store.task_path(expected.task_id()).unwrap();
-        let mut raw: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let mut raw: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         raw["store_schema_version"] = serde_json::json!(99);
         fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
 
@@ -1246,11 +1190,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let (store, _dir) = store();
         let agent_tasks = store.config_dir().join("agent-tasks");
-        let mode = fs::metadata(&agent_tasks)
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
+        let mode = fs::metadata(&agent_tasks).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700);
     }
 
@@ -1262,11 +1202,7 @@ mod tests {
         let expected = running_task_fixture();
         store.create(&expected).unwrap();
         let path = store.task_path(expected.task_id()).unwrap();
-        let mode = fs::metadata(&path)
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
     }
 
@@ -1285,10 +1221,7 @@ mod tests {
         // that passes UUID validation but has unsafe path components.
         // Since ProductTaskId validates the UUID strictly, we test
         // the task_path validation directly.
-        let valid_id = ProductTaskId::parse(
-            "task-00000000-0000-4000-8000-000000000099",
-        )
-        .unwrap();
+        let valid_id = ProductTaskId::parse("task-00000000-0000-4000-8000-000000000099").unwrap();
         // This should succeed (valid ID).
         assert!(store.task_path(&valid_id).is_ok());
     }
@@ -1296,10 +1229,7 @@ mod tests {
     #[test]
     fn not_found_returns_error() {
         let (store, _dir) = store();
-        let missing = ProductTaskId::parse(
-            "task-ffffffff-ffff-4fff-afff-ffffffffffff",
-        )
-        .unwrap();
+        let missing = ProductTaskId::parse("task-ffffffff-ffff-4fff-afff-ffffffffffff").unwrap();
         assert!(matches!(
             store.load(&missing),
             Err(TaskStoreError::NotFound { .. })
@@ -1388,10 +1318,8 @@ mod tests {
         let (store, _dir) = store();
         // Create many tasks.
         for i in 1..=50 {
-            let id = ProductTaskId::parse(format!(
-                "task-00000000-0000-4000-8000-{i:012x}"
-            ))
-            .unwrap();
+            let id =
+                ProductTaskId::parse(format!("task-00000000-0000-4000-8000-{i:012x}")).unwrap();
             let task = ProductTaskSnapshot::new(
                 id,
                 TaskKind::SmartRedactionAuthor,
@@ -1464,7 +1392,7 @@ mod tests {
 
         // Same base image, different annotation-state.
         let new_binding = SourceBinding::new(
-            [1u8; 32], // same base image
+            [1u8; 32],  // same base image
             [99u8; 32], // different annotation state
             1,
             "preset-001".to_owned(),
@@ -1492,9 +1420,7 @@ mod tests {
             None,
         );
 
-        let result = store
-            .reconcile_for_source(&unrelated_binding, 100)
-            .unwrap();
+        let result = store.reconcile_for_source(&unrelated_binding, 100).unwrap();
         // Unrelated base image — task is not considered.
         assert!(result.is_none());
         // And it's not marked stale.
@@ -1507,10 +1433,7 @@ mod tests {
         let (store, _dir) = store();
 
         // Create an older ready task.
-        let id1 = ProductTaskId::parse(
-            "task-00000000-0000-4000-8000-000000000010",
-        )
-        .unwrap();
+        let id1 = ProductTaskId::parse("task-00000000-0000-4000-8000-000000000010").unwrap();
         let ready1 = {
             let created = ProductTaskSnapshot::new(
                 id1.clone(),
@@ -1519,8 +1442,7 @@ mod tests {
                 10,
             )
             .unwrap();
-            let attempt =
-                TaskAttempt::new(TaskAttemptId::new(1), run_id_fixture(), 20);
+            let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id_fixture(), 20);
             let running = created.start_attempt(attempt, 20).unwrap();
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             running
@@ -1530,10 +1452,7 @@ mod tests {
         store.create_without_failpoint(&ready1).unwrap();
 
         // Create a newer ready task.
-        let id2 = ProductTaskId::parse(
-            "task-00000000-0000-4000-8000-000000000020",
-        )
-        .unwrap();
+        let id2 = ProductTaskId::parse("task-00000000-0000-4000-8000-000000000020").unwrap();
         let ready2 = {
             let created = ProductTaskSnapshot::new(
                 id2.clone(),
@@ -1559,9 +1478,7 @@ mod tests {
         store.create_without_failpoint(&ready2).unwrap();
 
         let binding = source_binding_fixture();
-        let result = store
-            .reconcile_for_source(&binding, 200)
-            .unwrap();
+        let result = store.reconcile_for_source(&binding, 200).unwrap();
         assert!(result.is_some());
         // The newer task should be returned.
         assert_eq!(
@@ -1597,11 +1514,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let (store, _dir) = store();
         let lock_path = store.config_dir().join("agent-tasks").join(".lock");
-        let mode = fs::metadata(&lock_path)
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
+        let mode = fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
     }
 }

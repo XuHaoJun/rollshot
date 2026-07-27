@@ -792,8 +792,8 @@ async fn persist_terminal_outcome(
 ) -> Option<String> {
     use rollshot_agent::driver::RunTerminalState;
     use rollshot_agent::product_task::{
-        ArtifactId, ArtifactKind, ArtifactRevision, ProductArtifactMetadata,
-        SourceBinding, TaskTerminal,
+        ArtifactId, ArtifactKind, ArtifactRevision, ProductArtifactMetadata, SourceBinding,
+        TaskTerminal,
     };
 
     let Some(store) = task_store else { return None };
@@ -813,13 +813,13 @@ async fn persist_terminal_outcome(
                 *content_binding.annotation_state_digest(),
                 content_binding.state_id(),
                 current.source_binding().preset_id().to_owned(),
-                current.source_binding().active_preset_revision_id().map(String::from),
+                current
+                    .source_binding()
+                    .active_preset_revision_id()
+                    .map(String::from),
             );
-            let artifact_id = ArtifactId::parse(format!(
-                "artifact-{}",
-                uuid::Uuid::new_v4()
-            ))
-            .expect("v4 UUID is valid");
+            let artifact_id = ArtifactId::parse(format!("artifact-{}", uuid::Uuid::new_v4()))
+                .expect("v4 UUID is valid");
             let metadata = ProductArtifactMetadata::new(
                 artifact_id,
                 ArtifactRevision::new(1),
@@ -867,12 +867,10 @@ async fn persist_terminal_outcome(
                 Ok(s) => {
                     // Store serialized proposal for later restore.
                     match serde_json::to_vec(&ready.proposal) {
-                        Ok(proposal_bytes) => {
-                            match s.with_proposal_payload(proposal_bytes) {
-                                Ok(s) => s,
-                                Err(e) => return Some(format!("attach proposal: {e}")),
-                            }
-                        }
+                        Ok(proposal_bytes) => match s.with_proposal_payload(proposal_bytes) {
+                            Ok(s) => s,
+                            Err(e) => return Some(format!("attach proposal: {e}")),
+                        },
                         Err(e) => return Some(format!("serialize proposal: {e}")),
                     }
                 }
@@ -888,9 +886,7 @@ async fn persist_terminal_outcome(
                 },
                 RunTerminalState::SourceValidationFailure => TaskTerminal::SourceValidationFailure,
                 RunTerminalState::RuntimeFailure => TaskTerminal::RuntimeFailure,
-                RunTerminalState::AgentProtocolFailure { .. } => {
-                    TaskTerminal::AgentProtocolFailure
-                }
+                RunTerminalState::AgentProtocolFailure { .. } => TaskTerminal::AgentProtocolFailure,
                 RunTerminalState::ProviderFailure { .. } => TaskTerminal::ProviderFailure,
                 RunTerminalState::ReadyForReview(_) => unreachable!(),
             };
@@ -903,10 +899,8 @@ async fn persist_terminal_outcome(
 
     let store = store.clone();
     let expected = current.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        store.compare_and_swap(&expected, &next)
-    })
-    .await;
+    let result =
+        tokio::task::spawn_blocking(move || store.compare_and_swap(&expected, &next)).await;
     match result {
         Ok(Ok(_)) => None,
         Ok(Err(e)) => Some(format!("persist terminal: {e}")),
@@ -2647,9 +2641,7 @@ mod reducer_tests {
             Message::Workbench(WorkbenchMessage::RunEvent {
                 task_id: tid.clone(),
                 run_id: rid.clone(),
-                event: RunEvent::TextChunk {
-                    text: "hel".into(),
-                },
+                event: RunEvent::TextChunk { text: "hel".into() },
             }),
         );
         let _ = update(
@@ -2657,9 +2649,7 @@ mod reducer_tests {
             Message::Workbench(WorkbenchMessage::RunEvent {
                 task_id: tid.clone(),
                 run_id: rid.clone(),
-                event: RunEvent::TextChunk {
-                    text: "lo".into(),
-                },
+                event: RunEvent::TextChunk { text: "lo".into() },
             }),
         );
         // Terminal with authoritative full text.
@@ -2770,10 +2760,17 @@ mod reducer_tests {
         }
     }
 
-    fn test_run_ids() -> (rollshot_agent::product_task::ProductTaskId, rollshot_agent::domain::RunId) {
+    fn test_run_ids() -> (
+        rollshot_agent::product_task::ProductTaskId,
+        rollshot_agent::domain::RunId,
+    ) {
         (
-            rollshot_agent::product_task::ProductTaskId::parse("task-00000000-0000-4000-8000-000000000001").unwrap(),
-            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+            rollshot_agent::product_task::ProductTaskId::parse(
+                "task-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap(),
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap(),
         )
     }
 
@@ -3009,10 +3006,9 @@ mod reducer_tests {
             "task-00000000-0000-4000-8000-000000000099",
         )
         .unwrap();
-        let current_run = rollshot_agent::domain::RunId::parse(
-            "run-00000000-0000-4000-8000-000000000099",
-        )
-        .unwrap();
+        let current_run =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000099")
+                .unwrap();
         wb_mut(&mut ws).run_state = super::super::RunState::Running {
             cancellation: rollshot_agent::runtime::RunCancellation::new(),
             parent_revision_id: None,
@@ -3026,10 +3022,9 @@ mod reducer_tests {
             "task-00000000-0000-4000-8000-000000000001",
         )
         .unwrap();
-        let stale_run = rollshot_agent::domain::RunId::parse(
-            "run-00000000-0000-4000-8000-000000000001",
-        )
-        .unwrap();
+        let stale_run =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap();
 
         // Stale RunEvent should be ignored.
         let _ = update(
@@ -3072,9 +3067,7 @@ mod reducer_tests {
             Message::Workbench(WorkbenchMessage::RunTerminal {
                 task_id: stale_task,
                 run_id: stale_run,
-                terminal: rollshot_agent::driver::RunTerminalState::ReadyForReview(
-                    Box::new(ready),
-                ),
+                terminal: rollshot_agent::driver::RunTerminalState::ReadyForReview(Box::new(ready)),
             }),
         );
         assert!(
@@ -3123,10 +3116,10 @@ mod reducer_tests {
 
     #[test]
     fn running_is_persisted_before_setup() {
+        use super::super::task_store::TaskStore;
         use rollshot_agent::product_task::{
             ProductTaskSnapshot, SourceBinding, TaskAttempt, TaskAttemptId, TaskKind,
         };
-        use super::super::task_store::TaskStore;
 
         let tmp = tempfile::tempdir().unwrap();
         let store = TaskStore::open(tmp.path()).unwrap();
@@ -3134,10 +3127,9 @@ mod reducer_tests {
             "task-00000000-0000-4000-8000-000000000001",
         )
         .unwrap();
-        let run_id = rollshot_agent::domain::RunId::parse(
-            "run-00000000-0000-4000-8000-000000000001",
-        )
-        .unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap();
 
         // Simulate what the stream does: create a running snapshot.
         let now = chrono::Utc::now().timestamp_millis();
@@ -3157,19 +3149,22 @@ mod reducer_tests {
 
         // Verify: running snapshot exists in store before any setup.
         let loaded = store.load(&task_id).unwrap();
-        assert_eq!(loaded.status(), rollshot_agent::product_task::TaskStatus::Running);
+        assert_eq!(
+            loaded.status(),
+            rollshot_agent::product_task::TaskStatus::Running
+        );
         assert_eq!(loaded.task_id(), &task_id);
     }
 
     #[test]
     fn ready_artifact_precedes_correlated_terminal() {
-        use rollshot_agent::product_task::{
-            ArtifactId, ArtifactKind, ArtifactRevision, ProductArtifactMetadata,
-            ProductTaskSnapshot, PayloadConfigV1, PayloadDryRunV1, PayloadProposalV1,
-            PayloadSourceV1, SmartRedactionReviewPayload, SourceBinding,
-            TaskAttempt, TaskAttemptId, TaskKind, TaskStatus,
-        };
         use super::super::task_store::TaskStore;
+        use rollshot_agent::product_task::{
+            ArtifactId, ArtifactKind, ArtifactRevision, PayloadConfigV1, PayloadDryRunV1,
+            PayloadProposalV1, PayloadSourceV1, ProductArtifactMetadata, ProductTaskSnapshot,
+            SmartRedactionReviewPayload, SourceBinding, TaskAttempt, TaskAttemptId, TaskKind,
+            TaskStatus,
+        };
 
         let tmp = tempfile::tempdir().unwrap();
         let store = TaskStore::open(tmp.path()).unwrap();
@@ -3177,10 +3172,9 @@ mod reducer_tests {
             "task-00000000-0000-4000-8000-000000000002",
         )
         .unwrap();
-        let run_id = rollshot_agent::domain::RunId::parse(
-            "run-00000000-0000-4000-8000-000000000002",
-        )
-        .unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000002")
+                .unwrap();
 
         // Create and persist running snapshot.
         let now = chrono::Utc::now().timestamp_millis();
@@ -3237,22 +3231,27 @@ mod reducer_tests {
                 budget_dimensions: std::collections::BTreeMap::new(),
             },
         };
-        let ready = running.record_ready_for_review(metadata, payload, now2).unwrap();
+        let ready = running
+            .record_ready_for_review(metadata, payload, now2)
+            .unwrap();
         store.compare_and_swap(&running, &ready).unwrap();
 
         // Verify: artifact is in store (ReadyForReview persisted before terminal).
         let loaded = store.load(&task_id).unwrap();
         assert_eq!(loaded.status(), TaskStatus::ReadyForReview);
         assert!(loaded.artifact_metadata().is_some(), "artifact persisted");
-        assert!(loaded.pending_artifact_payload().is_some(), "payload persisted");
+        assert!(
+            loaded.pending_artifact_payload().is_some(),
+            "payload persisted"
+        );
     }
 
     #[test]
     fn store_precommit_failure_delivers_no_proposal() {
+        use super::super::task_store::{Failpoint, TaskStore};
         use rollshot_agent::product_task::{
             ProductTaskSnapshot, SourceBinding, TaskAttempt, TaskAttemptId, TaskKind,
         };
-        use super::super::task_store::{Failpoint, TaskStore};
 
         let tmp = tempfile::tempdir().unwrap();
         let store = TaskStore::open_with_failpoint(tmp.path(), Failpoint::Rename).unwrap();
@@ -3260,10 +3259,9 @@ mod reducer_tests {
             "task-00000000-0000-4000-8000-000000000003",
         )
         .unwrap();
-        let run_id = rollshot_agent::domain::RunId::parse(
-            "run-00000000-0000-4000-8000-000000000003",
-        )
-        .unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000003")
+                .unwrap();
 
         // Create running snapshot (without failpoint).
         let now = chrono::Utc::now().timestamp_millis();
@@ -3282,7 +3280,10 @@ mod reducer_tests {
         // Attempt CAS with failpoint → should fail.
         let now2 = now + 1;
         let terminal_snap = running
-            .record_terminal(rollshot_agent::product_task::TaskTerminal::RuntimeFailure, now2)
+            .record_terminal(
+                rollshot_agent::product_task::TaskTerminal::RuntimeFailure,
+                now2,
+            )
             .unwrap();
         let result = store.compare_and_swap(&running, &terminal_snap);
         assert!(result.is_err(), "CAS must fail with rename failpoint");
@@ -3298,11 +3299,11 @@ mod reducer_tests {
 
     #[tokio::test]
     async fn setup_failure_persists_terminal() {
-        use rollshot_agent::product_task::{
-            ProductTaskSnapshot, SourceBinding, TaskAttempt, TaskAttemptId,
-            TaskKind, TaskStatus, TaskTerminal,
-        };
         use super::super::task_store::TaskStore;
+        use rollshot_agent::product_task::{
+            ProductTaskSnapshot, SourceBinding, TaskAttempt, TaskAttemptId, TaskKind, TaskStatus,
+            TaskTerminal,
+        };
 
         let tmp = tempfile::tempdir().unwrap();
         let store = TaskStore::open(tmp.path()).unwrap();
@@ -3310,10 +3311,9 @@ mod reducer_tests {
             "task-00000000-0000-4000-8000-000000000004",
         )
         .unwrap();
-        let run_id = rollshot_agent::domain::RunId::parse(
-            "run-00000000-0000-4000-8000-000000000004",
-        )
-        .unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000004")
+                .unwrap();
 
         // Create and persist running snapshot with real source binding.
         let now = chrono::Utc::now().timestamp_millis();
@@ -3343,7 +3343,9 @@ mod reducer_tests {
         let loaded = store_arc.load(&task_id).unwrap();
         assert_eq!(
             loaded.status(),
-            TaskStatus::Failed { terminal: TaskTerminal::RuntimeFailure },
+            TaskStatus::Failed {
+                terminal: TaskTerminal::RuntimeFailure
+            },
         );
     }
 
@@ -3363,10 +3365,9 @@ mod reducer_tests {
             "task-00000000-0000-4000-8000-000000000099",
         )
         .unwrap();
-        let run_id = rollshot_agent::domain::RunId::parse(
-            "run-00000000-0000-4000-8000-000000000099",
-        )
-        .unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000099")
+                .unwrap();
 
         // RunEvent must be rejected when Terminal.
         let _ = update(
@@ -3411,10 +3412,9 @@ mod reducer_tests {
             "task-00000000-0000-4000-8000-000000000099",
         )
         .unwrap();
-        let run_id = rollshot_agent::domain::RunId::parse(
-            "run-00000000-0000-4000-8000-000000000099",
-        )
-        .unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000099")
+                .unwrap();
 
         // All run messages must be rejected when Idle.
         let _ = update(
@@ -3451,9 +3451,7 @@ mod reducer_tests {
             Message::Workbench(WorkbenchMessage::RunTerminal {
                 task_id,
                 run_id,
-                terminal: rollshot_agent::driver::RunTerminalState::ReadyForReview(
-                    Box::new(ready),
-                ),
+                terminal: rollshot_agent::driver::RunTerminalState::ReadyForReview(Box::new(ready)),
             }),
         );
         assert!(
@@ -3464,9 +3462,7 @@ mod reducer_tests {
 
     // -- Restore tests (Task 5) --------------------------------------------
 
-    use rollshot_agent::product_task::{
-        SourceBinding as Sb, TaskKind as Tk, TaskStatus as Ts,
-    };
+    use rollshot_agent::product_task::{SourceBinding as Sb, TaskKind as Tk, TaskStatus as Ts};
 
     /// Create a ReadyForReview snapshot with a serialized EditProposal.
     fn ready_snapshot_with_proposal(
@@ -3474,16 +3470,14 @@ mod reducer_tests {
         source_binding: Sb,
     ) -> rollshot_agent::product_task::ProductTaskSnapshot {
         use rollshot_agent::product_task::{
-            ArtifactId, ArtifactKind, ArtifactRevision, ProductArtifactMetadata,
-            ProductTaskSnapshot, PayloadConfigV1, PayloadDryRunV1,
-            PayloadProposalV1, PayloadSourceV1, SmartRedactionReviewPayload,
-            TaskAttempt, TaskAttemptId,
+            ArtifactId, ArtifactKind, ArtifactRevision, PayloadConfigV1, PayloadDryRunV1,
+            PayloadProposalV1, PayloadSourceV1, ProductArtifactMetadata, ProductTaskSnapshot,
+            SmartRedactionReviewPayload, TaskAttempt, TaskAttemptId,
         };
 
-        let run_id = rollshot_agent::domain::RunId::parse(
-            "run-00000000-0000-4000-8000-000000000001",
-        )
-        .unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap();
         let now = 1000i64;
 
         let snapshot = ProductTaskSnapshot::new(
@@ -3521,8 +3515,7 @@ mod reducer_tests {
                     },
                 },
             }],
-            confidence_summary:
-                rollshot_edit_proposal::ConfidenceSummary::from_confidences(&[0.9]),
+            confidence_summary: rollshot_edit_proposal::ConfidenceSummary::from_confidences(&[0.9]),
             rationale_summary: None,
             provenance: rollshot_edit_proposal::Provenance {
                 source: rollshot_edit_proposal::ProvenanceSource::Manual,
@@ -3569,7 +3562,9 @@ mod reducer_tests {
             },
         };
 
-        let ready = running.record_ready_for_review(metadata, payload, now + 2).unwrap();
+        let ready = running
+            .record_ready_for_review(metadata, payload, now + 2)
+            .unwrap();
         let proposal_bytes = serde_json::to_vec(&proposal).unwrap();
         ready.with_proposal_payload(proposal_bytes).unwrap()
     }
@@ -3598,9 +3593,7 @@ mod reducer_tests {
             let op_id = wb.restore_operation_id.next();
 
             // Simulate what reconcile_for_source returns.
-            let result = store_arc
-                .reconcile_for_source(&binding, 2000)
-                .unwrap();
+            let result = store_arc.reconcile_for_source(&binding, 2000).unwrap();
 
             let _ = update(
                 &mut ws,
@@ -3641,9 +3634,7 @@ mod reducer_tests {
 
         // Current source has a DIFFERENT base image but same state_id.
         let current_binding = Sb::new([99u8; 32], [2u8; 32], 0, "p".into(), None);
-        let result = store
-            .reconcile_for_source(&current_binding, 2000)
-            .unwrap();
+        let result = store.reconcile_for_source(&current_binding, 2000).unwrap();
 
         // reconcile_for_source returns None — unrelated image skipped.
         assert!(result.is_none(), "unrelated image must not be returned");
@@ -3674,9 +3665,7 @@ mod reducer_tests {
 
         // Current: base=[1], annotations=[99], state_id=0.
         let current_binding = Sb::new([1u8; 32], [99u8; 32], 0, "p".into(), None);
-        let result = store
-            .reconcile_for_source(&current_binding, 2000)
-            .unwrap();
+        let result = store.reconcile_for_source(&current_binding, 2000).unwrap();
 
         assert!(result.is_none(), "changed annotations must not restore");
         let loaded = store.load(&task_id).unwrap();
@@ -3691,9 +3680,7 @@ mod reducer_tests {
     fn running_becomes_interrupted_on_reconcile() {
         // 4. running/applying → interrupted on reconcile_for_source.
         use super::super::task_store::TaskStore;
-        use rollshot_agent::product_task::{
-            ProductTaskSnapshot, TaskAttempt, TaskAttemptId,
-        };
+        use rollshot_agent::product_task::{ProductTaskSnapshot, TaskAttempt, TaskAttemptId};
 
         let tmp = tempfile::tempdir().unwrap();
         let store = TaskStore::open(tmp.path()).unwrap();
@@ -3721,7 +3708,10 @@ mod reducer_tests {
 
         // Reconcile — running task becomes interrupted.
         let result = store.reconcile_for_source(&binding, 2000).unwrap();
-        assert!(result.is_none(), "interrupted task is not returned for restore");
+        assert!(
+            result.is_none(),
+            "interrupted task is not returned for restore"
+        );
 
         let loaded = store.load(&task_id).unwrap();
         assert_eq!(

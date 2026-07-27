@@ -22,13 +22,10 @@ fn valid_uuid_suffix(value: &str, prefix: &str) -> bool {
         return false;
     };
     suffix.len() == 36
-        && suffix
-            .bytes()
-            .enumerate()
-            .all(|(i, b)| match i {
-                8 | 13 | 18 | 23 => b == b'-',
-                _ => b.is_ascii_hexdigit(),
-            })
+        && suffix.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -578,7 +575,10 @@ mod tests {
 
     #[test]
     fn session_stores_completed_exchanges() {
-        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
+        let mut session = AgentSession::new(
+            SessionId::new(1),
+            RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+        );
         session.push_user("what is 2+2?".into());
         session.push_assistant("4".into()).unwrap();
         assert_eq!(session.exchanges().len(), 1);
@@ -588,14 +588,20 @@ mod tests {
 
     #[test]
     fn session_rejects_assistant_without_pending_user() {
-        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
+        let mut session = AgentSession::new(
+            SessionId::new(1),
+            RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+        );
         let result = session.push_assistant("hello".into());
         assert_eq!(result.unwrap_err(), SessionError::IncompleteTurn);
     }
 
     #[test]
     fn session_multiple_exchanges_in_order() {
-        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
+        let mut session = AgentSession::new(
+            SessionId::new(1),
+            RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+        );
         session.push_user("first".into());
         session.push_assistant("reply-1".into()).unwrap();
         session.push_user("second".into());
@@ -607,7 +613,10 @@ mod tests {
 
     #[test]
     fn session_debug_shows_exchanges() {
-        let mut session = AgentSession::new(SessionId::new(1), RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap());
+        let mut session = AgentSession::new(
+            SessionId::new(1),
+            RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+        );
         session.push_user("q".into());
         session.push_assistant("a".into()).unwrap();
         let dbg = format!("{session:?}");

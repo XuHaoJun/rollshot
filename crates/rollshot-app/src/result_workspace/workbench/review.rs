@@ -45,10 +45,7 @@ pub fn build_review_decision(
 
 /// Build a `LocalReviewDeltaV1` capturing the manual additions and
 /// modifications the user made to the proposal's candidates.
-fn build_local_delta(
-    proposal: &EditProposal,
-    review: &CandidateReview,
-) -> LocalReviewDeltaV1 {
+fn build_local_delta(proposal: &EditProposal, review: &CandidateReview) -> LocalReviewDeltaV1 {
     let (_, _, modified_pairs) = review.decision_sets();
     let mut moved_candidates = Vec::new();
     let mut manual_additions = Vec::new();
@@ -492,11 +489,7 @@ mod tests {
 
     fn review_all(proposal: &EditProposal) -> CandidateReview {
         CandidateReview::from_candidates(
-            &proposal
-                .candidates
-                .iter()
-                .map(|c| c.id)
-                .collect::<Vec<_>>(),
+            &proposal.candidates.iter().map(|c| c.id).collect::<Vec<_>>(),
         )
     }
 

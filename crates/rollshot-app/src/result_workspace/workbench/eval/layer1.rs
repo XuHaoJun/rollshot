@@ -60,10 +60,8 @@ pub(crate) async fn replay_full_loop(
     let tool_ctx = Arc::new(ToolContext::new_with_capability_handles(
         SessionId::new(1),
         RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
-        rollshot_edit_proposal::ProposalId::parse(
-            "proposal-00000000-0000-4000-8000-000000000001",
-        )
-        .unwrap(),
+        rollshot_edit_proposal::ProposalId::parse("proposal-00000000-0000-4000-8000-000000000001")
+            .unwrap(),
         binding,
         String::new(),
         rollshot_automation::ValidationLimits::default(),
