@@ -28,6 +28,7 @@ pub(crate) use view::view;
 
 use iced::widget::image::Handle as ImageHandle;
 use image::RgbaImage;
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use viewport::{display_downscale_scale, ViewportState, DEFAULT_MAX_TEXTURE_DIM};
@@ -124,6 +125,8 @@ pub struct ResultWorkspace {
     pub message: Option<InlineMessage>,
     pub pending_discard: Option<DiscardPrompt>,
     pub pending_unredacted_action: Option<secure_sharing::UnredactedAction>,
+    /// Cached SHA-256 digest of the source image bytes (immutable for the session).
+    pub base_image_digest: [u8; 32],
     /// Iced image handle built once. For oversized captures this is a
     /// downscaled display copy (spec §9.6); the document keeps the full source.
     pub image_handle: ImageHandle,
@@ -229,9 +232,17 @@ impl ResultWorkspace {
 
         let zoom = viewport::default_zoom(source_size);
 
+        let base_image_digest: [u8; 32] = {
+            let hash = Sha256::digest(document.image.source().as_raw());
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&hash);
+            out
+        };
+
         Self {
             pending_discard: None,
             pending_unredacted_action: None,
+            base_image_digest,
             editor: canvas::EditorState::new(
                 document.image.state_id(),
                 viewport::is_tall_image(source_size),

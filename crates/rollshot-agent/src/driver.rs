@@ -1753,9 +1753,25 @@ pub(crate) mod tests {
             1024 * 1024,
         );
         policy.proposal_limits.max_total_area_fraction = 0.5;
+        let binding = crate::product_task::DocumentContentBinding::new(
+            [1u8; 32],
+            &crate::product_task::AnnotationStateV1 {
+                width: 100,
+                height: 100,
+                state_id: 0,
+                annotations: vec![],
+            },
+            0,
+        )
+        .unwrap();
         Arc::new(ToolContext::new(
             SessionId::new(42),
             RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap(),
+            rollshot_edit_proposal::ProposalId::parse(
+                "proposal-00000000-0000-4000-8000-00000000002a",
+            )
+            .unwrap(),
+            binding,
             source.into(),
             rollshot_automation::ValidationLimits::default(),
             policy,
@@ -4644,9 +4660,25 @@ pub(crate) mod tests {
             policy.proposal_limits.max_total_area_fraction = 0.5;
 
             let cancel = RunCancellation::new();
+            let binding = crate::product_task::DocumentContentBinding::new(
+                [1u8; 32],
+                &crate::product_task::AnnotationStateV1 {
+                    width: 100,
+                    height: 100,
+                    state_id: 0,
+                    annotations: vec![],
+                },
+                0,
+            )
+            .unwrap();
             let ctx = Arc::new(ToolContext::new(
                 SessionId::new(42),
                 RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap(),
+                rollshot_edit_proposal::ProposalId::parse(
+                    "proposal-00000000-0000-4000-8000-00000000002a",
+                )
+                .unwrap(),
+                binding,
                 valid_source.into(),
                 rollshot_automation::ValidationLimits::default(),
                 policy,
@@ -4785,9 +4817,25 @@ pub(crate) mod tests {
             // Pre-validate a valid source, then replace with infinite loop.
             // The tool context binds to the run's single cancellation source.
             let valid_source = "function main(input) { return {candidates: []}; }";
+            let binding = crate::product_task::DocumentContentBinding::new(
+                [1u8; 32],
+                &crate::product_task::AnnotationStateV1 {
+                    width: 100,
+                    height: 100,
+                    state_id: 0,
+                    annotations: vec![],
+                },
+                0,
+            )
+            .unwrap();
             let ctx = Arc::new(ToolContext::new(
                 SessionId::new(1),
                 RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+                rollshot_edit_proposal::ProposalId::parse(
+                    "proposal-00000000-0000-4000-8000-000000000001",
+                )
+                .unwrap(),
+                binding,
                 valid_source.into(),
                 rollshot_automation::ValidationLimits::default(),
                 policy,

@@ -788,6 +788,10 @@ pub fn start_agent_run(
     let active_source = params.active_revision_source.clone().unwrap_or_default();
     let preset_store_root = params.preset_store_root.clone();
     let preset_id = params.preset_id.clone();
+    let task_id = params.task_id.clone();
+    let run_id = params.run_id.clone();
+    let proposal_id = params.proposal_id.clone();
+    let content_binding = params.content_binding.clone();
     let image = image.clone();
     let budget = budget.clone();
 
@@ -801,7 +805,11 @@ pub fn start_agent_run(
             Ok(bundle) => bundle,
             Err(e) => {
                 yield crate::result_workspace::Message::Workbench(
-                    super::WorkbenchMessage::RunFailed(e),
+                    super::WorkbenchMessage::RunFailed {
+                        task_id: task_id.clone(),
+                        run_id: run_id.clone(),
+                        error: e,
+                    },
                 );
                 return;
             }
@@ -810,7 +818,11 @@ pub fn start_agent_run(
             Ok(v) => v,
             Err(e) => {
                 yield crate::result_workspace::Message::Workbench(
-                    super::WorkbenchMessage::RunFailed(e),
+                    super::WorkbenchMessage::RunFailed {
+                        task_id: task_id.clone(),
+                        run_id: run_id.clone(),
+                        error: e,
+                    },
                 );
                 return;
             }
@@ -823,6 +835,8 @@ pub fn start_agent_run(
         let tool_ctx = Arc::new(rollshot_agent::tools::ToolContext::new_with_capability_handles(
             session_id,
             session.run_id.clone(),
+            proposal_id.clone(),
+            content_binding.clone(),
             active_source,
             validation_limits,
             policy,
@@ -847,7 +861,11 @@ pub fn start_agent_run(
             Ok(registry) => registry,
             Err(e) => {
                 yield crate::result_workspace::Message::Workbench(
-                    super::WorkbenchMessage::RunFailed(e),
+                    super::WorkbenchMessage::RunFailed {
+                        task_id: task_id.clone(),
+                        run_id: run_id.clone(),
+                        error: e,
+                    },
                 );
                 return;
             }
@@ -862,9 +880,13 @@ pub fn start_agent_run(
                     .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
                 {
                     yield crate::result_workspace::Message::Workbench(
-                        super::WorkbenchMessage::RunFailed(WorkbenchError::VisionPrepare {
-                            message: format!("png encode: {e}"),
-                        }),
+                        super::WorkbenchMessage::RunFailed {
+                            task_id: task_id.clone(),
+                            run_id: run_id.clone(),
+                            error: WorkbenchError::VisionPrepare {
+                                message: format!("png encode: {e}"),
+                            },
+                        },
                     );
                     return;
                 }
@@ -888,7 +910,11 @@ pub fn start_agent_run(
             Ok(input) => input,
             Err(_) => {
                 yield crate::result_workspace::Message::Workbench(
-                    super::WorkbenchMessage::RunFailed(WorkbenchError::RuntimeFailure),
+                    super::WorkbenchMessage::RunFailed {
+                        task_id: task_id.clone(),
+                        run_id: run_id.clone(),
+                        error: WorkbenchError::RuntimeFailure,
+                    },
                 );
                 return;
             }
@@ -909,12 +935,20 @@ pub fn start_agent_run(
 
         while let Some(event) = rx.recv().await {
             yield crate::result_workspace::Message::Workbench(
-                super::WorkbenchMessage::RunEvent(event),
+                super::WorkbenchMessage::RunEvent {
+                    task_id: task_id.clone(),
+                    run_id: run_id.clone(),
+                    event,
+                },
             );
         }
         if let Ok(terminal) = run_task.await {
             yield crate::result_workspace::Message::Workbench(
-                super::WorkbenchMessage::RunTerminal(terminal),
+                super::WorkbenchMessage::RunTerminal {
+                    task_id: task_id.clone(),
+                    run_id: run_id.clone(),
+                    terminal,
+                },
             );
         }
     };
@@ -957,7 +991,8 @@ mod tests {
             capability_handles: Default::default(),
         };
         let ctx = ProposalContext {
-            proposal_id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
+            proposal_id: ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000")
+                .unwrap(),
             base_document_state_id: 0,
             provenance: Provenance {
                 source: ProvenanceSource::Manual,
@@ -1421,10 +1456,27 @@ mod prepare_tests {
 
     fn tool_context_for_tests() -> std::sync::Arc<rollshot_agent::tools::ToolContext> {
         let cancel = rollshot_agent::runtime::RunCancellation::new();
+        let binding = rollshot_agent::product_task::DocumentContentBinding::new(
+            [1u8; 32],
+            &rollshot_agent::product_task::AnnotationStateV1 {
+                width: 100,
+                height: 100,
+                state_id: 0,
+                annotations: vec![],
+            },
+            0,
+        )
+        .unwrap();
         std::sync::Arc::new(
             rollshot_agent::tools::ToolContext::new_with_capability_handles(
                 rollshot_agent::domain::SessionId::new(1),
-                rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+                rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                    .unwrap(),
+                rollshot_edit_proposal::ProposalId::parse(
+                    "proposal-00000000-0000-4000-8000-000000000001",
+                )
+                .unwrap(),
+                binding,
                 String::new(),
                 rollshot_automation::ValidationLimits::default(),
                 rollshot_automation::ExecutionPolicy::smart_redaction_default(
@@ -1619,10 +1671,27 @@ function main(input) {
         let mut handles = std::collections::BTreeMap::new();
         handles.insert("mark".to_string(), "mark".to_string());
         let cancel = rollshot_agent::runtime::RunCancellation::new();
+        let binding = rollshot_agent::product_task::DocumentContentBinding::new(
+            [1u8; 32],
+            &rollshot_agent::product_task::AnnotationStateV1 {
+                width: 100,
+                height: 100,
+                state_id: 0,
+                annotations: vec![],
+            },
+            0,
+        )
+        .unwrap();
         let ctx = std::sync::Arc::new(
             rollshot_agent::tools::ToolContext::new_with_capability_handles(
                 rollshot_agent::domain::SessionId::new(1),
-                rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+                rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                    .unwrap(),
+                rollshot_edit_proposal::ProposalId::parse(
+                    "proposal-00000000-0000-4000-8000-000000000001",
+                )
+                .unwrap(),
+                binding,
                 String::new(),
                 rollshot_automation::ValidationLimits::default(),
                 rollshot_automation::ExecutionPolicy::smart_redaction_default(
@@ -1715,10 +1784,27 @@ function main(input) {
             &ocr_catalog,
         );
         let cancel = rollshot_agent::runtime::RunCancellation::new();
+        let binding = rollshot_agent::product_task::DocumentContentBinding::new(
+            [1u8; 32],
+            &rollshot_agent::product_task::AnnotationStateV1 {
+                width: 100,
+                height: 100,
+                state_id: 0,
+                annotations: vec![],
+            },
+            0,
+        )
+        .unwrap();
         let ctx = std::sync::Arc::new(
             rollshot_agent::tools::ToolContext::new_with_capability_handles(
                 rollshot_agent::domain::SessionId::new(1),
-                rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+                rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                    .unwrap(),
+                rollshot_edit_proposal::ProposalId::parse(
+                    "proposal-00000000-0000-4000-8000-000000000001",
+                )
+                .unwrap(),
+                binding,
                 String::new(),
                 rollshot_automation::ValidationLimits::default(),
                 rollshot_automation::ExecutionPolicy::smart_redaction_default(
@@ -1930,7 +2016,9 @@ mod reducer_tests {
             label: "agent".into(),
             rationale: None,
             provenance: Provenance {
-                source: ProvenanceSource::Agent { run_id: "run-00000000-0000-4000-8000-000000000007".to_string() },
+                source: ProvenanceSource::Agent {
+                    run_id: "run-00000000-0000-4000-8000-000000000007".to_string(),
+                },
             },
         }
     }
@@ -1978,6 +2066,14 @@ mod reducer_tests {
         use rollshot_agent::runtime::UsageSnapshot;
 
         let mut ws = ws_with_workbench();
+        let (tid, rid) = test_run_ids();
+        wb_mut(&mut ws).run_state = super::super::RunState::Running {
+            cancellation: rollshot_agent::runtime::RunCancellation::new(),
+            parent_revision_id: None,
+            revision_note: None,
+            task_id: tid.clone(),
+            run_id: rid.clone(),
+        };
         wb_mut(&mut ws).selected_candidate = Some(CandidateId(99));
         let p = proposal(vec![
             candidate(1, rect(10.0, 10.0, 50.0, 50.0)),
@@ -2012,9 +2108,11 @@ mod reducer_tests {
         };
         let _ = update(
             &mut ws,
-            Message::Workbench(WorkbenchMessage::RunTerminal(
-                RunTerminalState::ReadyForReview(Box::new(ready)),
-            )),
+            Message::Workbench(WorkbenchMessage::RunTerminal {
+                task_id: tid,
+                run_id: rid,
+                terminal: RunTerminalState::ReadyForReview(Box::new(ready)),
+            }),
         );
         let state = wb(&ws);
         assert!(state.pending_proposal.is_some(), "proposal populated");
@@ -2153,16 +2251,7 @@ mod reducer_tests {
     fn disclosure_cancelled_clears_pending_run_and_flag() {
         let mut ws = ws_with_workbench();
         wb_mut(&mut ws).disclosure_pending = true;
-        wb_mut(&mut ws).pending_run = Some(super::super::PendingRunParams {
-            user_message: "test".into(),
-            image_dims: (100, 100),
-            active_revision_source: None,
-            mode: super::super::RunKind::Author,
-            parent_revision_id: None,
-            revision_note: None,
-            preset_id: rollshot_preset::PresetId("workbench-draft".into()),
-            preset_store_root: std::path::PathBuf::from("/tmp/rollshot-test-presets"),
-        });
+        wb_mut(&mut ws).pending_run = Some(test_pending_run_params());
 
         let _ = update(
             &mut ws,
@@ -2178,11 +2267,23 @@ mod reducer_tests {
         use rollshot_agent::runtime::RunEvent;
 
         let mut ws = ws_with_workbench();
+        let (tid, rid) = test_run_ids();
+        wb_mut(&mut ws).run_state = super::super::RunState::Running {
+            cancellation: rollshot_agent::runtime::RunCancellation::new(),
+            parent_revision_id: None,
+            revision_note: None,
+            task_id: tid.clone(),
+            run_id: rid.clone(),
+        };
         let _ = update(
             &mut ws,
-            Message::Workbench(WorkbenchMessage::RunEvent(RunEvent::TextChunk {
-                text: "hello".into(),
-            })),
+            Message::Workbench(WorkbenchMessage::RunEvent {
+                task_id: tid,
+                run_id: rid,
+                event: RunEvent::TextChunk {
+                    text: "hello".into(),
+                },
+            }),
         );
         let state = wb(&ws);
         assert_eq!(state.live_activity.len(), 1);
@@ -2193,17 +2294,33 @@ mod reducer_tests {
         use rollshot_agent::runtime::RunEvent;
 
         let mut ws = ws_with_workbench();
+        let (tid, rid) = test_run_ids();
+        wb_mut(&mut ws).run_state = super::super::RunState::Running {
+            cancellation: rollshot_agent::runtime::RunCancellation::new(),
+            parent_revision_id: None,
+            revision_note: None,
+            task_id: tid.clone(),
+            run_id: rid.clone(),
+        };
         let _ = update(
             &mut ws,
-            Message::Workbench(WorkbenchMessage::RunEvent(RunEvent::TextChunk {
-                text: "hello ".into(),
-            })),
+            Message::Workbench(WorkbenchMessage::RunEvent {
+                task_id: tid.clone(),
+                run_id: rid.clone(),
+                event: RunEvent::TextChunk {
+                    text: "hello ".into(),
+                },
+            }),
         );
         let _ = update(
             &mut ws,
-            Message::Workbench(WorkbenchMessage::RunEvent(RunEvent::TextChunk {
-                text: "world".into(),
-            })),
+            Message::Workbench(WorkbenchMessage::RunEvent {
+                task_id: tid,
+                run_id: rid,
+                event: RunEvent::TextChunk {
+                    text: "world".into(),
+                },
+            }),
         );
         let state = wb(&ws);
         assert_eq!(state.live_activity.len(), 1, "two chunks → one entry");
@@ -2220,26 +2337,44 @@ mod reducer_tests {
         use rollshot_agent::runtime::RunEvent;
 
         let mut ws = ws_with_workbench();
+        let (tid, rid) = test_run_ids();
+        wb_mut(&mut ws).run_state = super::super::RunState::Running {
+            cancellation: rollshot_agent::runtime::RunCancellation::new(),
+            parent_revision_id: None,
+            revision_note: None,
+            task_id: tid.clone(),
+            run_id: rid.clone(),
+        };
         // Streamed chunks (may have gaps from dropped try_send).
         let _ = update(
             &mut ws,
-            Message::Workbench(WorkbenchMessage::RunEvent(RunEvent::TextChunk {
-                text: "hel".into(),
-            })),
+            Message::Workbench(WorkbenchMessage::RunEvent {
+                task_id: tid.clone(),
+                run_id: rid.clone(),
+                event: RunEvent::TextChunk {
+                    text: "hel".into(),
+                },
+            }),
         );
         let _ = update(
             &mut ws,
-            Message::Workbench(WorkbenchMessage::RunEvent(RunEvent::TextChunk {
-                text: "lo".into(),
-            })),
+            Message::Workbench(WorkbenchMessage::RunEvent {
+                task_id: tid.clone(),
+                run_id: rid.clone(),
+                event: RunEvent::TextChunk {
+                    text: "lo".into(),
+                },
+            }),
         );
         // Terminal with authoritative full text.
         let ready = ready_for_review_with_text("hello world");
         let _ = update(
             &mut ws,
-            Message::Workbench(WorkbenchMessage::RunTerminal(
-                RunTerminalState::ReadyForReview(Box::new(ready)),
-            )),
+            Message::Workbench(WorkbenchMessage::RunTerminal {
+                task_id: tid,
+                run_id: rid,
+                terminal: RunTerminalState::ReadyForReview(Box::new(ready)),
+            }),
         );
         let state = wb(&ws);
         // Find the AssistantText entry (before the TerminalLabel).
@@ -2279,7 +2414,10 @@ mod reducer_tests {
                 },
             },
             proposal: rollshot_edit_proposal::EditProposal {
-                id: rollshot_edit_proposal::ProposalId::parse("proposal-00000001-0000-4000-8000-000000000000").unwrap(),
+                id: rollshot_edit_proposal::ProposalId::parse(
+                    "proposal-00000001-0000-4000-8000-000000000000",
+                )
+                .unwrap(),
                 base_document_state_id: 0,
                 candidates: vec![],
                 confidence_summary: rollshot_edit_proposal::ConfidenceSummary::from_confidences(&[]),
@@ -2296,16 +2434,66 @@ mod reducer_tests {
         }
     }
 
+    fn test_pending_run_params() -> super::super::PendingRunParams {
+        super::super::PendingRunParams {
+            user_message: "test".into(),
+            image_dims: (100, 100),
+            active_revision_source: None,
+            mode: super::super::RunKind::Author,
+            parent_revision_id: None,
+            revision_note: None,
+            preset_id: rollshot_preset::PresetId("workbench-draft".into()),
+            preset_store_root: std::path::PathBuf::from("/tmp/rollshot-test-presets"),
+            task_id: rollshot_agent::product_task::ProductTaskId::parse(
+                "task-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap(),
+            run_id: rollshot_agent::domain::RunId::parse(
+                "run-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap(),
+            proposal_id: rollshot_edit_proposal::ProposalId::parse(
+                "proposal-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap(),
+            artifact_id: rollshot_agent::product_task::ArtifactId::parse(
+                "artifact-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap(),
+            content_binding: rollshot_agent::product_task::DocumentContentBinding::new(
+                [1u8; 32],
+                &rollshot_agent::product_task::AnnotationStateV1 {
+                    width: 100,
+                    height: 100,
+                    state_id: 0,
+                    annotations: vec![],
+                },
+                0,
+            )
+            .unwrap(),
+        }
+    }
+
+    fn test_run_ids() -> (rollshot_agent::product_task::ProductTaskId, rollshot_agent::domain::RunId) {
+        (
+            rollshot_agent::product_task::ProductTaskId::parse("task-00000000-0000-4000-8000-000000000001").unwrap(),
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+        )
+    }
+
     #[test]
     fn cancel_run_calls_cancellation() {
         use rollshot_agent::runtime::RunCancellation;
 
         let mut ws = ws_with_workbench();
         let cancel = RunCancellation::new();
+        let (tid, rid) = test_run_ids();
         wb_mut(&mut ws).run_state = super::super::RunState::Running {
             cancellation: cancel.clone(),
             parent_revision_id: None,
             revision_note: None,
+            task_id: tid,
+            run_id: rid,
         };
 
         let _ = update(&mut ws, Message::Workbench(WorkbenchMessage::CancelRun));
@@ -2315,19 +2503,24 @@ mod reducer_tests {
     #[test]
     fn run_failed_sets_error_and_terminal() {
         let mut ws = ws_with_workbench();
+        let (tid, rid) = test_run_ids();
         wb_mut(&mut ws).run_state = super::super::RunState::Running {
             cancellation: rollshot_agent::runtime::RunCancellation::new(),
             parent_revision_id: None,
             revision_note: None,
+            task_id: tid.clone(),
+            run_id: rid.clone(),
         };
 
         let _ = update(
             &mut ws,
-            Message::Workbench(WorkbenchMessage::RunFailed(
-                super::WorkbenchError::VisionPrepare {
+            Message::Workbench(WorkbenchMessage::RunFailed {
+                task_id: tid,
+                run_id: rid,
+                error: super::WorkbenchError::VisionPrepare {
                     message: "region_too_large".into(),
                 },
-            )),
+            }),
         );
         let state = wb(&ws);
         assert!(
@@ -2346,22 +2539,16 @@ mod reducer_tests {
     #[test]
     fn disclosure_confirmed_blocked_while_running() {
         let mut ws = ws_with_workbench();
+        let (tid, rid) = test_run_ids();
         wb_mut(&mut ws).run_state = super::super::RunState::Running {
             cancellation: rollshot_agent::runtime::RunCancellation::new(),
             parent_revision_id: None,
             revision_note: None,
+            task_id: tid,
+            run_id: rid,
         };
         wb_mut(&mut ws).disclosure_pending = true;
-        wb_mut(&mut ws).pending_run = Some(super::super::PendingRunParams {
-            user_message: "test".into(),
-            image_dims: (100, 100),
-            active_revision_source: None,
-            mode: super::super::RunKind::Author,
-            parent_revision_id: None,
-            revision_note: None,
-            preset_id: rollshot_preset::PresetId("workbench-draft".into()),
-            preset_store_root: std::path::PathBuf::from("/tmp/rollshot-test-presets"),
-        });
+        wb_mut(&mut ws).pending_run = Some(test_pending_run_params());
 
         let _ = update(
             &mut ws,
@@ -2382,19 +2569,24 @@ mod reducer_tests {
     #[test]
     fn run_terminal_carries_lineage_into_pending_draft() {
         let mut ws = ws_with_workbench();
+        let (tid, rid) = test_run_ids();
         wb_mut(&mut ws).run_state = super::super::RunState::Running {
             cancellation: rollshot_agent::runtime::RunCancellation::new(),
             parent_revision_id: Some(rollshot_preset::RevisionId("rev-parent".into())),
             revision_note: Some(
                 "improved from rev-parent; 1 rejected, 0 resized, 0 manually added".into(),
             ),
+            task_id: tid.clone(),
+            run_id: rid.clone(),
         };
         let ready = ready_for_review_with_text("done");
         let _ = update(
             &mut ws,
-            Message::Workbench(WorkbenchMessage::RunTerminal(
-                RunTerminalState::ReadyForReview(Box::new(ready)),
-            )),
+            Message::Workbench(WorkbenchMessage::RunTerminal {
+                task_id: tid,
+                run_id: rid,
+                terminal: RunTerminalState::ReadyForReview(Box::new(ready)),
+            }),
         );
         let draft = wb(&ws).pending_draft.as_ref().expect("draft populated");
         assert_eq!(draft.parent_revision_id.as_ref().unwrap().0, "rev-parent");
@@ -2508,5 +2700,126 @@ mod reducer_tests {
             "no run queued without corrections"
         );
         assert!(!state.disclosure_pending, "disclosure not opened");
+    }
+
+    #[test]
+    fn stale_run_messages_are_ignored() {
+        use rollshot_agent::runtime::RunEvent;
+
+        let mut ws = ws_with_workbench();
+
+        // Set up a "current" run with specific task_id/run_id.
+        let current_task = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000099",
+        )
+        .unwrap();
+        let current_run = rollshot_agent::domain::RunId::parse(
+            "run-00000000-0000-4000-8000-000000000099",
+        )
+        .unwrap();
+        wb_mut(&mut ws).run_state = super::super::RunState::Running {
+            cancellation: rollshot_agent::runtime::RunCancellation::new(),
+            parent_revision_id: None,
+            revision_note: None,
+            task_id: current_task.clone(),
+            run_id: current_run.clone(),
+        };
+
+        // A stale message from a different run.
+        let stale_task = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let stale_run = rollshot_agent::domain::RunId::parse(
+            "run-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+
+        // Stale RunEvent should be ignored.
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::RunEvent {
+                task_id: stale_task.clone(),
+                run_id: stale_run.clone(),
+                event: RunEvent::TextChunk {
+                    text: "stale".into(),
+                },
+            }),
+        );
+        assert!(
+            wb(&ws).live_activity.is_empty(),
+            "stale RunEvent must not produce activity"
+        );
+
+        // Stale RunFailed should be ignored.
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::RunFailed {
+                task_id: stale_task.clone(),
+                run_id: stale_run.clone(),
+                error: super::WorkbenchError::RuntimeFailure,
+            }),
+        );
+        assert!(
+            wb(&ws).error.is_none(),
+            "stale RunFailed must not set error"
+        );
+        assert!(
+            wb(&ws).run_state.is_running(),
+            "stale RunFailed must not change run state"
+        );
+
+        // Stale RunTerminal should be ignored.
+        let ready = ready_for_review_with_text("stale terminal");
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::RunTerminal {
+                task_id: stale_task,
+                run_id: stale_run,
+                terminal: rollshot_agent::driver::RunTerminalState::ReadyForReview(
+                    Box::new(ready),
+                ),
+            }),
+        );
+        assert!(
+            wb(&ws).run_state.is_running(),
+            "stale RunTerminal must not change run state"
+        );
+        assert!(
+            wb(&ws).pending_proposal.is_none(),
+            "stale RunTerminal must not populate proposal"
+        );
+    }
+
+    #[test]
+    fn correlated_run_messages_are_accepted() {
+        use rollshot_agent::runtime::RunEvent;
+
+        let mut ws = ws_with_workbench();
+        let (tid, rid) = test_run_ids();
+        wb_mut(&mut ws).run_state = super::super::RunState::Running {
+            cancellation: rollshot_agent::runtime::RunCancellation::new(),
+            parent_revision_id: None,
+            revision_note: None,
+            task_id: tid.clone(),
+            run_id: rid.clone(),
+        };
+
+        // Matching RunEvent should be accepted.
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::RunEvent {
+                task_id: tid.clone(),
+                run_id: rid.clone(),
+                event: RunEvent::TextChunk {
+                    text: "hello".into(),
+                },
+            }),
+        );
+        assert_eq!(
+            wb(&ws).live_activity.len(),
+            1,
+            "correlated RunEvent must produce activity"
+        );
     }
 }

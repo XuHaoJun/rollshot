@@ -103,6 +103,12 @@ pub struct PendingRunParams {
     pub revision_note: Option<String>,
     pub preset_id: rollshot_preset::PresetId,
     pub preset_store_root: std::path::PathBuf,
+    /// Allocated once per run at DisclosureConfirmed.
+    pub task_id: rollshot_agent::product_task::ProductTaskId,
+    pub run_id: rollshot_agent::domain::RunId,
+    pub proposal_id: rollshot_edit_proposal::ProposalId,
+    pub artifact_id: rollshot_agent::product_task::ArtifactId,
+    pub content_binding: rollshot_agent::product_task::DocumentContentBinding,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,12 +172,24 @@ pub enum WorkspaceMode {
 #[derive(Debug, Clone)]
 pub enum WorkbenchMessage {
     // Run events from the agent (streamed via Task::run channel bridge)
-    RunEvent(RunEvent),
-    RunTerminal(RunTerminalState),
+    RunEvent {
+        task_id: rollshot_agent::product_task::ProductTaskId,
+        run_id: rollshot_agent::domain::RunId,
+        event: RunEvent,
+    },
+    RunTerminal {
+        task_id: rollshot_agent::product_task::ProductTaskId,
+        run_id: rollshot_agent::domain::RunId,
+        terminal: RunTerminalState,
+    },
     /// Run could not start or failed before the agent produced a terminal
     /// state (e.g. vision-prepare failure). Carries the typed error so the
     /// UI can show the real message (spec §9.1 VisionPrepare row).
-    RunFailed(state::WorkbenchError),
+    RunFailed {
+        task_id: rollshot_agent::product_task::ProductTaskId,
+        run_id: rollshot_agent::domain::RunId,
+        error: state::WorkbenchError,
+    },
     // Disclosure
     DisclosureRequested(PendingRunParams),
     PayloadModeSelected(PayloadMode),

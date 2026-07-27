@@ -14,6 +14,8 @@ pub enum RunState {
         cancellation: RunCancellation,
         parent_revision_id: Option<rollshot_preset::RevisionId>,
         revision_note: Option<String>,
+        task_id: rollshot_agent::product_task::ProductTaskId,
+        run_id: rollshot_agent::domain::RunId,
     },
     Terminal(RunTerminalState),
 }

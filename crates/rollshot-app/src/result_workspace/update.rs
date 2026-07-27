@@ -1749,7 +1749,13 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 _ => return Task::none(),
             };
             match msg {
-                super::workbench::WorkbenchMessage::RunEvent(event) => {
+                super::workbench::WorkbenchMessage::RunEvent { task_id: msg_task_id, run_id: msg_run_id, event } => {
+                    // Ignore stale run messages.
+                    if let super::workbench::RunState::Running { task_id, run_id, .. } = &workbench.run_state {
+                        if *task_id != msg_task_id || *run_id != msg_run_id {
+                            return Task::none();
+                        }
+                    }
                     use rollshot_agent::runtime::RunEvent;
                     match &event {
                         RunEvent::TextChunk { text } => {
@@ -1779,7 +1785,13 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     }
                     Task::none()
                 }
-                super::workbench::WorkbenchMessage::RunTerminal(terminal) => {
+                super::workbench::WorkbenchMessage::RunTerminal { task_id: msg_task_id, run_id: msg_run_id, terminal } => {
+                    // Ignore stale run messages.
+                    if let super::workbench::RunState::Running { task_id, run_id, .. } = &workbench.run_state {
+                        if *task_id != msg_task_id || *run_id != msg_run_id {
+                            return Task::none();
+                        }
+                    }
                     // Reconcile accumulated AssistantText against the
                     // authoritative final text before pushing the terminal
                     // label (spec §6.2 / addendum G — dropped try_send chunks
@@ -1853,7 +1865,13 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     }
                     Task::none()
                 }
-                super::workbench::WorkbenchMessage::RunFailed(e) => {
+                super::workbench::WorkbenchMessage::RunFailed { task_id: msg_task_id, run_id: msg_run_id, error: e } => {
+                    // Ignore stale run messages.
+                    if let super::workbench::RunState::Running { task_id, run_id, .. } = &workbench.run_state {
+                        if *task_id != msg_task_id || *run_id != msg_run_id {
+                            return Task::none();
+                        }
+                    }
                     workbench.error = Some(e);
                     workbench.run_state = super::workbench::RunState::Terminal(
                         rollshot_agent::driver::RunTerminalState::RuntimeFailure,
@@ -1991,6 +2009,32 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         preset_store_root: crate::daemon::config::rollshot_config_dir()
                             .map(|dir| dir.join("presets"))
                             .unwrap_or_default(),
+                        // Identity fields populated in DisclosureConfirmed.
+                        task_id: rollshot_agent::product_task::ProductTaskId::parse(format!(
+                            "task-{}",
+                            uuid::Uuid::new_v4()
+                        ))
+                        .expect("v4 UUID is valid"),
+                        run_id: rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000000")
+                            .expect("placeholder run_id"),
+                        proposal_id: rollshot_edit_proposal::ProposalId::parse("proposal-00000000-0000-4000-8000-000000000000")
+                            .expect("placeholder proposal_id"),
+                        artifact_id: rollshot_agent::product_task::ArtifactId::parse(format!(
+                            "artifact-{}",
+                            uuid::Uuid::new_v4()
+                        ))
+                        .expect("v4 UUID is valid"),
+                        content_binding: rollshot_agent::product_task::DocumentContentBinding::new(
+                            state.base_image_digest,
+                            &rollshot_agent::product_task::AnnotationStateV1 {
+                                width: w,
+                                height: h,
+                                state_id: state.document.image.state_id() as u32,
+                                annotations: vec![],
+                            },
+                            state.document.image.state_id() as u32,
+                        )
+                        .expect("content binding"),
                     };
                     workbench.disclosure_pending = true;
                     workbench.pending_run = Some(params);
@@ -2008,20 +2052,31 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     if workbench.run_state.is_running() {
                         return Task::none();
                     }
-                    let Some(params) = workbench.pending_run.take() else {
+                    let Some(mut params) = workbench.pending_run.take() else {
                         return Task::none();
                     };
+                    // Allocate real run_id and proposal_id at confirmation time.
+                    let run_id = rollshot_agent::domain::RunId::parse(format!(
+                        "run-{}",
+                        uuid::Uuid::new_v4()
+                    ))
+                    .expect("v4 UUID is valid");
+                    let proposal_id = rollshot_edit_proposal::ProposalId::parse(format!(
+                        "proposal-{}",
+                        uuid::Uuid::new_v4()
+                    ))
+                    .expect("v4 UUID is valid");
+                    params.run_id = run_id.clone();
+                    params.proposal_id = proposal_id.clone();
+
                     let parent_revision_id = params.parent_revision_id.clone();
                     let revision_note = params.revision_note.clone();
+                    let task_id = params.task_id.clone();
                     let image = state.document.image.source().clone();
                     let session_id = workbench.session.session_id;
-                    let run_id = rollshot_agent::domain::RunId::parse(
-                        format!("run-{}", uuid::Uuid::new_v4()),
-                    )
-                    .expect("v4 UUID is valid");
                     let session = std::mem::replace(
                         &mut workbench.session,
-                        rollshot_agent::domain::AgentSession::new(session_id, run_id),
+                        rollshot_agent::domain::AgentSession::new(session_id, run_id.clone()),
                     );
                     match super::workbench::run::start_agent_run(
                         &params,
@@ -2036,6 +2091,8 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                                 cancellation,
                                 parent_revision_id,
                                 revision_note,
+                                task_id,
+                                run_id,
                             };
                             task
                         }
@@ -2138,6 +2195,31 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         preset_store_root: crate::daemon::config::rollshot_config_dir()
                             .map(|dir| dir.join("presets"))
                             .unwrap_or_default(),
+                        task_id: rollshot_agent::product_task::ProductTaskId::parse(format!(
+                            "task-{}",
+                            uuid::Uuid::new_v4()
+                        ))
+                        .expect("v4 UUID is valid"),
+                        run_id: rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000000")
+                            .expect("placeholder run_id"),
+                        proposal_id: rollshot_edit_proposal::ProposalId::parse("proposal-00000000-0000-4000-8000-000000000000")
+                            .expect("placeholder proposal_id"),
+                        artifact_id: rollshot_agent::product_task::ArtifactId::parse(format!(
+                            "artifact-{}",
+                            uuid::Uuid::new_v4()
+                        ))
+                        .expect("v4 UUID is valid"),
+                        content_binding: rollshot_agent::product_task::DocumentContentBinding::new(
+                            state.base_image_digest,
+                            &rollshot_agent::product_task::AnnotationStateV1 {
+                                width: w,
+                                height: h,
+                                state_id: state.document.image.state_id() as u32,
+                                annotations: vec![],
+                            },
+                            state.document.image.state_id() as u32,
+                        )
+                        .expect("content binding"),
                     };
                     workbench.disclosure_pending = true;
                     workbench.pending_run = Some(params);
