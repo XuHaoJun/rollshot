@@ -11,7 +11,9 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::authority::AuthoritySnapshotReceiptV1;
 use crate::domain::RunId;
+use crate::skills::SkillUseReceiptV1;
 
 // ========================================================================
 // Opaque IDs
@@ -235,6 +237,9 @@ pub struct TaskAttempt {
     started_at_unix_ms: i64,
     finished_at_unix_ms: Option<i64>,
     terminal: Option<TaskTerminal>,
+    /// V2 provenance binding. `None` for V1 tasks or before `bind_run_contract`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    run_contract: Option<RunContractReceiptV1>,
 }
 
 impl TaskAttempt {
@@ -245,6 +250,7 @@ impl TaskAttempt {
             started_at_unix_ms,
             finished_at_unix_ms: None,
             terminal: None,
+            run_contract: None,
         }
     }
 
@@ -266,6 +272,10 @@ impl TaskAttempt {
 
     pub fn terminal(&self) -> Option<TaskTerminal> {
         self.terminal.clone()
+    }
+
+    pub fn run_contract(&self) -> Option<&RunContractReceiptV1> {
+        self.run_contract.as_ref()
     }
 }
 
@@ -291,6 +301,9 @@ pub struct ProductArtifactMetadata {
     dry_run_candidate_count: u32,
     dry_run_affected_area: f32,
     created_at_unix_ms: i64,
+    /// V2 provenance. `None` for V1 artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    run_contract: Option<RunContractReceiptV1>,
 }
 
 impl ProductArtifactMetadata {
@@ -330,6 +343,49 @@ impl ProductArtifactMetadata {
             dry_run_candidate_count,
             dry_run_affected_area,
             created_at_unix_ms,
+            run_contract: None,
+        }
+    }
+
+    /// V2 constructor: includes run-contract provenance.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_v2(
+        artifact_id: ArtifactId,
+        artifact_revision: ArtifactRevision,
+        kind: ArtifactKind,
+        schema_version: u32,
+        canonical_payload_sha256: String,
+        source_binding: SourceBinding,
+        task_id: ProductTaskId,
+        attempt_id: TaskAttemptId,
+        run_id: RunId,
+        proposal_id: String,
+        provider_id: String,
+        model_id: String,
+        run_config_digest: String,
+        dry_run_candidate_count: u32,
+        dry_run_affected_area: f32,
+        created_at_unix_ms: i64,
+        run_contract: RunContractReceiptV1,
+    ) -> Self {
+        Self {
+            artifact_id,
+            artifact_revision,
+            kind,
+            schema_version,
+            canonical_payload_sha256,
+            source_binding,
+            task_id,
+            attempt_id,
+            run_id,
+            proposal_id,
+            provider_id,
+            model_id,
+            run_config_digest,
+            dry_run_candidate_count,
+            dry_run_affected_area,
+            created_at_unix_ms,
+            run_contract: Some(run_contract),
         }
     }
 
@@ -363,6 +419,10 @@ impl ProductArtifactMetadata {
 
     pub fn run_config_digest(&self) -> &str {
         &self.run_config_digest
+    }
+
+    pub fn run_contract(&self) -> Option<&RunContractReceiptV1> {
+        self.run_contract.as_ref()
     }
 }
 
@@ -536,6 +596,43 @@ pub struct PromotionContext {
 }
 
 // ========================================================================
+// Run contract receipt (V2 provenance binding)
+// ========================================================================
+
+/// Binds authority snapshot + skill-use receipts to a task attempt.
+/// Created by `ProductTaskSnapshot::bind_run_contract` while `Running`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunContractReceiptV1 {
+    pub authority: AuthoritySnapshotReceiptV1,
+    pub skill_use: SkillUseReceiptV1,
+    pub bound_at_unix_ms: i64,
+}
+
+// ========================================================================
+// Run config fingerprint V2 (privacy-filtered, includes provenance)
+// ========================================================================
+
+/// V2 fingerprint: extends V1 with authority snapshot digest and exact
+/// skill-use receipt. Uses a single `skill_use` field; supporting
+/// multiple invoked skills is deferred until a real workload requires it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunConfigFingerprintV2 {
+    pub provider: String,
+    pub model: String,
+    pub payload_mode: PayloadMode,
+    pub run_kind: String,
+    pub budget_dimensions: BTreeMap<String, u64>,
+    pub authority_snapshot_digest: String,
+    pub skill_use: SkillUseReceiptV1,
+}
+
+impl ValidateFinite for RunConfigFingerprintV2 {
+    fn check_finite(&self) -> Result<(), CanonicalError> {
+        Ok(())
+    }
+}
+
+// ========================================================================
 // Errors
 // ========================================================================
 
@@ -564,6 +661,10 @@ pub enum TaskContractError {
     RevisionMismatch { expected: u32, got: u32 },
     #[error("missing payload or metadata")]
     MissingPayload,
+    #[error("run contract already bound with a different receipt")]
+    RunContractConflict,
+    #[error("run contract required for schema version 2")]
+    MissingRunContract,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -709,6 +810,110 @@ impl ProductTaskSnapshot {
         Ok(next)
     }
 
+    /// V2 constructor: creates a task with schema version 2.
+    /// V2 tasks require a run-contract binding before promotion.
+    pub fn new_v2(
+        task_id: ProductTaskId,
+        kind: TaskKind,
+        source_binding: SourceBinding,
+        now: i64,
+    ) -> Result<Self, TaskContractError> {
+        Ok(Self {
+            store_schema_version: 2,
+            snapshot_revision: 0,
+            task_id,
+            kind,
+            source_binding,
+            status: TaskStatus::Created,
+            attempts: Vec::new(),
+            artifact_metadata: None,
+            pending_artifact_payload: None,
+            pending_proposal_payload: None,
+            review_receipt: None,
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+        })
+    }
+
+    /// Bind a run-contract receipt to the active `Running` attempt.
+    ///
+    /// Rules:
+    /// - Only valid while `Running`.
+    /// - Receipt task_id, attempt_id, run_id must match the active attempt.
+    /// - Timestamp must be monotonically non-decreasing.
+    /// - Attempt must not be terminal (finished).
+    /// - Missing receipt binds and increments `snapshot_revision` once.
+    /// - Byte-for-byte identical receipt is idempotent (no revision bump).
+    /// - Any different existing receipt is `RunContractConflict`.
+    pub fn bind_run_contract(
+        &self,
+        _run_id: RunId,
+        receipt: RunContractReceiptV1,
+        now: i64,
+    ) -> Result<Self, TaskContractError> {
+        if self.status != TaskStatus::Running {
+            return Err(TaskContractError::IllegalTransition {
+                from: self.status.clone(),
+            });
+        }
+        if now < self.updated_at_unix_ms {
+            return Err(TaskContractError::TimestampRegression {
+                current: self.updated_at_unix_ms,
+                attempted: now,
+            });
+        }
+        let last_attempt = self
+            .attempts
+            .last()
+            .ok_or(TaskContractError::MissingAttempt)?;
+        // Receipt must not target a terminal attempt.
+        if last_attempt.terminal.is_some() {
+            return Err(TaskContractError::IllegalTransition {
+                from: self.status.clone(),
+            });
+        }
+        // Receipt run_id must match the active attempt.
+        if receipt.authority.run_id != last_attempt.run_id.as_str() {
+            return Err(TaskContractError::RunMismatch {
+                expected: last_attempt.run_id.as_str().to_owned(),
+                got: receipt.authority.run_id.clone(),
+            });
+        }
+        // Receipt task_id must match the snapshot task.
+        if receipt.authority.task_id != self.task_id.as_str() {
+            return Err(TaskContractError::RunMismatch {
+                expected: self.task_id.as_str().to_owned(),
+                got: receipt.authority.task_id.clone(),
+            });
+        }
+        // Receipt attempt_id must match the active attempt.
+        if receipt.authority.attempt_id != last_attempt.attempt_id.get() {
+            return Err(TaskContractError::ConflictingAttempt {
+                expected: last_attempt.attempt_id,
+                got: TaskAttemptId::new(receipt.authority.attempt_id),
+            });
+        }
+        // Idempotent check: identical receipt → no change.
+        if let Some(existing) = &last_attempt.run_contract {
+            if *existing == receipt {
+                return Ok(self.clone());
+            }
+            return Err(TaskContractError::RunContractConflict);
+        }
+        let mut next = self.clone();
+        if let Some(attempt) = next.attempts.last_mut() {
+            attempt.run_contract = Some(receipt);
+        }
+        next.snapshot_revision += 1;
+        next.updated_at_unix_ms = now;
+        Ok(next)
+    }
+
+    /// The run-contract receipt on the active attempt, if any.
+    pub fn active_run_contract(&self) -> Option<&RunContractReceiptV1> {
+        self.attempts.last()?.run_contract.as_ref()
+    }
+
     /// Transition: Running → ReadyForReview with canonical review
     /// payload, and optionally the serialized EditProposal for restore.
     /// Increments `snapshot_revision` exactly once.
@@ -745,6 +950,10 @@ impl ProductTaskSnapshot {
                 expected: last_attempt.run_id.as_str().to_owned(),
                 got: metadata.run_id().as_str().to_owned(),
             });
+        }
+        // V2 schema requires an active run contract on the attempt.
+        if self.store_schema_version >= 2 && last_attempt.run_contract.is_none() {
+            return Err(TaskContractError::MissingRunContract);
         }
         let payload_bytes =
             serde_json::to_vec(&payload).map_err(|_e| TaskContractError::MissingPayload)?;
@@ -1235,6 +1444,22 @@ pub fn canonical_annotation_state_digest(
 ) -> Result<String, CanonicalError> {
     let digest_bytes = compute_annotation_state_digest(state)?;
     Ok(hex_encode(&digest_bytes))
+}
+
+// -- V2 canonical helpers --
+
+/// Canonical bytes for a V2 config fingerprint.
+pub fn canonical_config_v2_bytes(
+    config: &RunConfigFingerprintV2,
+) -> Result<Vec<u8>, CanonicalError> {
+    canonical_v1_bytes(config)
+}
+
+/// Canonical digest for V2 config.
+pub fn canonical_config_v2_digest(
+    config: &RunConfigFingerprintV2,
+) -> Result<String, CanonicalError> {
+    canonical_v1_digest(config)
 }
 
 /// Hex-encode a byte slice as lowercase.
@@ -1992,5 +2217,504 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(budget.status(), TaskStatus::Failed { .. }));
+    }
+
+    // ------------------------------------------------------------------
+    // V2: Run contract binding and provenance tests
+    // ------------------------------------------------------------------
+
+    fn authority_receipt_fixture() -> crate::authority::AuthoritySnapshotReceiptV1 {
+        use crate::authority::{DisclosureCeiling, PreparedCapability, RunOperation};
+        crate::authority::AuthoritySnapshotReceiptV1 {
+            schema_version: 1,
+            task_id: "task-00000000-0000-4000-8000-000000000001".to_owned(),
+            attempt_id: 1,
+            run_id: "run-00000000-0000-4000-8000-000000000001".to_owned(),
+            policy_revision: "rev-1".to_owned(),
+            disclosure_ceiling: DisclosureCeiling::FullScreenshot,
+            existing_product_capture: false,
+            document_binding_digest: "ab".repeat(32),
+            prepared_capabilities: vec![PreparedCapability::Ocr],
+            granted_operations: vec![RunOperation::SubmitReviewCandidate],
+            snapshot_digest: "cd".repeat(32),
+            created_at_unix_ms: 10,
+        }
+    }
+
+    fn skill_use_receipt_fixture() -> crate::skills::SkillUseReceiptV1 {
+        crate::skills::SkillUseReceiptV1 {
+            schema_version: 1,
+            source_authority: "authority://test".to_owned(),
+            package_id: "package-1".to_owned(),
+            main_resource_id: "resource-1".to_owned(),
+            package_digest: "ab".repeat(32),
+            declared_version: Some("1.0.0".to_owned()),
+            invocation_kind: crate::skills::SkillInvocationKind::HostExplicit,
+            resolved_at_unix_ms: 10,
+        }
+    }
+
+    fn run_contract_fixture(
+        _running: &ProductTaskSnapshot,
+    ) -> RunContractReceiptV1 {
+        RunContractReceiptV1 {
+            authority: authority_receipt_fixture(),
+            skill_use: skill_use_receipt_fixture(),
+            bound_at_unix_ms: 20,
+        }
+    }
+
+    fn run_contract_with_skill_digest(
+        _running: &ProductTaskSnapshot,
+        digest: &str,
+    ) -> RunContractReceiptV1 {
+        RunContractReceiptV1 {
+            authority: authority_receipt_fixture(),
+            skill_use: crate::skills::SkillUseReceiptV1 {
+                package_digest: digest.to_owned(),
+                ..skill_use_receipt_fixture()
+            },
+            bound_at_unix_ms: 20,
+        }
+    }
+
+    fn running_with_contract_fixture() -> ProductTaskSnapshot {
+        let running = running_task_fixture();
+        let receipt = run_contract_fixture(&running);
+        running.bind_run_contract(run_id_fixture(), receipt, 25).unwrap()
+    }
+
+    fn v2_metadata_with_contract(
+        contract: &RunContractReceiptV1,
+    ) -> ProductArtifactMetadata {
+        let payload = payload_fixture();
+        let payload_bytes = canonical_payload_bytes(&payload).unwrap();
+        let payload_sha = {
+            let hash = Sha256::digest(&payload_bytes);
+            hex_encode(&hash)
+        };
+        let config = RunConfigFingerprintV2 {
+            provider: "anthropic".to_owned(),
+            model: "claude-sonnet-4-20250514".to_owned(),
+            payload_mode: PayloadMode::Author,
+            run_kind: "smart_redaction".to_owned(),
+            budget_dimensions: {
+                let mut m = BTreeMap::new();
+                m.insert("wall_time_ms".to_owned(), 30_000);
+                m.insert("model_calls".to_owned(), 10);
+                m
+            },
+            authority_snapshot_digest: contract.authority.snapshot_digest.clone(),
+            skill_use: contract.skill_use.clone(),
+        };
+        let config_digest = canonical_config_v2_digest(&config).unwrap();
+        ProductArtifactMetadata::new_v2(
+            artifact_id_fixture(),
+            ArtifactRevision::new(1),
+            ArtifactKind::SmartRedaction,
+            2,
+            payload_sha,
+            source_binding_fixture(),
+            task_id_fixture(),
+            TaskAttemptId::new(1),
+            run_id_fixture(),
+            "proposal-00000000-0000-4000-8000-000000000001".to_owned(),
+            "anthropic".to_owned(),
+            "claude-sonnet-4-20250514".to_owned(),
+            config_digest,
+            3,
+            0.42,
+            15,
+            contract.clone(),
+        )
+    }
+
+    #[test]
+    fn run_contract_binds_once_to_active_attempt_before_promotion() {
+        let running = running_task_fixture();
+        let receipt = run_contract_fixture(&running);
+        let bound = running
+            .bind_run_contract(run_id_fixture(), receipt.clone(), 20)
+            .unwrap();
+        assert_eq!(
+            bound.attempts().last().unwrap().run_contract(),
+            Some(&receipt)
+        );
+        assert_eq!(
+            bound.snapshot_revision(),
+            running.snapshot_revision() + 1
+        );
+
+        // Second conflicting receipt → RunContractConflict
+        let conflict = run_contract_with_skill_digest(&running, &"ff".repeat(32));
+        assert!(matches!(
+            bound.bind_run_contract(run_id_fixture(), conflict, 21),
+            Err(TaskContractError::RunContractConflict)
+        ));
+    }
+
+    #[test]
+    fn bind_run_contract_idempotent_on_identical_receipt() {
+        let running = running_task_fixture();
+        let receipt = run_contract_fixture(&running);
+        let bound = running
+            .bind_run_contract(run_id_fixture(), receipt.clone(), 20)
+            .unwrap();
+        let revision_after_first = bound.snapshot_revision();
+        // Identical receipt → no revision bump
+        let again = bound
+            .bind_run_contract(run_id_fixture(), receipt, 21)
+            .unwrap();
+        assert_eq!(again.snapshot_revision(), revision_after_first);
+        assert_eq!(again, bound);
+    }
+
+    #[test]
+    fn promotion_requires_and_copies_exact_run_contract() {
+        let bound = running_with_contract_fixture();
+        let contract = bound.active_run_contract().unwrap().clone();
+        let metadata = v2_metadata_with_contract(&contract);
+        let ready = bound
+            .record_ready_for_review(metadata, payload_fixture(), None, 30)
+            .unwrap();
+        assert_eq!(
+            ready.artifact_metadata().unwrap().run_contract(),
+            bound.active_run_contract()
+        );
+    }
+
+    #[test]
+    fn v2_promotion_rejected_without_run_contract() {
+        let running_v2 = ProductTaskSnapshot::new_v2(
+            task_id_fixture(),
+            TaskKind::SmartRedactionAuthor,
+            source_binding_fixture(),
+            10,
+        )
+        .unwrap()
+        .start_attempt(attempt_fixture(), 20)
+        .unwrap();
+        // No bind_run_contract → MissingRunContract
+        let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
+        assert!(matches!(
+            running_v2.record_ready_for_review(meta, payload_fixture(), None, 30),
+            Err(TaskContractError::MissingRunContract)
+        ));
+    }
+
+    #[test]
+    fn v1_promotion_still_works_without_run_contract() {
+        let running = running_task_fixture(); // schema 1
+        let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
+        let ready = running
+            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .unwrap();
+        assert_eq!(ready.status(), TaskStatus::ReadyForReview);
+    }
+
+    #[test]
+    fn bind_run_contract_rejected_when_not_running() {
+        let created = created_task_fixture();
+        let receipt = run_contract_fixture(&created);
+        assert!(matches!(
+            created.bind_run_contract(run_id_fixture(), receipt, 20),
+            Err(TaskContractError::IllegalTransition { .. })
+        ));
+    }
+
+    #[test]
+    fn bind_run_contract_rejected_on_terminal_attempt() {
+        let cancelled = running_task_fixture()
+            .record_terminal(TaskTerminal::Cancelled, 30)
+            .unwrap();
+        let receipt = run_contract_fixture(&cancelled);
+        assert!(matches!(
+            cancelled.bind_run_contract(run_id_fixture(), receipt, 40),
+            Err(TaskContractError::IllegalTransition { .. })
+        ));
+    }
+
+    #[test]
+    fn bind_run_contract_rejected_on_timestamp_regression() {
+        let running = running_task_fixture();
+        let receipt = run_contract_fixture(&running);
+        assert!(matches!(
+            running.bind_run_contract(run_id_fixture(), receipt, 5),
+            Err(TaskContractError::TimestampRegression { .. })
+        ));
+    }
+
+    #[test]
+    fn bind_run_contract_rejected_on_run_mismatch() {
+        let running = running_task_fixture();
+        let mut receipt = run_contract_fixture(&running);
+        receipt.authority.run_id = "run-99999999-9999-4999-8999-999999999999".to_owned();
+        assert!(matches!(
+            running.bind_run_contract(run_id_fixture(), receipt, 20),
+            Err(TaskContractError::RunMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn bind_run_contract_rejected_on_task_mismatch() {
+        let running = running_task_fixture();
+        let mut receipt = run_contract_fixture(&running);
+        receipt.authority.task_id = "task-99999999-9999-4999-8999-999999999999".to_owned();
+        assert!(matches!(
+            running.bind_run_contract(run_id_fixture(), receipt, 20),
+            Err(TaskContractError::RunMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn bind_run_contract_rejected_on_attempt_mismatch() {
+        let running = running_task_fixture();
+        let mut receipt = run_contract_fixture(&running);
+        receipt.authority.attempt_id = 99;
+        assert!(matches!(
+            running.bind_run_contract(run_id_fixture(), receipt, 20),
+            Err(TaskContractError::ConflictingAttempt { .. })
+        ));
+    }
+
+    #[test]
+    fn v2_task_created_with_schema_version_two() {
+        let task = ProductTaskSnapshot::new_v2(
+            task_id_fixture(),
+            TaskKind::SmartRedactionAuthor,
+            source_binding_fixture(),
+            10,
+        )
+        .unwrap();
+        assert_eq!(task.store_schema_version(), 2);
+        assert_eq!(task.snapshot_revision(), 0);
+    }
+
+    #[test]
+    fn v2_metadata_carries_run_contract() {
+        let contract = RunContractReceiptV1 {
+            authority: authority_receipt_fixture(),
+            skill_use: skill_use_receipt_fixture(),
+            bound_at_unix_ms: 20,
+        };
+        let meta = v2_metadata_with_contract(&contract);
+        assert_eq!(meta.run_contract(), Some(&contract));
+    }
+
+    // ------------------------------------------------------------------
+    // V1-compatible deserialization (old JSON without new fields)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn v1_json_deserializes_with_run_contract_none() {
+        let running = running_task_fixture();
+        let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
+        let ready = running
+            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .unwrap();
+        let json = serde_json::to_string(&ready).unwrap();
+
+        // V1 JSON should NOT contain "run_contract" at all.
+        assert!(!json.contains("run_contract"));
+
+        // Deserialize: run_contract should be None.
+        let restored: ProductTaskSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.store_schema_version(), 1);
+        assert!(restored.active_run_contract().is_none());
+        assert_eq!(restored, ready);
+    }
+
+    #[test]
+    fn v1_attempt_json_deserializes_without_run_contract() {
+        let attempt = attempt_fixture();
+        let json = serde_json::to_string(&attempt).unwrap();
+        assert!(!json.contains("run_contract"));
+
+        let restored: TaskAttempt = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.run_contract(), None);
+        assert_eq!(restored, attempt);
+    }
+
+    #[test]
+    fn v1_metadata_json_deserializes_without_run_contract() {
+        let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(!json.contains("run_contract"));
+
+        let restored: ProductArtifactMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.run_contract(), None);
+        assert_eq!(restored, meta);
+    }
+
+    // ------------------------------------------------------------------
+    // V2 canonical golden vectors and privacy scans
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn canonical_config_v2_golden_bytes_and_digest() {
+        let config = RunConfigFingerprintV2 {
+            provider: "anthropic".to_owned(),
+            model: "claude-sonnet-4-20250514".to_owned(),
+            payload_mode: PayloadMode::Author,
+            run_kind: "smart_redaction".to_owned(),
+            budget_dimensions: {
+                let mut m = BTreeMap::new();
+                m.insert("model_calls".to_owned(), 10);
+                m.insert("wall_time_ms".to_owned(), 30_000);
+                m
+            },
+            authority_snapshot_digest: "ab".repeat(32),
+            skill_use: skill_use_receipt_fixture(),
+        };
+        let bytes = canonical_config_v2_bytes(&config).unwrap();
+        let digest = canonical_config_v2_digest(&config).unwrap();
+        assert_eq!(digest.len(), 64);
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(digest, canonical_config_v2_digest(&config).unwrap());
+        let json_str = String::from_utf8(bytes).unwrap();
+        assert!(json_str.contains("authority_snapshot_digest"));
+        assert!(json_str.contains("skill_use"));
+    }
+
+    #[test]
+    fn canonical_config_v2_ignores_budget_insertion_order() {
+        let base = RunConfigFingerprintV2 {
+            provider: "anthropic".to_owned(),
+            model: "claude-sonnet-4-20250514".to_owned(),
+            payload_mode: PayloadMode::Author,
+            run_kind: "smart_redaction".to_owned(),
+            budget_dimensions: {
+                let mut m = BTreeMap::new();
+                m.insert("a".to_owned(), 1);
+                m.insert("b".to_owned(), 2);
+                m
+            },
+            authority_snapshot_digest: "ab".repeat(32),
+            skill_use: skill_use_receipt_fixture(),
+        };
+        let reordered = RunConfigFingerprintV2 {
+            budget_dimensions: {
+                let mut m = BTreeMap::new();
+                m.insert("b".to_owned(), 2);
+                m.insert("a".to_owned(), 1);
+                m
+            },
+            ..base.clone()
+        };
+        assert_eq!(
+            canonical_config_v2_digest(&base).unwrap(),
+            canonical_config_v2_digest(&reordered).unwrap()
+        );
+    }
+
+    #[test]
+    fn canonical_config_v2_differs_from_v1() {
+        let v1 = RunConfigFingerprintV1 {
+            provider: "anthropic".to_owned(),
+            model: "claude-sonnet-4-20250514".to_owned(),
+            payload_mode: PayloadMode::Author,
+            run_kind: "smart_redaction".to_owned(),
+            budget_dimensions: {
+                let mut m = BTreeMap::new();
+                m.insert("wall_time_ms".to_owned(), 30_000);
+                m
+            },
+        };
+        let v2 = RunConfigFingerprintV2 {
+            provider: "anthropic".to_owned(),
+            model: "claude-sonnet-4-20250514".to_owned(),
+            payload_mode: PayloadMode::Author,
+            run_kind: "smart_redaction".to_owned(),
+            budget_dimensions: {
+                let mut m = BTreeMap::new();
+                m.insert("wall_time_ms".to_owned(), 30_000);
+                m
+            },
+            authority_snapshot_digest: "ab".repeat(32),
+            skill_use: skill_use_receipt_fixture(),
+        };
+        let v1_digest = canonical_config_digest(&v1).unwrap();
+        let v2_digest = canonical_config_v2_digest(&v2).unwrap();
+        assert_ne!(v1_digest, v2_digest);
+    }
+
+    #[test]
+    fn run_contract_receipt_serde_round_trip() {
+        let receipt = RunContractReceiptV1 {
+            authority: authority_receipt_fixture(),
+            skill_use: skill_use_receipt_fixture(),
+            bound_at_unix_ms: 20,
+        };
+        let json = serde_json::to_string(&receipt).unwrap();
+        let restored: RunContractReceiptV1 = serde_json::from_str(&json).unwrap();
+        assert_eq!(receipt, restored);
+    }
+
+    #[test]
+    fn v2_full_lifecycle_round_trip() {
+        let task = ProductTaskSnapshot::new_v2(
+            task_id_fixture(),
+            TaskKind::SmartRedactionAuthor,
+            source_binding_fixture(),
+            10,
+        )
+        .unwrap();
+        let running = task.start_attempt(attempt_fixture(), 20).unwrap();
+        let receipt = run_contract_fixture(&running);
+        let bound = running
+            .bind_run_contract(run_id_fixture(), receipt.clone(), 25)
+            .unwrap();
+        let meta = v2_metadata_with_contract(&receipt);
+        let ready = bound
+            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .unwrap();
+        let applying = ready.begin_apply(35).unwrap();
+        let completed = applying
+            .complete_apply(
+                ReviewReceipt {
+                    artifact_id: artifact_id_fixture(),
+                    artifact_revision: ArtifactRevision::new(1),
+                    proposal_id: "proposal-00000000-0000-4000-8000-000000000001".to_owned(),
+                    applied_candidates: vec![0, 1, 2],
+                    rejected_candidates: vec![],
+                    local_delta: LocalReviewDeltaV1 {
+                        moved_candidates: vec![],
+                        manual_additions: vec![],
+                    },
+                    resulting_document_state_id: Some(1),
+                    resulting_document_digest: Some([3u8; 32]),
+                    decided_at_unix_ms: 50,
+                },
+                50,
+            )
+            .unwrap();
+        assert_eq!(completed.status(), TaskStatus::Completed);
+        assert_eq!(completed.store_schema_version(), 2);
+        assert!(completed.active_run_contract().is_some());
+        assert_eq!(completed.active_run_contract(), Some(&receipt));
+
+        // JSON round-trip preserves run contract
+        let json = serde_json::to_string(&completed).unwrap();
+        let restored: ProductTaskSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, completed);
+    }
+
+    #[test]
+    fn v2_fingerprint_privacy_no_secrets() {
+        let config = RunConfigFingerprintV2 {
+            provider: "anthropic".to_owned(),
+            model: "claude-sonnet-4-20250514".to_owned(),
+            payload_mode: PayloadMode::Author,
+            run_kind: "smart_redaction".to_owned(),
+            budget_dimensions: BTreeMap::new(),
+            authority_snapshot_digest: "ab".repeat(32),
+            skill_use: skill_use_receipt_fixture(),
+        };
+        let bytes = canonical_config_v2_bytes(&config).unwrap();
+        let json_str = String::from_utf8(bytes).unwrap();
+        assert!(!json_str.contains("secret"));
+        assert!(!json_str.contains("api_key"));
+        assert!(!json_str.contains("password"));
+        assert!(!json_str.contains("/home/"));
     }
 }
