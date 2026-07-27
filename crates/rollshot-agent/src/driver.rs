@@ -299,6 +299,31 @@ impl From<BudgetError> for DriverError {
     }
 }
 
+async fn await_provider_progress<F, T>(
+    cancellation: &RunCancellation,
+    deadline: tokio::time::Instant,
+    future: F,
+) -> Result<T, DriverError>
+where
+    F: std::future::Future<Output = T>,
+{
+    if cancellation.is_cancelled() {
+        return Err(DriverError::Cancelled);
+    }
+    if tokio::time::Instant::now() >= deadline {
+        return Err(DriverError::BudgetExhausted(BudgetDimension::WallTime));
+    }
+    tokio::pin!(future);
+    tokio::select! {
+        biased;
+        _ = cancellation.wait() => Err(DriverError::Cancelled),
+        _ = tokio::time::sleep_until(deadline) => {
+            Err(DriverError::BudgetExhausted(BudgetDimension::WallTime))
+        }
+        output = &mut future => Ok(output),
+    }
+}
+
 // ---------- Tool failure tracking ----------
 
 #[derive(Debug, Clone, Copy)]
@@ -994,14 +1019,12 @@ impl AgentRunner {
         let deadline = now + remaining;
         let bounds = StreamBounds::new(cancellation.clone(), deadline);
 
-        let mut stream = provider
-            .stream(request, bounds)
-            .await
-            .map_err(|e| DriverError::ProviderFailure(e.to_string()))?;
+        let mut stream =
+            await_provider_progress(cancellation, deadline, provider.stream(request, bounds))
+                .await?
+                .map_err(|error| DriverError::ProviderFailure(error.to_string()))?;
 
         let asm = StreamedTurnAssembler::new(tool_names.clone(), tool_names.clone());
-        let mut turn_input_tokens: u64 = 0;
-        let mut turn_output_tokens: u64 = 0;
         // The model's streamed prose for this turn.
         let mut turn_text = String::new();
 
@@ -1012,10 +1035,14 @@ impl AgentRunner {
         let mut tool_calls_with_deltas: HashSet<String> = HashSet::new();
 
         use futures_util::StreamExt;
-        while let Some(event_result) = stream.next().await {
-            if cancellation.is_cancelled() {
-                return Err(DriverError::Cancelled);
-            }
+        let completion_usage = loop {
+            let next = await_provider_progress(cancellation, deadline, stream.next()).await?;
+            let Some(event_result) = next else {
+                // Bare EOF without a proven Completed event is an error.
+                return Err(DriverError::ProviderFailure(
+                    "provider stream ended before completion".to_string(),
+                ));
+            };
 
             if let Err(BudgetError::Exceeded(dim)) =
                 tracker.check_wall_time(tokio::time::Instant::now())
@@ -1072,19 +1099,17 @@ impl AgentRunner {
                         tool_call_arg_deltas.push(serialized);
                     }
                 }
-                ModelStreamEvent::UsageDelta(u) => {
-                    turn_input_tokens = u.input_tokens;
-                    turn_output_tokens = u.output_tokens;
+                ModelStreamEvent::UsageDelta(_) => {
+                    // Final usage is authoritative from Completed; skip deltas.
                 }
                 ModelStreamEvent::Completed(c) => {
-                    turn_input_tokens = c.usage.input_tokens;
-                    turn_output_tokens = c.usage.output_tokens;
+                    break c.usage;
                 }
                 ModelStreamEvent::Error(e) => {
                     return Err(DriverError::ProviderFailure(e.to_string()));
                 }
             }
-        }
+        };
 
         // Commit this turn's prose as the run's latest assistant message.
         *last_assistant_text = turn_text;
@@ -1126,16 +1151,16 @@ impl AgentRunner {
 
         let turn_usage = UsageSnapshot {
             model_calls: 1,
-            input_tokens: turn_input_tokens,
-            output_tokens: turn_output_tokens,
+            input_tokens: completion_usage.input_tokens,
+            output_tokens: completion_usage.output_tokens,
             ..Default::default()
         };
         tracker.charge(turn_usage)?;
 
         let usage = Usage {
-            input_tokens: turn_input_tokens,
-            output_tokens: turn_output_tokens,
-            total_tokens: turn_input_tokens + turn_output_tokens,
+            input_tokens: completion_usage.input_tokens,
+            output_tokens: completion_usage.output_tokens,
+            total_tokens: completion_usage.total_tokens,
             ..Usage::new()
         };
         rig_run
@@ -4974,6 +4999,49 @@ pub(crate) mod tests {
                 ),
                 "should not double-count argument bytes, got: {result:?}"
             );
+        }
+
+        // ---- I4: await_provider_progress host-owned bounds ----
+
+        #[tokio::test]
+        async fn provider_progress_cancel_wakes_pending_future() {
+            let cancellation = RunCancellation::new();
+            cancellation.cancel();
+            let result = await_provider_progress(
+                &cancellation,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+                std::future::pending::<()>(),
+            )
+            .await;
+            assert_eq!(result, Err(DriverError::Cancelled));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn provider_progress_deadline_wakes_pending_future() {
+            let cancellation = RunCancellation::new();
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            let future =
+                await_provider_progress(&cancellation, deadline, std::future::pending::<()>());
+            tokio::pin!(future);
+            tokio::time::advance(std::time::Duration::from_secs(10)).await;
+            let result = future.await;
+            assert_eq!(
+                result,
+                Err(DriverError::BudgetExhausted(BudgetDimension::WallTime))
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn provider_progress_same_poll_tie_prefers_cancel() {
+            let cancellation = RunCancellation::new();
+            cancellation.cancel();
+            let result = await_provider_progress(
+                &cancellation,
+                tokio::time::Instant::now(),
+                std::future::ready(()),
+            )
+            .await;
+            assert_eq!(result, Err(DriverError::Cancelled));
         }
     }
 }

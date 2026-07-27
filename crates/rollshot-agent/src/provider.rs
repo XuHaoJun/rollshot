@@ -7,9 +7,7 @@ use rig_core::client::CompletionClient;
 use rig_core::completion::CompletionRequest;
 use rig_core::message::{Message, UserContent};
 
-use crate::model::{
-    drive_streamed_turn, emit_tool_call_completions, ModelCompletion, ModelUsage, StopReason,
-};
+use crate::model::{drive_streamed_turn, emit_tool_call_completions, ModelCompletion, StopReason};
 use crate::model::{ModelError, ModelMessage, ModelRequest, ModelStreamEvent};
 use crate::runtime::RunCancellation;
 
@@ -290,12 +288,10 @@ where
     let mut asm = StreamedTurnAssembler::new(tool_names.clone(), tool_names.clone());
 
     async_stream::stream! {
-        let mut saw_completed = false;
-        let mut saw_tool_call = false;
-        let mut accumulated_input_tokens: u64 = 0;
-        let mut accumulated_output_tokens: u64 = 0;
         let cancellation = bounds.cancellation.clone();
         let deadline = bounds.deadline;
+
+        let mut completion: Option<ModelCompletion> = None;
 
         loop {
             if cancellation.is_cancelled() {
@@ -316,34 +312,13 @@ where
                             match events {
                                 Ok(bac_events) => {
                                     for event in &bac_events {
-                                        let mut skip_yield = false;
                                         match event {
-                                            ModelStreamEvent::ToolCallStart { .. }
-                                            | ModelStreamEvent::ToolCallArgumentDelta { .. } => {
-                                                saw_tool_call = true;
-                                            }
-                                            ModelStreamEvent::UsageDelta(u) => {
-                                                accumulated_input_tokens = u.input_tokens;
-                                                accumulated_output_tokens = u.output_tokens;
-                                            }
                                             ModelStreamEvent::Completed(c) => {
-                                                saw_completed = true;
-                                                accumulated_input_tokens = c.usage.input_tokens;
-                                                accumulated_output_tokens = c.usage.output_tokens;
-                                                if saw_tool_call && c.stop_reason != StopReason::ToolUse {
-                                                    yield Ok(ModelStreamEvent::Completed(
-                                                        ModelCompletion {
-                                                            usage: c.usage.clone(),
-                                                            stop_reason: StopReason::ToolUse,
-                                                        },
-                                                    ));
-                                                    skip_yield = true;
-                                                }
+                                                completion = Some(c.clone());
                                             }
-                                            _ => {}
-                                        }
-                                        if !skip_yield {
-                                            yield Ok(event.clone());
+                                            _ => {
+                                                yield Ok(event.clone());
+                                            }
                                         }
                                     }
                                 }
@@ -361,46 +336,55 @@ where
                     }
                 }
             }
-        }
-
-        // If the stream ended without a Final (common in Anthropic streaming
-        // because Rig's SSE loop breaks on message_delta with stop_reason),
-        // finish the assembler and emit tool-call completions + a synthetic
-        // Completed event so downstream consumers always see a terminal event.
-        if !saw_completed {
-            let final_choice = rig_core::OneOrMany::one(
-                rig_core::message::AssistantContent::text("")
-            );
-            let turn = asm.finish(None, &final_choice);
-
-            // Infer stop reason from assembled content
-            let has_tool_calls = turn.choice.iter().any(|c| {
-                matches!(c, rig_core::message::AssistantContent::ToolCall(_))
-            });
-            let stop_reason = if has_tool_calls {
-                StopReason::ToolUse
-            } else {
-                StopReason::EndTurn
-            };
-
-            let completions = emit_tool_call_completions(&turn);
-            for event in completions {
-                yield Ok(event);
+            if completion.is_some() {
+                break;
             }
-
-            // Emit a synthetic Completed with accumulated usage from
-            // UsageDelta events (missing provider usage is not zero).
-            yield Ok(ModelStreamEvent::Completed(
-                ModelCompletion {
-                    usage: ModelUsage {
-                        input_tokens: accumulated_input_tokens,
-                        output_tokens: accumulated_output_tokens,
-                        total_tokens: accumulated_input_tokens + accumulated_output_tokens,
-                    },
-                    stop_reason,
-                },
-            ));
         }
+
+        let Some(mut completion) = completion else {
+            yield Err(ModelError::StreamIncomplete(
+                "provider stream ended before completion".to_string(),
+            ));
+            return;
+        };
+
+        // Rig synthesizes a Final response on bare EOF for both Anthropic and
+        // OpenAI streams. The assembler converts Final into Completed with zero
+        // usage when no proper stop signal was received. Check the accumulated
+        // response usage to distinguish real completions from bare-EOF synthesis.
+        //
+        // NOTE: This gate is defense-in-depth. The driver layer's `saw_completed`
+        // check is the authoritative completion proof. For OpenAI, usage alone is
+        // not independently reliable — an incomplete stream may report usage if
+        // the provider sent partial usage before truncation. Do not remove the
+        // driver-layer check believing this gate is sufficient on its own.
+        let response_usage = stream.response.as_ref().map(|r| r.token_usage());
+        let has_real_usage = response_usage.as_ref().is_some_and(|u| u.total_tokens > 0);
+
+        let final_choice = rig_core::OneOrMany::one(
+            rig_core::message::AssistantContent::text("")
+        );
+        let turn = asm.finish(None, &final_choice);
+
+        let has_tool_calls = turn.choice.iter().any(|item| {
+            matches!(item, rig_core::message::AssistantContent::ToolCall(_))
+        });
+
+        if !has_real_usage && !has_tool_calls {
+            yield Err(ModelError::StreamIncomplete(
+                "provider stream ended before completion".to_string(),
+            ));
+            return;
+        }
+
+        if has_tool_calls {
+            completion.stop_reason = StopReason::ToolUse;
+        }
+
+        for event in emit_tool_call_completions(&turn) {
+            yield Ok(event);
+        }
+        yield Ok(ModelStreamEvent::Completed(completion));
     }
 }
 

@@ -3,7 +3,14 @@
     "provenance": {
       "source_url": "https://docs.anthropic.com/en/api/messages-streaming",
       "retrieved": "2026-06-23",
-      "original_event_names": ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"],
+      "original_event_names": [
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "message_stop"
+      ],
       "substitutions": "Content scrubbed: IDs replaced with fake msg_/msg- IDs, model replaced with claude-sonnet-4-6, text replaced with test payload."
     },
     "chunks": [
@@ -20,7 +27,14 @@
     "provenance": {
       "source_url": "https://docs.anthropic.com/en/api/messages-streaming",
       "retrieved": "2026-06-23",
-      "original_event_names": ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"],
+      "original_event_names": [
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "message_stop"
+      ],
       "substitutions": "Content scrubbed: tool ID replaced, input JSON split across three delta events for fragmentation test."
     },
     "chunks": [
@@ -38,7 +52,14 @@
     "provenance": {
       "source_url": "https://docs.anthropic.com/en/api/messages-streaming",
       "retrieved": "2026-06-23",
-      "original_event_names": ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"],
+      "original_event_names": [
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "message_stop"
+      ],
       "substitutions": "Content scrubbed: text and tool_use blocks present in same response. IDs and text replaced."
     },
     "chunks": [
@@ -57,7 +78,14 @@
     "provenance": {
       "source_url": "https://docs.anthropic.com/en/api/messages-streaming",
       "retrieved": "2026-06-23",
-      "original_event_names": ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"],
+      "original_event_names": [
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "message_stop"
+      ],
       "substitutions": "Content scrubbed: usage values are cumulative totals per Anthropic spec. input_tokens in message_start, output_tokens in message_delta."
     },
     "chunks": [
@@ -73,7 +101,15 @@
     "provenance": {
       "source_url": "https://docs.anthropic.com/en/api/messages-streaming",
       "retrieved": "2026-06-23",
-      "original_event_names": ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop", "unknown_future_event"],
+      "original_event_names": [
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "message_stop",
+        "unknown_future_event"
+      ],
       "substitutions": "Content scrubbed. Includes a hypothetical future event type to test forward-compatibility."
     },
     "chunks": [
@@ -90,7 +126,10 @@
     "provenance": {
       "source_url": "https://docs.anthropic.com/en/api/messages-streaming",
       "retrieved": "2026-06-23",
-      "original_event_names": ["message_start", "content_block_delta"],
+      "original_event_names": [
+        "message_start",
+        "content_block_delta"
+      ],
       "substitutions": "Content scrubbed. Contains a content_block_delta with malformed JSON in the data field."
     },
     "chunks": [
@@ -103,8 +142,12 @@
     "provenance": {
       "source_url": "https://docs.anthropic.com/en/api/messages-streaming",
       "retrieved": "2026-06-23",
-      "original_event_names": ["message_start", "content_block_start", "content_block_delta"],
-      "substitutions": "Content scrubbed. Stream ends prematurely after content_block_delta — no content_block_stop, message_delta, or message_stop."
+      "original_event_names": [
+        "message_start",
+        "content_block_start",
+        "content_block_delta"
+      ],
+      "substitutions": "Content scrubbed. Stream ends prematurely after content_block_delta \u2014 no content_block_stop, message_delta, or message_stop."
     },
     "chunks": [
       "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test_007\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-6\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n",
@@ -146,7 +189,9 @@
     "provenance": {
       "source_url": "https://platform.openai.com/docs/api-reference/chat/streaming",
       "retrieved": "2026-06-23",
-      "original_event_names": ["chat.completion.chunk"],
+      "original_event_names": [
+        "chat.completion.chunk"
+      ],
       "substitutions": "Content scrubbed: IDs replaced with chatcmpl-test, model replaced with gpt-4, text replaced with test payload."
     },
     "chunks": [
@@ -154,6 +199,7 @@
       "data: {\"id\":\"chatcmpl-test-001\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n",
       "data: {\"id\":\"chatcmpl-test-001\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\", world!\"},\"finish_reason\":null}]}\n\n",
       "data: {\"id\":\"chatcmpl-test-001\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+      "data: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n",
       "data: [DONE]\n\n"
     ]
   },
@@ -161,7 +207,9 @@
     "provenance": {
       "source_url": "https://platform.openai.com/docs/api-reference/chat/streaming",
       "retrieved": "2026-06-23",
-      "original_event_names": ["chat.completion.chunk"],
+      "original_event_names": [
+        "chat.completion.chunk"
+      ],
       "substitutions": "Content scrubbed: tool ID replaced, arguments JSON split across three delta events for fragmentation test."
     },
     "chunks": [
@@ -177,7 +225,9 @@
     "provenance": {
       "source_url": "https://platform.openai.com/docs/api-reference/chat/streaming",
       "retrieved": "2026-06-23",
-      "original_event_names": ["chat.completion.chunk"],
+      "original_event_names": [
+        "chat.completion.chunk"
+      ],
       "substitutions": "Content scrubbed: tool IDs replaced. Two indexed tool calls in single response."
     },
     "chunks": [
@@ -193,7 +243,9 @@
     "provenance": {
       "source_url": "https://platform.openai.com/docs/api-reference/chat/streaming",
       "retrieved": "2026-06-23",
-      "original_event_names": ["chat.completion.chunk"],
+      "original_event_names": [
+        "chat.completion.chunk"
+      ],
       "substitutions": "Content scrubbed. Includes usage object in final chunk per stream_options.include_usage."
     },
     "chunks": [
@@ -208,13 +260,16 @@
     "provenance": {
       "source_url": "https://platform.openai.com/docs/api-reference/chat/streaming",
       "retrieved": "2026-06-23",
-      "original_event_names": ["chat.completion.chunk"],
+      "original_event_names": [
+        "chat.completion.chunk"
+      ],
       "substitutions": "Content scrubbed. Verifies [DONE] marker terminates stream."
     },
     "chunks": [
       "data: {\"id\":\"chatcmpl-test-005\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n",
       "data: {\"id\":\"chatcmpl-test-005\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Done.\"},\"finish_reason\":null}]}\n\n",
       "data: {\"id\":\"chatcmpl-test-005\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+      "data: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n",
       "data: [DONE]\n\n"
     ]
   },
@@ -222,7 +277,9 @@
     "provenance": {
       "source_url": "https://platform.openai.com/docs/api-reference/chat/streaming",
       "retrieved": "2026-06-23",
-      "original_event_names": ["chat.completion.chunk"],
+      "original_event_names": [
+        "chat.completion.chunk"
+      ],
       "substitutions": "Content scrubbed. Contains a chunk with malformed JSON in the data field."
     },
     "chunks": [
@@ -230,6 +287,7 @@
       "data: {\"choices\":[{\"delta\":{\"content\":\"Broken\n\n",
       "data: {\"id\":\"chatcmpl-test-006\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"},\"finish_reason\":null}]}\n\n",
       "data: {\"id\":\"chatcmpl-test-006\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+      "data: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n",
       "data: [DONE]\n\n"
     ]
   },
@@ -237,8 +295,10 @@
     "provenance": {
       "source_url": "https://platform.openai.com/docs/api-reference/chat/streaming",
       "retrieved": "2026-06-23",
-      "original_event_names": ["chat.completion.chunk"],
-      "substitutions": "Content scrubbed. Stream ends prematurely — no finish_reason, no [DONE] marker."
+      "original_event_names": [
+        "chat.completion.chunk"
+      ],
+      "substitutions": "Content scrubbed. Stream ends prematurely \u2014 no finish_reason, no [DONE] marker."
     },
     "chunks": [
       "data: {\"id\":\"chatcmpl-test-007\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n",

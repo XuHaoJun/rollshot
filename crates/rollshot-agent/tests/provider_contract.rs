@@ -367,7 +367,7 @@ async fn anthropic_malformed_json_emits_protocol_failure() {
 }
 
 #[tokio::test]
-async fn anthropic_incomplete_stream_emits_stream_incomplete() {
+async fn anthropic_incomplete_stream_is_not_completed() {
     let fixture = get_fixture("anthropic_incomplete_stream");
     let server = setup_sse_mock(&fixture).await;
     let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
@@ -378,33 +378,20 @@ async fn anthropic_incomplete_stream_emits_stream_incomplete() {
         .await
         .expect("stream should start");
 
-    // Should get text delta
     let first = stream.next().await.expect("should have event").expect("ok");
     assert!(matches!(&first, ModelStreamEvent::TextDelta(t) if t == "Partial..."));
 
-    // Stream should end — may produce a Completed event or an error
-    // The key assertion: it does not hang indefinitely
-    let mut got_terminal = false;
-    while let Some(result) = stream.next().await {
-        match result {
-            Ok(ModelStreamEvent::Completed(_)) => {
-                got_terminal = true;
-                break;
-            }
-            Ok(ModelStreamEvent::Error(_)) => {
-                got_terminal = true;
-                break;
-            }
-            Err(_) => {
-                got_terminal = true;
-                break;
-            }
-            _ => continue,
-        }
-    }
+    let (events, error) = collect_events(&mut stream).await;
     assert!(
-        got_terminal,
-        "incomplete stream should terminate with Completed or Error"
+        matches!(error, Some(ModelError::StreamIncomplete(_))),
+        "expected StreamIncomplete error, got: {:?}",
+        error
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| { matches!(event, ModelStreamEvent::Completed(_)) }),
+        "incomplete stream must not emit Completed"
     );
 }
 
@@ -882,7 +869,7 @@ async fn openai_malformed_json_skipped() {
 }
 
 #[tokio::test]
-async fn openai_incomplete_stream_emits_stream_incomplete() {
+async fn openai_incomplete_stream_is_not_completed() {
     let fixture = get_fixture("openai_incomplete_stream");
     let server = setup_sse_mock(&fixture).await;
     let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
@@ -896,27 +883,17 @@ async fn openai_incomplete_stream_emits_stream_incomplete() {
     let first = stream.next().await.expect("should have event").expect("ok");
     assert!(matches!(&first, ModelStreamEvent::TextDelta(t) if t == "Partial..."));
 
-    let mut got_terminal = false;
-    while let Some(result) = stream.next().await {
-        match result {
-            Ok(ModelStreamEvent::Completed(_)) => {
-                got_terminal = true;
-                break;
-            }
-            Ok(ModelStreamEvent::Error(_)) => {
-                got_terminal = true;
-                break;
-            }
-            Err(_) => {
-                got_terminal = true;
-                break;
-            }
-            _ => continue,
-        }
-    }
+    let (events, error) = collect_events(&mut stream).await;
     assert!(
-        got_terminal,
-        "incomplete stream should terminate with Completed or Error"
+        matches!(error, Some(ModelError::StreamIncomplete(_))),
+        "expected StreamIncomplete error, got: {:?}",
+        error
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| { matches!(event, ModelStreamEvent::Completed(_)) }),
+        "incomplete stream must not emit Completed"
     );
 }
 
@@ -1041,6 +1018,8 @@ async fn openai_stream_consumes_at_least_two_chunks() {
 
 mod visual_annotation {
     use super::*;
+    use rollshot_agent::runtime::BudgetDimension;
+    use std::sync::Arc;
 
     struct ScriptedProvider {
         requests: Mutex<Vec<ModelRequest>>,
@@ -1091,6 +1070,146 @@ mod visual_annotation {
                     >)
             })
         }
+    }
+
+    // ---- PendingProvider: ignores StreamBounds intentionally ----
+
+    #[derive(Clone, Copy)]
+    enum PendingMode {
+        Establishment,
+        AfterText,
+        AfterCompleted,
+    }
+
+    struct PendingProvider {
+        mode: PendingMode,
+        entered: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    }
+
+    impl ProviderAdapter for PendingProvider {
+        fn stream(
+            &self,
+            _request: ModelRequest,
+            _bounds: StreamBounds,
+        ) -> Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            Pin<
+                                Box<
+                                    dyn futures_util::Stream<
+                                            Item = Result<ModelStreamEvent, ModelError>,
+                                        > + Send,
+                                >,
+                            >,
+                            ModelError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            match self.mode {
+                PendingMode::Establishment => {
+                    let mut entered = self.entered.lock().unwrap();
+                    if let Some(tx) = entered.take() {
+                        let _ = tx.send(());
+                    }
+                    Box::pin(async { std::future::pending().await })
+                }
+                PendingMode::AfterText => {
+                    let entered = Arc::clone(&self.entered);
+                    Box::pin(async move {
+                        let (tx, events) = {
+                            let mut guard = entered.lock().unwrap();
+                            let tx = guard.take();
+                            let events: Vec<Result<ModelStreamEvent, ModelError>> =
+                                vec![Ok(ModelStreamEvent::TextDelta("partial".to_string()))];
+                            (tx, events)
+                        };
+                        Ok(Box::pin(async_stream::stream! {
+                            for event in events {
+                                yield event;
+                            }
+                            if let Some(tx) = tx {
+                                let _ = tx.send(());
+                            }
+                            // Remain pending — never yield a completion.
+                            std::future::pending::<()>().await;
+                        })
+                            as Pin<
+                                Box<
+                                    dyn futures_util::Stream<
+                                            Item = Result<ModelStreamEvent, ModelError>,
+                                        > + Send,
+                                >,
+                            >)
+                    })
+                }
+                PendingMode::AfterCompleted => {
+                    let entered = Arc::clone(&self.entered);
+                    Box::pin(async move {
+                        let tx = {
+                            let mut guard = entered.lock().unwrap();
+                            guard.take()
+                        };
+                        Ok(Box::pin(async_stream::stream! {
+                            yield Ok(ModelStreamEvent::TextDelta("partial".to_string()));
+                            if let Some(tx) = tx {
+                                let _ = tx.send(());
+                            }
+                            yield Ok(ModelStreamEvent::Completed(ModelCompletion {
+                                usage: ModelUsage {
+                                    input_tokens: 5,
+                                    output_tokens: 3,
+                                    total_tokens: 8,
+                                },
+                                stop_reason: StopReason::EndTurn,
+                            }));
+                            std::future::pending::<()>().await;
+                        })
+                            as Pin<
+                                Box<
+                                    dyn futures_util::Stream<
+                                            Item = Result<ModelStreamEvent, ModelError>,
+                                        > + Send,
+                                >,
+                            >)
+                    })
+                }
+            }
+        }
+    }
+
+    fn spawn_pending_run(
+        mode: PendingMode,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        RunCancellation,
+        tokio::task::JoinHandle<VisualAnnotationRunTerminal>,
+    ) {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let provider = PendingProvider {
+            mode,
+            entered: Arc::new(Mutex::new(Some(entered_tx))),
+        };
+        let cancellation = RunCancellation::new();
+        let run_cancellation = cancellation.clone();
+        let task = tokio::spawn(async move {
+            let mut budget = visual_annotation_run_budget();
+            budget.wall_time = std::time::Duration::from_secs(10);
+            AgentRunner::new(AgentConfig {
+                max_turns: 2,
+                ..AgentConfig::default()
+            })
+            .run_visual_annotation_with_provider(
+                authorized_input_with_one_png(),
+                &provider,
+                budget,
+                &run_cancellation,
+            )
+            .await
+        });
+        (entered_rx, cancellation, task)
     }
 
     fn authorized_input_with_one_png() -> AuthorizedModelInput {
@@ -1364,6 +1483,170 @@ mod visual_annotation {
             !debug_str.contains("89504e47"),
             "Debug output must not contain attachment hex bytes: {}",
             debug_str
+        );
+    }
+
+    // ---- PendingProvider host-bounds tests ----
+
+    #[tokio::test]
+    async fn runner_cancels_pending_provider_establishment() {
+        let (entered, cancellation, task) = spawn_pending_run(PendingMode::Establishment);
+        entered.await.expect("provider entered establishment");
+        cancellation.cancel();
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("runner must not hang")
+            .expect("runner task");
+        assert_eq!(terminal, VisualAnnotationRunTerminal::Cancelled);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn runner_deadlines_pending_provider_establishment() {
+        let (entered, _cancellation, task) = spawn_pending_run(PendingMode::Establishment);
+        entered.await.expect("provider entered establishment");
+        tokio::time::advance(std::time::Duration::from_secs(10)).await;
+        assert_eq!(
+            task.await.expect("runner task"),
+            VisualAnnotationRunTerminal::BudgetExhausted {
+                dimension: BudgetDimension::WallTime,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn runner_cancels_pending_provider_item_after_partial_text() {
+        let (entered, cancellation, task) = spawn_pending_run(PendingMode::AfterText);
+        entered.await.expect("provider entered pending item poll");
+        cancellation.cancel();
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("runner must not hang")
+            .expect("runner task");
+        assert_eq!(terminal, VisualAnnotationRunTerminal::Cancelled);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn runner_deadlines_pending_provider_item_after_partial_text() {
+        let (entered, _cancellation, task) = spawn_pending_run(PendingMode::AfterText);
+        entered.await.expect("provider entered pending item poll");
+        tokio::time::advance(std::time::Duration::from_secs(10)).await;
+        assert_eq!(
+            task.await.expect("runner task"),
+            VisualAnnotationRunTerminal::BudgetExhausted {
+                dimension: BudgetDimension::WallTime,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn runner_does_not_wait_for_eof_after_valid_completion() {
+        let (entered, _cancellation, task) = spawn_pending_run(PendingMode::AfterCompleted);
+        entered.await.expect("provider completed and signalled");
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("runner must not hang after valid completion")
+            .expect("runner task");
+        assert!(
+            !matches!(terminal, VisualAnnotationRunTerminal::Cancelled)
+                && !matches!(
+                    terminal,
+                    VisualAnnotationRunTerminal::BudgetExhausted { .. }
+                ),
+            "runner should return promptly after Completed, got: {:?}",
+            terminal
+        );
+    }
+
+    // ---- Partial-tool driver test ----
+
+    struct FallibleScriptedProvider {
+        requests: Mutex<Vec<ModelRequest>>,
+        scripts: Mutex<VecDeque<Vec<Result<ModelStreamEvent, ModelError>>>>,
+    }
+
+    impl FallibleScriptedProvider {
+        fn new(scripts: Vec<Vec<Result<ModelStreamEvent, ModelError>>>) -> Self {
+            Self {
+                requests: Mutex::new(Vec::new()),
+                scripts: Mutex::new(VecDeque::from(scripts)),
+            }
+        }
+    }
+
+    impl ProviderAdapter for FallibleScriptedProvider {
+        fn stream(
+            &self,
+            request: ModelRequest,
+            _bounds: StreamBounds,
+        ) -> Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            Pin<
+                                Box<
+                                    dyn futures_util::Stream<
+                                            Item = Result<ModelStreamEvent, ModelError>,
+                                        > + Send,
+                                >,
+                            >,
+                            ModelError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            self.requests.lock().unwrap().push(request);
+            let events = self.scripts.lock().unwrap().pop_front().unwrap_or_default();
+            Box::pin(async move {
+                let s = futures_util::stream::iter(events);
+                Ok(Box::pin(s)
+                    as Pin<
+                        Box<
+                            dyn futures_util::Stream<Item = Result<ModelStreamEvent, ModelError>>
+                                + Send,
+                        >,
+                    >)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_tool_call_never_executes() {
+        let provider = FallibleScriptedProvider::new(vec![vec![
+            Ok(ModelStreamEvent::ToolCallStart {
+                id: "tc_partial".into(),
+                name: "submit_visual_annotation_suggestions".into(),
+            }),
+            Ok(ModelStreamEvent::ToolCallArgumentDelta {
+                id: "tc_partial".into(),
+                delta: "{\"unfinished\"".into(),
+            }),
+            Err(ModelError::StreamIncomplete("fixture ended".into())),
+        ]]);
+        let runner = va_runner();
+        let input = authorized_input_with_one_png();
+        let cancel = RunCancellation::new();
+
+        let result = runner
+            .run_visual_annotation_with_provider(
+                input,
+                &provider,
+                visual_annotation_run_budget(),
+                &cancel,
+            )
+            .await;
+
+        assert_eq!(
+            result,
+            VisualAnnotationRunTerminal::ProviderFailure,
+            "partial tool call with StreamIncomplete must produce ProviderFailure"
+        );
+
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            1,
+            "should have made exactly one model request"
         );
     }
 }
