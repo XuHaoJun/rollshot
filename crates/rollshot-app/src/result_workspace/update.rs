@@ -1659,6 +1659,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 if let Ok(cfg) = super::workbench::load_provider_config(&config_dir) {
                     wb.provider_config = cfg;
                 }
+                if let Ok(store) = super::workbench::task_store::TaskStore::open(&config_dir) {
+                    wb.task_store = Some(std::sync::Arc::new(store));
+                }
             }
             state.mode = super::workbench::WorkspaceMode::Workbench(wb);
             Task::none()
@@ -1750,11 +1753,14 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
             };
             match msg {
                 super::workbench::WorkbenchMessage::RunEvent { task_id: msg_task_id, run_id: msg_run_id, event } => {
-                    // Ignore stale run messages.
-                    if let super::workbench::RunState::Running { task_id, run_id, .. } = &workbench.run_state {
-                        if *task_id != msg_task_id || *run_id != msg_run_id {
-                            return Task::none();
+                    // Reject run messages when not Running (stale guard).
+                    match &workbench.run_state {
+                        super::workbench::RunState::Running { task_id, run_id, .. } => {
+                            if *task_id != msg_task_id || *run_id != msg_run_id {
+                                return Task::none();
+                            }
                         }
+                        _ => return Task::none(),
                     }
                     use rollshot_agent::runtime::RunEvent;
                     match &event {
@@ -1786,11 +1792,14 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::RunTerminal { task_id: msg_task_id, run_id: msg_run_id, terminal } => {
-                    // Ignore stale run messages.
-                    if let super::workbench::RunState::Running { task_id, run_id, .. } = &workbench.run_state {
-                        if *task_id != msg_task_id || *run_id != msg_run_id {
-                            return Task::none();
+                    // Reject run messages when not Running (stale guard).
+                    match &workbench.run_state {
+                        super::workbench::RunState::Running { task_id, run_id, .. } => {
+                            if *task_id != msg_task_id || *run_id != msg_run_id {
+                                return Task::none();
+                            }
                         }
+                        _ => return Task::none(),
                     }
                     // Reconcile accumulated AssistantText against the
                     // authoritative final text before pushing the terminal
@@ -1866,11 +1875,14 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     Task::none()
                 }
                 super::workbench::WorkbenchMessage::RunFailed { task_id: msg_task_id, run_id: msg_run_id, error: e } => {
-                    // Ignore stale run messages.
-                    if let super::workbench::RunState::Running { task_id, run_id, .. } = &workbench.run_state {
-                        if *task_id != msg_task_id || *run_id != msg_run_id {
-                            return Task::none();
+                    // Reject run messages when not Running (stale guard).
+                    match &workbench.run_state {
+                        super::workbench::RunState::Running { task_id, run_id, .. } => {
+                            if *task_id != msg_task_id || *run_id != msg_run_id {
+                                return Task::none();
+                            }
                         }
+                        _ => return Task::none(),
                     }
                     workbench.error = Some(e);
                     workbench.run_state = super::workbench::RunState::Terminal(
@@ -2085,6 +2097,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         &workbench.budget,
                         session,
                         workbench.payload_mode,
+                        workbench.task_store.clone(),
                     ) {
                         Ok((task, cancellation)) => {
                             workbench.run_state = super::workbench::RunState::Running {

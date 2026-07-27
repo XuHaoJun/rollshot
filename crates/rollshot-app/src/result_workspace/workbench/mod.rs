@@ -90,6 +90,9 @@ pub struct WorkbenchState {
     /// Cached result of `assemble_correction_evidence(…).is_empty()` —
     /// avoids per-frame Vec allocations in the view.
     pub corrections_non_empty: bool,
+    /// Filesystem-backed task store for run-outcome persistence.
+    /// `None` when no config directory is available (e.g. tests).
+    pub task_store: Option<std::sync::Arc<task_store::TaskStore>>,
 }
 
 /// Parameters captured at Send time and consumed when disclosure is confirmed.
@@ -143,6 +146,7 @@ impl Default for WorkbenchState {
             pending_run: None,
             next_manual_candidate_id: 1,
             corrections_non_empty: false,
+            task_store: None,
         }
     }
 }

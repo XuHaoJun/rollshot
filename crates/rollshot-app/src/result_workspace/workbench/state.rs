@@ -89,6 +89,10 @@ pub enum WorkbenchError {
     Store {
         message: String,
     },
+    /// Task-store persistence failure (running or terminal snapshot).
+    StorePersist {
+        message: String,
+    },
     Config,
     CapabilityUnavailable {
         message: String,
@@ -108,6 +112,7 @@ impl std::fmt::Display for WorkbenchError {
             Self::BudgetExhausted { dimension } => write!(f, "Budget exhausted: {dimension:?}"),
             Self::VisionPrepare { message } => write!(f, "Vision prepare: {message}"),
             Self::Store { message } => write!(f, "Preset store: {message}"),
+            Self::StorePersist { message } => write!(f, "Store persist: {message}"),
             Self::Config => write!(f, "Provider not configured"),
             Self::CapabilityUnavailable { message } => {
                 write!(f, "Capability unavailable: {message}")
@@ -118,6 +123,28 @@ impl std::fmt::Display for WorkbenchError {
 }
 
 impl WorkbenchError {
+    /// Map a `WorkbenchError` to the corresponding `TaskTerminal` for store
+    /// persistence.  `StorePersist` and `Cancelled` map to `RuntimeFailure`
+    /// and `Cancelled` respectively.
+    pub fn to_task_terminal(&self) -> rollshot_agent::product_task::TaskTerminal {
+        use rollshot_agent::product_task::TaskTerminal;
+        match self {
+            Self::ProviderFailure { .. } => TaskTerminal::ProviderFailure,
+            Self::SourceValidationFailure => TaskTerminal::SourceValidationFailure,
+            Self::RuntimeFailure
+            | Self::VisionPrepare { .. }
+            | Self::Config
+            | Self::CapabilityUnavailable { .. }
+            | Self::Store { .. }
+            | Self::StorePersist { .. } => TaskTerminal::RuntimeFailure,
+            Self::AgentProtocolFailure { .. } => TaskTerminal::AgentProtocolFailure,
+            Self::BudgetExhausted { dimension } => TaskTerminal::BudgetExhausted {
+                dimension: format!("{dimension:?}"),
+            },
+            Self::Cancelled => TaskTerminal::Cancelled,
+        }
+    }
+
     /// Map a terminal state to the workbench error it represents (if any).
     /// `ReadyForReview` / `NeedsUserInput` / `Cancelled` are not errors.
     pub fn from_terminal(terminal: &RunTerminalState) -> Option<Self> {
