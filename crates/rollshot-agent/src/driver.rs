@@ -56,13 +56,12 @@ use crate::runtime::{
     BudgetDimension, BudgetError, BudgetTracker, NullEventSink, RunBudget, RunCancellation,
     RunEvent, RunEventSink, UsageSnapshot,
 };
-use crate::tools::{ToolCall, ToolContext, ToolOutcome, ToolRegistry};
 use crate::skills::SMART_REDACTION_PACKAGE_ID;
+use crate::tools::{ToolCall, ToolContext, ToolOutcome, ToolRegistry};
 
 // ---------- Configuration ----------
 
 // SMART_REDACTION_SYSTEM_PROMPT removed: all runs now use compose_smart_redaction_prompt().
-
 
 const VISUAL_ANNOTATION_SYSTEM_PROMPT: &str = r#"You are Rollshot Visual Annotation Agent.
 Your only job is to suggest visual annotations for the single most important UI
@@ -1215,12 +1214,22 @@ impl AgentRunner {
             .map(String::from)
             .collect();
         let results = match authority {
-            Some(auth) => tool_registry
-                .execute_authorized_calls(&tool_calls, cancellation, &terminal_tools, auth, tool_ctx)
-                .await,
-            None => tool_registry
-                .execute_calls(&tool_calls, cancellation, &terminal_tools)
-                .await,
+            Some(auth) => {
+                tool_registry
+                    .execute_authorized_calls(
+                        &tool_calls,
+                        cancellation,
+                        &terminal_tools,
+                        auth,
+                        tool_ctx,
+                    )
+                    .await
+            }
+            None => {
+                tool_registry
+                    .execute_calls(&tool_calls, cancellation, &terminal_tools)
+                    .await
+            }
         };
 
         let mut rig_results = Vec::new();
@@ -1660,7 +1669,7 @@ fn map_budget_error_to_visual_annotation(
 // ---------- Tests ----------
 
 #[cfg(test)]
-#[allow(clippy::useless_vec)]
+#[allow(clippy::useless_vec, clippy::type_complexity)]
 pub(crate) mod tests {
     use super::*;
     use crate::domain::{RunId, SessionId};
@@ -1767,18 +1776,19 @@ pub(crate) mod tests {
     }
 
     fn test_skill_use() -> crate::skills::SkillUse {
-        crate::skills::bundled_smart_redaction_use()
-            .expect("bundled skill should load")
+        crate::skills::bundled_smart_redaction_use().expect("bundled skill should load")
     }
 
     fn test_authority(ctx: &Arc<ToolContext>) -> crate::authority::AuthoritySnapshot {
         use crate::authority::{
-            AuthorityBinding, AuthoritySnapshot, DisclosureCeiling, PreparedCapability, RunOperation,
+            AuthorityBinding, AuthoritySnapshot, DisclosureCeiling, PreparedCapability,
+            RunOperation,
         };
         use std::collections::BTreeSet;
 
         let binding = AuthorityBinding::new(
-            crate::product_task::ProductTaskId::parse("task-00000000-0000-4000-8000-00000000002a").unwrap(),
+            crate::product_task::ProductTaskId::parse("task-00000000-0000-4000-8000-00000000002a")
+                .unwrap(),
             crate::product_task::TaskAttemptId::new(1),
             ctx.run_id.clone(),
             ctx.content_binding.clone(),
@@ -4168,8 +4178,8 @@ pub(crate) mod tests {
 
     #[test]
     fn smart_redaction_system_prompt_documents_improve_runs() {
-        let skill = crate::skills::bundled_smart_redaction_use()
-            .expect("bundled skill should load");
+        let skill =
+            crate::skills::bundled_smart_redaction_use().expect("bundled skill should load");
         let system_prompt = compose_smart_redaction_prompt(&skill).unwrap();
         assert!(
             system_prompt.contains("Improve runs"),
@@ -4195,10 +4205,12 @@ pub(crate) mod tests {
 
     #[test]
     fn composed_prompt_keeps_rollshot_envelope_ahead_of_delimited_skill() {
-        let skill = crate::skills::bundled_smart_redaction_use()
-            .expect("bundled skill should load");
+        let skill =
+            crate::skills::bundled_smart_redaction_use().expect("bundled skill should load");
         let prompt = compose_smart_redaction_prompt(&skill).unwrap();
-        let envelope = prompt.find("Rollshot authority and safety envelope").unwrap();
+        let envelope = prompt
+            .find("Rollshot authority and safety envelope")
+            .unwrap();
         let skill_start = prompt.find("<rollshot-skill").unwrap();
         assert!(envelope < skill_start);
         assert!(prompt.contains(skill.digest()));
@@ -5283,20 +5295,20 @@ pub(crate) mod tests {
     /// Build a `SkillUse` whose body is `attack_body` while keeping the
     /// standard package_id and source_authority so `compose_smart_redaction_prompt`
     /// accepts it.  Uses the public catalog API — fields are private.
+    #[allow(clippy::type_complexity)]
     fn skill_use_with_body(attack_body: &str) -> crate::skills::SkillUse {
         use crate::skills::{
-            SkillCatalogLimits, SkillInvocationKind, SkillInvocationRequest,
-            SkillPackageId, SkillAuthorityId, SkillSource, StaticSkillCatalog,
+            SkillAuthorityId, SkillCatalogLimits, SkillInvocationKind, SkillInvocationRequest,
+            SkillPackageId, SkillSource, StaticSkillCatalog,
         };
 
-        let manifest = format!(
-            r#"schema_version = 1
+        let manifest = r#"schema_version = 1
 package_id = "smart-redaction"
 name = "Injected Skill"
 description = "Attack body injection test."
 main = "SKILL.md"
 "#
-        );
+        .to_string();
         let packages: Vec<(String, Vec<(String, Vec<u8>)>)> = vec![(
             "smart-redaction".to_string(),
             vec![
@@ -5320,7 +5332,10 @@ main = "SKILL.md"
                 .collect(),
         )];
         let report = StaticSkillCatalog::build(sources, &limits);
-        assert_eq!(report.omitted_count, 0, "catalog should not omit the attack skill");
+        assert_eq!(
+            report.omitted_count, 0,
+            "catalog should not omit the attack skill"
+        );
         report
             .catalog
             .invoke(
@@ -5370,10 +5385,8 @@ main = "SKILL.md"
         )
         .unwrap();
         let authority_binding = AuthorityBinding::new(
-            crate::product_task::ProductTaskId::parse(
-                "task-00000000-0000-4000-8000-00000000002a",
-            )
-            .unwrap(),
+            crate::product_task::ProductTaskId::parse("task-00000000-0000-4000-8000-00000000002a")
+                .unwrap(),
             crate::product_task::TaskAttemptId::new(1),
             crate::domain::RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap(),
             binding.clone(),
@@ -5411,7 +5424,11 @@ main = "SKILL.md"
         // -- Inject attack body and compose prompt -----------------------------
 
         let attack_skill = skill_use_with_body(ATTACK_BODY);
-        assert_eq!(attack_skill.body(), ATTACK_BODY, "body must contain attack text");
+        assert_eq!(
+            attack_skill.body(),
+            ATTACK_BODY,
+            "body must contain attack text"
+        );
 
         let prompt = compose_smart_redaction_prompt(&attack_skill).unwrap();
         assert!(
@@ -5425,8 +5442,15 @@ main = "SKILL.md"
         let receipt_after = authority.receipt(0);
         let mut grants_after = receipt_after.granted_operations.clone();
         grants_after.sort_by_key(|g| format!("{g:?}"));
-        assert_eq!(grants_after, expected_grants, "grants must not change from attack body");
-        assert_eq!(receipt_after.granted_operations.len(), 6, "still exactly 6 grants");
+        assert_eq!(
+            grants_after, expected_grants,
+            "grants must not change from attack body"
+        );
+        assert_eq!(
+            receipt_after.granted_operations.len(),
+            6,
+            "still exactly 6 grants"
+        );
 
         // -- Registry UNCHANGED — built from code, not from body ---------------
 
@@ -5441,7 +5465,10 @@ main = "SKILL.md"
         register_all_tools(&mut reg2, &ctx);
         let mut actual_tools: Vec<&str> = reg2.tool_names();
         actual_tools.sort();
-        assert_eq!(expected_tools, actual_tools, "registry must not change from attack body");
+        assert_eq!(
+            expected_tools, actual_tools,
+            "registry must not change from attack body"
+        );
 
         // -- Authorization boundary enforced by code, not body text ------------
 

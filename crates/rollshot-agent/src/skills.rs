@@ -183,6 +183,7 @@ impl SkillCatalogLimits {
 // ========================================================================
 
 pub enum SkillSource<'a> {
+    #[allow(clippy::type_complexity)]
     Bundled(Vec<(&'a str, Vec<(&'a str, &'a [u8])>)>),
     HostRoot(HostSkillRoot),
 }
@@ -223,14 +224,14 @@ impl HostSkillRoot {
         }
 
         let (start_fd, components): (std::os::fd::OwnedFd, Vec<&str>) =
-            if normalized.starts_with('/') {
+            if let Some(tail) = normalized.strip_prefix('/') {
                 let fd = open(
                     "/",
                     OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW,
                     Mode::empty(),
                 )
                 .map_err(|e| SkillError::Io(e.to_string()))?;
-                let components: Vec<&str> = normalized[1..]
+                let components: Vec<&str> = tail
                     .split('/')
                     .filter(|c| !c.is_empty() && *c != ".")
                     .collect();
@@ -291,6 +292,7 @@ struct CatalogEntry {
     declared_version: Option<String>,
     body: Arc<str>,
     digest: String,
+    #[allow(dead_code)]
     source_path: String,
 }
 
@@ -971,22 +973,18 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// Well-known package ID for the bundled Smart Redaction skill.
 pub const SMART_REDACTION_PACKAGE_ID: &str = "smart-redaction";
 
-const BUNDLED_MANIFEST: &str =
-    include_str!("../skills/smart-redaction/skill.toml");
-const BUNDLED_BODY: &str =
-    include_str!("../skills/smart-redaction/SKILL.md");
+const BUNDLED_MANIFEST: &str = include_str!("../skills/smart-redaction/skill.toml");
+const BUNDLED_BODY: &str = include_str!("../skills/smart-redaction/SKILL.md");
 
 static BUNDLED_REPORT: LazyLock<CatalogBuildReport> = LazyLock::new(|| {
     let limits = SkillCatalogLimits::v1();
-    let sources: Vec<SkillSource<'_>> = vec![SkillSource::Bundled(vec![
-        (
-            SMART_REDACTION_PACKAGE_ID,
-            vec![
-                ("skill.toml", BUNDLED_MANIFEST.as_bytes()),
-                ("SKILL.md", BUNDLED_BODY.as_bytes()),
-            ],
-        ),
-    ])];
+    let sources: Vec<SkillSource<'_>> = vec![SkillSource::Bundled(vec![(
+        SMART_REDACTION_PACKAGE_ID,
+        vec![
+            ("skill.toml", BUNDLED_MANIFEST.as_bytes()),
+            ("SKILL.md", BUNDLED_BODY.as_bytes()),
+        ],
+    )])];
     StaticSkillCatalog::build(sources, &limits)
 });
 
@@ -1002,15 +1000,18 @@ pub fn bundled_skill_catalog() -> &'static CatalogBuildReport {
 /// was not loaded (diagnostic in the build report).
 pub fn bundled_smart_redaction_use() -> Option<SkillUse> {
     let report = bundled_skill_catalog();
-    report.catalog.invoke(
-        &SkillInvocationRequest {
-            source_authority: SkillAuthorityId::parse("rollshot.bundled").unwrap(),
-            package_id: SkillPackageId::parse(SMART_REDACTION_PACKAGE_ID).unwrap(),
-            expected_digest: None,
-            invocation_kind: SkillInvocationKind::HostExplicit,
-        },
-        0,
-    ).ok()
+    report
+        .catalog
+        .invoke(
+            &SkillInvocationRequest {
+                source_authority: SkillAuthorityId::parse("rollshot.bundled").unwrap(),
+                package_id: SkillPackageId::parse(SMART_REDACTION_PACKAGE_ID).unwrap(),
+                expected_digest: None,
+                invocation_kind: SkillInvocationKind::HostExplicit,
+            },
+            0,
+        )
+        .ok()
 }
 
 // ========================================================================
@@ -1018,15 +1019,18 @@ pub fn bundled_smart_redaction_use() -> Option<SkillUse> {
 // ========================================================================
 
 #[cfg(test)]
+#[allow(clippy::type_complexity)]
 mod tests {
     use super::*;
 
+    #[allow(dead_code, clippy::type_complexity)]
     fn make_bundled_source(
         packages: Vec<(String, Vec<(String, Vec<u8>)>)>,
     ) -> Vec<(String, Vec<(String, Vec<u8>)>)> {
         packages
     }
 
+    #[allow(clippy::type_complexity)]
     fn resolve_from_catalog(
         packages: Vec<(String, Vec<(String, Vec<u8>)>)>,
         package_id: &str,
@@ -1086,6 +1090,7 @@ main = "SKILL.md"
         )]
     }
 
+    #[allow(clippy::type_complexity)]
     fn build_catalog(packages: Vec<(String, Vec<(String, Vec<u8>)>)>) -> CatalogBuildReport {
         let limits = SkillCatalogLimits::v1();
         let sources: Vec<SkillSource<'_>> = vec![SkillSource::Bundled(
@@ -1608,10 +1613,10 @@ main = "SKILL.md"
                 "FIFO as skill.toml should reject the package"
             );
             assert!(
-                report.diagnostics.iter().any(|d| matches!(
-                    d,
-                    CatalogDiagnostic::PackageLoadError { .. }
-                )),
+                report
+                    .diagnostics
+                    .iter()
+                    .any(|d| matches!(d, CatalogDiagnostic::PackageLoadError { .. })),
                 "expected a PackageLoadError diagnostic for FIFO"
             );
             drop(report);
@@ -1642,7 +1647,8 @@ main = "SKILL.md"
             let limits = SkillCatalogLimits::v1();
             let report = StaticSkillCatalog::build(vec![SkillSource::HostRoot(root)], &limits);
             // Unix socket is not a regular file — should be rejected
-            assert!(report.catalog.entries.is_empty(),
+            assert!(
+                report.catalog.entries.is_empty(),
                 "Unix socket as SKILL.md should reject the package"
             );
         }
@@ -2027,8 +2033,7 @@ main = "SKILL.md"
 
     #[test]
     fn bundled_smart_redaction_package_id_and_authority() {
-        let skill_use = super::bundled_smart_redaction_use()
-            .expect("bundled skill should resolve");
+        let skill_use = super::bundled_smart_redaction_use().expect("bundled skill should resolve");
         assert_eq!(skill_use.package_id().as_str(), "smart-redaction");
         assert_eq!(skill_use.source_authority().as_str(), "rollshot.bundled");
     }
@@ -2037,14 +2042,17 @@ main = "SKILL.md"
     fn bundled_smart_redaction_manifest_accepted() {
         let report = super::bundled_skill_catalog();
         assert_eq!(report.omitted_count, 0, "unexpected omission");
-        assert!(report.diagnostics.is_empty(), "unexpected diagnostics: {:?}", report.diagnostics);
+        assert!(
+            report.diagnostics.is_empty(),
+            "unexpected diagnostics: {:?}",
+            report.diagnostics
+        );
         assert_eq!(report.catalog.entries.len(), 1);
     }
 
     #[test]
     fn bundled_smart_redaction_body_below_16kib() {
-        let skill_use = super::bundled_smart_redaction_use()
-            .expect("bundled skill should resolve");
+        let skill_use = super::bundled_smart_redaction_use().expect("bundled skill should resolve");
         assert!(
             skill_use.body().len() <= 16 * 1024,
             "body {} bytes exceeds 16 KiB",
@@ -2054,8 +2062,7 @@ main = "SKILL.md"
 
     #[test]
     fn bundled_smart_redaction_golden_digest_stable() {
-        let skill_use = super::bundled_smart_redaction_use()
-            .expect("bundled skill should resolve");
+        let skill_use = super::bundled_smart_redaction_use().expect("bundled skill should resolve");
         // Golden digest — update only when SKILL.md or skill.toml content changes.
         let expected = "26c33ddd48b6f437bce4c375bf6150e9d8254527f13f909d3208099cc5a74644";
         assert_eq!(
@@ -2068,16 +2075,19 @@ main = "SKILL.md"
     #[test]
     fn bundled_smart_redaction_single_explicit_invocation() {
         let report = super::bundled_skill_catalog();
-        let skill_use = report.catalog.invoke(
-            &SkillInvocationRequest {
-                source_authority: SkillAuthorityId::parse("rollshot.bundled").unwrap(),
-                package_id: SkillPackageId::parse("smart-redaction").unwrap(),
-                expected_digest: None,
-                invocation_kind: SkillInvocationKind::HostExplicit,
-            },
-            0,
-        ).unwrap();
+        let skill_use = report
+            .catalog
+            .invoke(
+                &SkillInvocationRequest {
+                    source_authority: SkillAuthorityId::parse("rollshot.bundled").unwrap(),
+                    package_id: SkillPackageId::parse("smart-redaction").unwrap(),
+                    expected_digest: None,
+                    invocation_kind: SkillInvocationKind::HostExplicit,
+                },
+                0,
+            )
+            .unwrap();
         assert_eq!(skill_use.package_id().as_str(), "smart-redaction");
-        assert!(skill_use.body().len() > 0);
+        assert!(!skill_use.body().is_empty());
     }
 }

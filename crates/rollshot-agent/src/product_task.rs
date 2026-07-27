@@ -2253,9 +2253,7 @@ mod tests {
         }
     }
 
-    fn run_contract_fixture(
-        _running: &ProductTaskSnapshot,
-    ) -> RunContractReceiptV1 {
+    fn run_contract_fixture(_running: &ProductTaskSnapshot) -> RunContractReceiptV1 {
         RunContractReceiptV1 {
             authority: authority_receipt_fixture(),
             skill_use: skill_use_receipt_fixture(),
@@ -2283,9 +2281,7 @@ mod tests {
         running.bind_run_contract(receipt, 25).unwrap()
     }
 
-    fn v2_metadata_with_contract(
-        contract: &RunContractReceiptV1,
-    ) -> ProductArtifactMetadata {
+    fn v2_metadata_with_contract(contract: &RunContractReceiptV1) -> ProductArtifactMetadata {
         let payload = payload_fixture();
         let payload_bytes = canonical_payload_bytes(&payload).unwrap();
         let payload_sha = {
@@ -2332,17 +2328,12 @@ mod tests {
     fn run_contract_binds_once_to_active_attempt_before_promotion() {
         let running = running_task_fixture();
         let receipt = run_contract_fixture(&running);
-        let bound = running
-            .bind_run_contract(receipt.clone(), 20)
-            .unwrap();
+        let bound = running.bind_run_contract(receipt.clone(), 20).unwrap();
         assert_eq!(
             bound.attempts().last().unwrap().run_contract(),
             Some(&receipt)
         );
-        assert_eq!(
-            bound.snapshot_revision(),
-            running.snapshot_revision() + 1
-        );
+        assert_eq!(bound.snapshot_revision(), running.snapshot_revision() + 1);
 
         // Second conflicting receipt → RunContractConflict
         let conflict = run_contract_with_skill_digest(&running, &"ff".repeat(32));
@@ -2356,14 +2347,10 @@ mod tests {
     fn bind_run_contract_idempotent_on_identical_receipt() {
         let running = running_task_fixture();
         let receipt = run_contract_fixture(&running);
-        let bound = running
-            .bind_run_contract(receipt.clone(), 20)
-            .unwrap();
+        let bound = running.bind_run_contract(receipt.clone(), 20).unwrap();
         let revision_after_first = bound.snapshot_revision();
         // Identical receipt → no revision bump
-        let again = bound
-            .bind_run_contract(receipt, 21)
-            .unwrap();
+        let again = bound.bind_run_contract(receipt, 21).unwrap();
         assert_eq!(again.snapshot_revision(), revision_after_first);
         assert_eq!(again, bound);
     }
@@ -2660,9 +2647,7 @@ mod tests {
         .unwrap();
         let running = task.start_attempt(attempt_fixture(), 20).unwrap();
         let receipt = run_contract_fixture(&running);
-        let bound = running
-            .bind_run_contract(receipt.clone(), 25)
-            .unwrap();
+        let bound = running.bind_run_contract(receipt.clone(), 25).unwrap();
         let meta = v2_metadata_with_contract(&receipt);
         let ready = bound
             .record_ready_for_review(meta, payload_fixture(), None, 30)

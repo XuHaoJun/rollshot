@@ -10,8 +10,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::domain::RunId;
 use crate::domain::AuthorizedModelInput;
+use crate::domain::RunId;
 use crate::product_task::{DocumentContentBinding, ProductTaskId, TaskAttemptId};
 
 // ========================================================================
@@ -177,10 +177,7 @@ impl AuthoritySnapshot {
     ///
     /// `OcrLayoutOnly` rejects any attachments. `FullScreenshot` accepts
     /// any attachment count (including zero — it is a ceiling, not a requirement).
-    pub fn validate_model_input(
-        &self,
-        input: &AuthorizedModelInput,
-    ) -> Result<(), AuthorityError> {
+    pub fn validate_model_input(&self, input: &AuthorizedModelInput) -> Result<(), AuthorityError> {
         let attachment_count = input.attachments().len();
         match self.disclosure {
             DisclosureCeiling::OcrLayoutOnly => {
@@ -245,7 +242,8 @@ impl AuthoritySnapshot {
         };
         let mut hasher = Sha256::new();
         hasher.update(b"rollshot-authority-v1\0");
-        let canonical = serde_json::to_vec(&dto).expect("DigestedSnapshotV1 serialization infallible");
+        let canonical =
+            serde_json::to_vec(&dto).expect("DigestedSnapshotV1 serialization infallible");
         hasher.update(&canonical);
         hex_encode(&hasher.finalize())
     }
@@ -372,7 +370,12 @@ mod tests {
         grants: impl IntoIterator<Item = RunOperation>,
     ) -> AuthoritySnapshot {
         AuthoritySnapshot::new(
-            AuthorityBinding::new(task_id(), TaskAttemptId::new(1), run_id(), document_binding()),
+            AuthorityBinding::new(
+                task_id(),
+                TaskAttemptId::new(1),
+                run_id(),
+                document_binding(),
+            ),
             "rev-1".into(),
             DisclosureCeiling::OcrLayoutOnly,
             false,
@@ -388,7 +391,12 @@ mod tests {
 
     fn snapshot_with_disclosure(disclosure: DisclosureCeiling) -> AuthoritySnapshot {
         AuthoritySnapshot::new(
-            AuthorityBinding::new(task_id(), TaskAttemptId::new(1), run_id(), document_binding()),
+            AuthorityBinding::new(
+                task_id(),
+                TaskAttemptId::new(1),
+                run_id(),
+                document_binding(),
+            ),
             "rev-1".into(),
             disclosure,
             true,
@@ -400,12 +408,21 @@ mod tests {
 
     fn full_snapshot() -> AuthoritySnapshot {
         AuthoritySnapshot::new(
-            AuthorityBinding::new(task_id(), TaskAttemptId::new(1), run_id(), document_binding()),
+            AuthorityBinding::new(
+                task_id(),
+                TaskAttemptId::new(1),
+                run_id(),
+                document_binding(),
+            ),
             "rev-full".into(),
             DisclosureCeiling::FullScreenshot,
             true,
-            [PreparedCapability::Ocr, PreparedCapability::Layout].into_iter().collect(),
-            [RunOperation::ReadDraft, RunOperation::WriteDraft].into_iter().collect(),
+            [PreparedCapability::Ocr, PreparedCapability::Layout]
+                .into_iter()
+                .collect(),
+            [RunOperation::ReadDraft, RunOperation::WriteDraft]
+                .into_iter()
+                .collect(),
         )
         .unwrap()
     }
@@ -452,7 +469,10 @@ mod tests {
             [RunOperation::WriteDraft, RunOperation::ReadDraft],
         );
         assert_eq!(a.digest(), b.digest());
-        assert_eq!(a.receipt(123).snapshot_digest, b.receipt(123).snapshot_digest);
+        assert_eq!(
+            a.receipt(123).snapshot_digest,
+            b.receipt(123).snapshot_digest
+        );
     }
 
     #[test]
@@ -482,7 +502,10 @@ mod tests {
     #[test]
     fn full_screenshot_is_a_ceiling_not_a_requirement() {
         let snapshot = snapshot_with_disclosure(DisclosureCeiling::FullScreenshot);
-        assert_eq!(snapshot.validate_model_input(&input_without_attachments()), Ok(()));
+        assert_eq!(
+            snapshot.validate_model_input(&input_without_attachments()),
+            Ok(())
+        );
     }
 
     // ------------------------------------------------------------------
@@ -557,7 +580,12 @@ mod tests {
     #[test]
     fn empty_policy_revision_rejected() {
         let result = AuthoritySnapshot::new(
-            AuthorityBinding::new(task_id(), TaskAttemptId::new(1), run_id(), document_binding()),
+            AuthorityBinding::new(
+                task_id(),
+                TaskAttemptId::new(1),
+                run_id(),
+                document_binding(),
+            ),
             "".into(),
             DisclosureCeiling::OcrLayoutOnly,
             false,
@@ -570,7 +598,12 @@ mod tests {
     #[test]
     fn existing_product_capture_false_rejects_inspect_prepared_image() {
         let result = AuthoritySnapshot::new(
-            AuthorityBinding::new(task_id(), TaskAttemptId::new(1), run_id(), document_binding()),
+            AuthorityBinding::new(
+                task_id(),
+                TaskAttemptId::new(1),
+                run_id(),
+                document_binding(),
+            ),
             "rev-1".into(),
             DisclosureCeiling::OcrLayoutOnly,
             false, // no existing product capture
@@ -583,7 +616,12 @@ mod tests {
     #[test]
     fn existing_product_capture_true_allows_inspect_prepared_image() {
         let result = AuthoritySnapshot::new(
-            AuthorityBinding::new(task_id(), TaskAttemptId::new(1), run_id(), document_binding()),
+            AuthorityBinding::new(
+                task_id(),
+                TaskAttemptId::new(1),
+                run_id(),
+                document_binding(),
+            ),
             "rev-1".into(),
             DisclosureCeiling::FullScreenshot,
             true,
@@ -604,9 +642,8 @@ mod tests {
         // Receipt has a u32 schema_version field; deserialization succeeds
         // but the schema_version will be 0 (default for missing field).
         // The UnsupportedSchema error is for runtime validation if needed.
-        match result {
-            Ok(receipt) => assert_ne!(receipt.schema_version, 1),
-            Err(_) => {} // also acceptable
+        if let Ok(receipt) = result {
+            assert_ne!(receipt.schema_version, 1);
         }
     }
 
@@ -617,8 +654,16 @@ mod tests {
     #[test]
     fn receipt_fields_are_sorted_and_duplicate_free() {
         let snapshot = snapshot_with(
-            [PreparedCapability::TemplateMatch, PreparedCapability::Ocr, PreparedCapability::Layout],
-            [RunOperation::WriteDraft, RunOperation::ReadDraft, RunOperation::SubmitReviewCandidate],
+            [
+                PreparedCapability::TemplateMatch,
+                PreparedCapability::Ocr,
+                PreparedCapability::Layout,
+            ],
+            [
+                RunOperation::WriteDraft,
+                RunOperation::ReadDraft,
+                RunOperation::SubmitReviewCandidate,
+            ],
         );
         let receipt = snapshot.receipt(999);
         // BTreeSet iteration is sorted
@@ -652,6 +697,9 @@ mod tests {
             operation: RunOperation::ExecuteRestrictedAutomation,
         };
         let msg = err.to_string();
-        assert!(msg.contains("ExecuteRestrictedAutomation"), "error message: {msg}");
+        assert!(
+            msg.contains("ExecuteRestrictedAutomation"),
+            "error message: {msg}"
+        );
     }
 }

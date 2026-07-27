@@ -3366,11 +3366,9 @@ function main(input) {
 
     // ---- Authority enforcement ----
 
-    use crate::authority::{
-        AuthorityBinding, AuthoritySnapshot, DisclosureCeiling, RunOperation,
-    };
-    use std::collections::BTreeSet;
+    use crate::authority::{AuthorityBinding, AuthoritySnapshot, DisclosureCeiling, RunOperation};
     use crate::product_task::{AnnotationStateV1, TaskAttemptId};
+    use std::collections::BTreeSet;
 
     /// Counting tool that tracks call count via an atomic counter.
     struct CountingTool {
@@ -3410,9 +3408,7 @@ function main(input) {
 
     /// Create a snapshot granting the given operations, bound to the same
     /// run_id and content_binding as the standard test_context.
-    fn snapshot_granting(
-        ops: impl IntoIterator<Item = RunOperation>,
-    ) -> AuthoritySnapshot {
+    fn snapshot_granting(ops: impl IntoIterator<Item = RunOperation>) -> AuthoritySnapshot {
         let annotation_state = AnnotationStateV1 {
             width: 100,
             height: 100,
@@ -3421,10 +3417,8 @@ function main(input) {
         };
         let binding = DocumentContentBinding::new([1u8; 32], &annotation_state, 0).unwrap();
         let auth_binding = AuthorityBinding::new(
-            crate::product_task::ProductTaskId::parse(
-                "task-00000000-0000-4000-8000-000000000001",
-            )
-            .unwrap(),
+            crate::product_task::ProductTaskId::parse("task-00000000-0000-4000-8000-000000000001")
+                .unwrap(),
             TaskAttemptId::new(1),
             RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
             binding,
@@ -3476,7 +3470,11 @@ function main(input) {
                 ..
             })
         ));
-        assert_eq!(calls.load(Ordering::SeqCst), 0, "tool body must not execute");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "tool body must not execute"
+        );
     }
 
     #[tokio::test]
@@ -3563,10 +3561,8 @@ function main(input) {
         };
         let binding = DocumentContentBinding::new([1u8; 32], &annotation_state, 0).unwrap();
         let auth_binding = AuthorityBinding::new(
-            crate::product_task::ProductTaskId::parse(
-                "task-00000000-0000-4000-8000-000000000001",
-            )
-            .unwrap(),
+            crate::product_task::ProductTaskId::parse("task-00000000-0000-4000-8000-000000000001")
+                .unwrap(),
             TaskAttemptId::new(1),
             // Wrong run ID
             RunId::parse("run-99999999-9999-4999-8999-999999999999").unwrap(),
@@ -3596,10 +3592,7 @@ function main(input) {
             .await;
 
         assert_eq!(result.len(), 1);
-        assert!(matches!(
-            &result[0],
-            Err(ToolError::AuthorityDenied { .. })
-        ));
+        assert!(matches!(&result[0], Err(ToolError::AuthorityDenied { .. })));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
@@ -3623,10 +3616,8 @@ function main(input) {
         };
         let binding = DocumentContentBinding::new([1u8; 32], &annotation_state, 1).unwrap();
         let auth_binding = AuthorityBinding::new(
-            crate::product_task::ProductTaskId::parse(
-                "task-00000000-0000-4000-8000-000000000001",
-            )
-            .unwrap(),
+            crate::product_task::ProductTaskId::parse("task-00000000-0000-4000-8000-000000000001")
+                .unwrap(),
             TaskAttemptId::new(1),
             RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
             binding,
@@ -3655,10 +3646,7 @@ function main(input) {
             .await;
 
         assert_eq!(result.len(), 1);
-        assert!(matches!(
-            &result[0],
-            Err(ToolError::AuthorityDenied { .. })
-        ));
+        assert!(matches!(&result[0], Err(ToolError::AuthorityDenied { .. })));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
@@ -3676,18 +3664,28 @@ function main(input) {
         // Second tool requires ReadDraft — granted.
         struct SecondTool(Arc<AtomicUsize>);
         impl Tool for SecondTool {
-            fn name(&self) -> &str { "second" }
-            fn json_schema(&self) -> Value { tool_schema::<EmptyArgs>() }
-            fn required_operations(&self) -> &'static [RunOperation] { &[RunOperation::ReadDraft] }
+            fn name(&self) -> &str {
+                "second"
+            }
+            fn json_schema(&self) -> Value {
+                tool_schema::<EmptyArgs>()
+            }
+            fn required_operations(&self) -> &'static [RunOperation] {
+                &[RunOperation::ReadDraft]
+            }
             fn call<'a>(&'a self, _arguments: &'a Value) -> ToolFuture<'a> {
                 let c = self.0.clone();
                 Box::pin(async move {
                     c.fetch_add(100, Ordering::SeqCst);
-                    Ok(ToolOutcome::Success { result_json: serde_json::json!({}) })
+                    Ok(ToolOutcome::Success {
+                        result_json: serde_json::json!({}),
+                    })
                 })
             }
         }
-        registry.register(Arc::new(SecondTool(counter.clone()))).unwrap();
+        registry
+            .register(Arc::new(SecondTool(counter.clone())))
+            .unwrap();
 
         let result = registry
             .execute_authorized_calls(
@@ -3710,11 +3708,12 @@ function main(input) {
 
         // Authority denial is a hard error → stops after first call.
         assert_eq!(result.len(), 1);
-        assert!(matches!(
-            &result[0],
-            Err(ToolError::AuthorityDenied { .. })
-        ));
-        assert_eq!(counter.load(Ordering::SeqCst), 0, "neither tool body must execute");
+        assert!(matches!(&result[0], Err(ToolError::AuthorityDenied { .. })));
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "neither tool body must execute"
+        );
     }
 
     #[tokio::test]
@@ -3780,6 +3779,10 @@ function main(input) {
 
         assert_eq!(result.len(), 1);
         assert!(result[0].is_ok());
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "tool body must execute without authority");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "tool body must execute without authority"
+        );
     }
 }

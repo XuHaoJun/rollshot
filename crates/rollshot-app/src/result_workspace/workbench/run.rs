@@ -837,10 +837,9 @@ async fn persist_terminal_outcome(
                 authority_snapshot_digest: run_contract.authority.snapshot_digest.clone(),
                 skill_use: run_contract.skill_use.clone(),
             };
-            let run_config_digest = rollshot_agent::product_task::canonical_config_v2_digest(
-                &v2_config,
-            )
-            .unwrap_or_default();
+            let run_config_digest =
+                rollshot_agent::product_task::canonical_config_v2_digest(&v2_config)
+                    .unwrap_or_default();
 
             let metadata = ProductArtifactMetadata::new_v2(
                 artifact_id,
@@ -3972,23 +3971,35 @@ mod reducer_tests {
     ) -> rollshot_agent::product_task::ProductArtifactMetadata {
         use rollshot_agent::product_task::{
             ArtifactId, ArtifactKind, ArtifactRevision, PayloadConfigV1, PayloadDryRunV1,
-            PayloadProposalV1, PayloadSourceV1, ProductArtifactMetadata, SmartRedactionReviewPayload,
-            TaskAttemptId,
+            PayloadProposalV1, PayloadSourceV1, ProductArtifactMetadata,
+            SmartRedactionReviewPayload, TaskAttemptId,
         };
         let config = run_config_v2_with(contract);
-        let config_digest = rollshot_agent::product_task::canonical_config_v2_digest(&config).unwrap();
+        let config_digest =
+            rollshot_agent::product_task::canonical_config_v2_digest(&config).unwrap();
         let payload = SmartRedactionReviewPayload {
-            source: PayloadSourceV1 { kind: "agent_run".into(), validation_summary: "0 nodes".into() },
-            proposal: PayloadProposalV1 { proposal_id: "proposal-00000000-0000-4000-8000-000000000001".into(), candidate_count: 1 },
-            dry_run: PayloadDryRunV1 { candidate_count: 1, affected_area: 0.42 },
+            source: PayloadSourceV1 {
+                kind: "agent_run".into(),
+                validation_summary: "0 nodes".into(),
+            },
+            proposal: PayloadProposalV1 {
+                proposal_id: "proposal-00000000-0000-4000-8000-000000000001".into(),
+                candidate_count: 1,
+            },
+            dry_run: PayloadDryRunV1 {
+                candidate_count: 1,
+                affected_area: 0.42,
+            },
             config: PayloadConfigV1 {
-                provider: "anthropic".into(), model: "claude".into(),
+                provider: "anthropic".into(),
+                model: "claude".into(),
                 payload_mode: rollshot_agent::product_task::PayloadMode::Author,
                 run_kind: "smart_redaction".into(),
                 budget_dimensions: std::collections::BTreeMap::new(),
             },
         };
-        let payload_bytes = rollshot_agent::product_task::canonical_payload_bytes(&payload).unwrap();
+        let payload_bytes =
+            rollshot_agent::product_task::canonical_payload_bytes(&payload).unwrap();
         let payload_sha = {
             use sha2::{Digest, Sha256};
             let hash = Sha256::digest(&payload_bytes);
@@ -4006,7 +4017,8 @@ mod reducer_tests {
             )
             .unwrap(),
             TaskAttemptId::new(1),
-            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap(),
             "proposal-00000000-0000-4000-8000-000000000001".to_owned(),
             "anthropic".to_owned(),
             "claude-sonnet-4-20250514".to_owned(),
@@ -4023,31 +4035,50 @@ mod reducer_tests {
     ) -> rollshot_agent::product_task::ProductTaskSnapshot {
         use rollshot_agent::product_task::{
             PayloadConfigV1, PayloadDryRunV1, PayloadProposalV1, PayloadSourceV1,
-            ProductTaskSnapshot, SmartRedactionReviewPayload,
-            TaskAttempt, TaskAttemptId,
+            ProductTaskSnapshot, SmartRedactionReviewPayload, TaskAttempt, TaskAttemptId,
         };
         let task_id = rollshot_agent::product_task::ProductTaskId::parse(
             "task-00000000-0000-4000-8000-000000000001",
         )
         .unwrap();
-        let run_id = rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap();
-        let snapshot = ProductTaskSnapshot::new_v2(task_id, Tk::SmartRedactionAuthor, Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None), 10).unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap();
+        let snapshot = ProductTaskSnapshot::new_v2(
+            task_id,
+            Tk::SmartRedactionAuthor,
+            Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None),
+            10,
+        )
+        .unwrap();
         let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id, 10);
         let running = snapshot.start_attempt(attempt, 20).unwrap();
         let bound = running.bind_run_contract(contract.clone(), 25).unwrap();
         let meta = v2_metadata_for_provenance(contract);
         let payload = SmartRedactionReviewPayload {
-            source: PayloadSourceV1 { kind: "agent_run".into(), validation_summary: "0 nodes".into() },
-            proposal: PayloadProposalV1 { proposal_id: "proposal-00000000-0000-4000-8000-000000000001".into(), candidate_count: 1 },
-            dry_run: PayloadDryRunV1 { candidate_count: 1, affected_area: 0.42 },
+            source: PayloadSourceV1 {
+                kind: "agent_run".into(),
+                validation_summary: "0 nodes".into(),
+            },
+            proposal: PayloadProposalV1 {
+                proposal_id: "proposal-00000000-0000-4000-8000-000000000001".into(),
+                candidate_count: 1,
+            },
+            dry_run: PayloadDryRunV1 {
+                candidate_count: 1,
+                affected_area: 0.42,
+            },
             config: PayloadConfigV1 {
-                provider: "anthropic".into(), model: "claude".into(),
+                provider: "anthropic".into(),
+                model: "claude".into(),
                 payload_mode: rollshot_agent::product_task::PayloadMode::Author,
                 run_kind: "smart_redaction".into(),
                 budget_dimensions: std::collections::BTreeMap::new(),
             },
         };
-        bound.record_ready_for_review(meta, payload, None, 30).unwrap()
+        bound
+            .record_ready_for_review(meta, payload, None, 30)
+            .unwrap()
     }
 
     #[test]
@@ -4061,10 +4092,14 @@ mod reducer_tests {
         let artifact = ready.artifact_metadata().expect("artifact metadata");
         let active_contract = ready.active_run_contract().expect("active contract");
         assert_eq!(artifact.run_contract(), Some(active_contract));
-        assert_eq!(artifact.run_contract().unwrap().authority.snapshot_digest,
-            contract.authority.snapshot_digest);
-        assert_eq!(artifact.run_contract().unwrap().skill_use.package_digest,
-            contract.skill_use.package_digest);
+        assert_eq!(
+            artifact.run_contract().unwrap().authority.snapshot_digest,
+            contract.authority.snapshot_digest
+        );
+        assert_eq!(
+            artifact.run_contract().unwrap().skill_use.package_digest,
+            contract.skill_use.package_digest
+        );
     }
 
     #[test]
@@ -4085,7 +4120,10 @@ mod reducer_tests {
             &run_config_v2_with(&contract_b),
         )
         .unwrap();
-        assert_ne!(digest_a, digest_b, "digest must change when authority digest changes");
+        assert_ne!(
+            digest_a, digest_b,
+            "digest must change when authority digest changes"
+        );
     }
 
     #[test]
@@ -4106,7 +4144,10 @@ mod reducer_tests {
             &run_config_v2_with(&contract_b),
         )
         .unwrap();
-        assert_ne!(digest_a, digest_b, "digest must change when skill digest changes");
+        assert_ne!(
+            digest_a, digest_b,
+            "digest must change when skill digest changes"
+        );
     }
 
     #[test]
@@ -4118,19 +4159,34 @@ mod reducer_tests {
         let ready = ready_v2_with_contract(&contract);
 
         let json = serde_json::to_string(&ready).unwrap();
-        assert!(!json.contains("hide the URL bar"), "JSON must not contain skill body content");
-        assert!(!json.contains("GRANT filesystem"), "JSON must not contain injected body text");
+        assert!(
+            !json.contains("hide the URL bar"),
+            "JSON must not contain skill body content"
+        );
+        assert!(
+            !json.contains("GRANT filesystem"),
+            "JSON must not contain injected body text"
+        );
         assert!(!json.contains("api_key"), "JSON must not contain api_key");
         assert!(!json.contains("password"), "JSON must not contain password");
         assert!(!json.contains("secret"), "JSON must not contain secret");
         assert!(!json.contains("/home/"), "JSON must not contain home paths");
 
         let contract_json = serde_json::to_string(ready.active_run_contract().unwrap()).unwrap();
-        assert!(!contract_json.contains("body"), "contract JSON must not contain body field");
-        assert!(contract_json.contains("package_digest"), "contract must carry digest");
+        assert!(
+            !contract_json.contains("body"),
+            "contract JSON must not contain body field"
+        );
+        assert!(
+            contract_json.contains("package_digest"),
+            "contract must carry digest"
+        );
 
         let dbg = format!("{:?}", ready.active_run_contract().unwrap());
-        assert!(!dbg.contains("GRANT filesystem"), "Debug must not contain injection");
+        assert!(
+            !dbg.contains("GRANT filesystem"),
+            "Debug must not contain injection"
+        );
     }
 
     // -- Ordering and CAS-failure tests (Finding 2) ------------------------
@@ -4144,18 +4200,20 @@ mod reducer_tests {
         // CAS path to prove that contract binding is a prerequisite for
         // promotion at every level of the run flow.
         use super::super::task_store::TaskStore;
-        use rollshot_agent::product_task::{
-            ProductTaskSnapshot, TaskAttempt, TaskAttemptId,
-        };
+        use rollshot_agent::product_task::{ProductTaskSnapshot, TaskAttempt, TaskAttemptId};
 
         let task_id = rollshot_agent::product_task::ProductTaskId::parse(
             "task-00000000-0000-4000-8000-000000000001",
         )
         .unwrap();
-        let run_id = rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap();
         let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
-        let snapshot = ProductTaskSnapshot::new_v2(task_id.clone(), Tk::SmartRedactionAuthor, binding, 10).unwrap();
+        let snapshot =
+            ProductTaskSnapshot::new_v2(task_id.clone(), Tk::SmartRedactionAuthor, binding, 10)
+                .unwrap();
         let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), 10);
         let running = snapshot.start_attempt(attempt, 20).unwrap();
 
@@ -4164,24 +4222,45 @@ mod reducer_tests {
 
         // Promotion without contract → rejected.
         let meta = rollshot_agent::product_task::ProductArtifactMetadata::new(
-            rollshot_agent::product_task::ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000001").unwrap(),
+            rollshot_agent::product_task::ArtifactId::parse(
+                "artifact-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap(),
             rollshot_agent::product_task::ArtifactRevision::new(1),
             rollshot_agent::product_task::ArtifactKind::SmartRedaction,
             1,
             String::new(),
             Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None),
-            rollshot_agent::product_task::ProductTaskId::parse("task-00000000-0000-4000-8000-000000000001").unwrap(),
+            rollshot_agent::product_task::ProductTaskId::parse(
+                "task-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap(),
             rollshot_agent::product_task::TaskAttemptId::new(1),
             run_id.clone(),
             "proposal-test".into(),
-            String::new(), String::new(), String::new(), 0, 0.0, 25,
+            String::new(),
+            String::new(),
+            String::new(),
+            0,
+            0.0,
+            25,
         );
         let payload = rollshot_agent::product_task::SmartRedactionReviewPayload {
-            source: rollshot_agent::product_task::PayloadSourceV1 { kind: "agent_run".into(), validation_summary: "0".into() },
-            proposal: rollshot_agent::product_task::PayloadProposalV1 { proposal_id: "proposal-test".into(), candidate_count: 0 },
-            dry_run: rollshot_agent::product_task::PayloadDryRunV1 { candidate_count: 0, affected_area: 0.0 },
+            source: rollshot_agent::product_task::PayloadSourceV1 {
+                kind: "agent_run".into(),
+                validation_summary: "0".into(),
+            },
+            proposal: rollshot_agent::product_task::PayloadProposalV1 {
+                proposal_id: "proposal-test".into(),
+                candidate_count: 0,
+            },
+            dry_run: rollshot_agent::product_task::PayloadDryRunV1 {
+                candidate_count: 0,
+                affected_area: 0.0,
+            },
             config: rollshot_agent::product_task::PayloadConfigV1 {
-                provider: String::new(), model: String::new(),
+                provider: String::new(),
+                model: String::new(),
                 payload_mode: rollshot_agent::product_task::PayloadMode::Author,
                 run_kind: "smart_redaction".into(),
                 budget_dimensions: std::collections::BTreeMap::new(),
@@ -4189,7 +4268,10 @@ mod reducer_tests {
         };
         let result = running.record_ready_for_review(meta, payload, None, 30);
         assert!(
-            matches!(result, Err(rollshot_agent::product_task::TaskContractError::MissingRunContract)),
+            matches!(
+                result,
+                Err(rollshot_agent::product_task::TaskContractError::MissingRunContract)
+            ),
             "promotion must fail without bound run contract"
         );
 
@@ -4224,17 +4306,29 @@ mod reducer_tests {
         // Promotion succeeds now that the contract is CAS'd.
         let v2_meta = v2_metadata_for_provenance(stored_after.active_run_contract().unwrap());
         let v2_payload = rollshot_agent::product_task::SmartRedactionReviewPayload {
-            source: rollshot_agent::product_task::PayloadSourceV1 { kind: "agent_run".into(), validation_summary: "0".into() },
-            proposal: rollshot_agent::product_task::PayloadProposalV1 { proposal_id: "proposal-00000000-0000-4000-8000-000000000001".into(), candidate_count: 1 },
-            dry_run: rollshot_agent::product_task::PayloadDryRunV1 { candidate_count: 1, affected_area: 0.42 },
+            source: rollshot_agent::product_task::PayloadSourceV1 {
+                kind: "agent_run".into(),
+                validation_summary: "0".into(),
+            },
+            proposal: rollshot_agent::product_task::PayloadProposalV1 {
+                proposal_id: "proposal-00000000-0000-4000-8000-000000000001".into(),
+                candidate_count: 1,
+            },
+            dry_run: rollshot_agent::product_task::PayloadDryRunV1 {
+                candidate_count: 1,
+                affected_area: 0.42,
+            },
             config: rollshot_agent::product_task::PayloadConfigV1 {
-                provider: "anthropic".into(), model: "claude".into(),
+                provider: "anthropic".into(),
+                model: "claude".into(),
                 payload_mode: rollshot_agent::product_task::PayloadMode::Author,
                 run_kind: "smart_redaction".into(),
                 budget_dimensions: std::collections::BTreeMap::new(),
             },
         };
-        let ready = stored_after.record_ready_for_review(v2_meta, v2_payload, None, 30).unwrap();
+        let ready = stored_after
+            .record_ready_for_review(v2_meta, v2_payload, None, 30)
+            .unwrap();
         assert_eq!(ready.status(), Ts::ReadyForReview);
     }
 
@@ -4245,9 +4339,7 @@ mod reducer_tests {
         // that promotion is suppressed (no provider could have run) by
         // attempting record_ready_for_review on the CAS-failed store state.
         use super::super::task_store::{Failpoint, TaskStore};
-        use rollshot_agent::product_task::{
-            ProductTaskSnapshot, TaskAttempt, TaskAttemptId,
-        };
+        use rollshot_agent::product_task::{ProductTaskSnapshot, TaskAttempt, TaskAttemptId};
 
         let tmp = tempfile::tempdir().unwrap();
         let store = TaskStore::open_with_failpoint(tmp.path(), Failpoint::Rename).unwrap();
@@ -4255,10 +4347,14 @@ mod reducer_tests {
             "task-00000000-0000-4000-8000-000000000001",
         )
         .unwrap();
-        let run_id = rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap();
         let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
-        let snapshot = ProductTaskSnapshot::new_v2(task_id.clone(), Tk::SmartRedactionAuthor, binding, 10).unwrap();
+        let snapshot =
+            ProductTaskSnapshot::new_v2(task_id.clone(), Tk::SmartRedactionAuthor, binding, 10)
+                .unwrap();
         let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), 10);
         let running = snapshot.start_attempt(attempt, 20).unwrap();
 
@@ -4276,31 +4372,58 @@ mod reducer_tests {
         // Still Running — no contract, no proposal, no terminal.
         let loaded = store.load(&task_id).unwrap();
         assert_eq!(loaded.status(), Ts::Running);
-        assert!(loaded.active_run_contract().is_none(), "no contract after CAS failure");
-        assert!(loaded.artifact_metadata().is_none(), "no artifact after CAS failure");
+        assert!(
+            loaded.active_run_contract().is_none(),
+            "no contract after CAS failure"
+        );
+        assert!(
+            loaded.artifact_metadata().is_none(),
+            "no artifact after CAS failure"
+        );
 
         // Provider suppression: attempting promotion on the CAS-failed store
         // state must reject with MissingRunContract — proving no provider
         // output could have been persisted.
         let meta = rollshot_agent::product_task::ProductArtifactMetadata::new(
-            rollshot_agent::product_task::ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000001").unwrap(),
+            rollshot_agent::product_task::ArtifactId::parse(
+                "artifact-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap(),
             rollshot_agent::product_task::ArtifactRevision::new(1),
             rollshot_agent::product_task::ArtifactKind::SmartRedaction,
             1,
             String::new(),
             Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None),
-            rollshot_agent::product_task::ProductTaskId::parse("task-00000000-0000-4000-8000-000000000001").unwrap(),
+            rollshot_agent::product_task::ProductTaskId::parse(
+                "task-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap(),
             rollshot_agent::product_task::TaskAttemptId::new(1),
             run_id.clone(),
             "proposal-test".into(),
-            String::new(), String::new(), String::new(), 0, 0.0, 25,
+            String::new(),
+            String::new(),
+            String::new(),
+            0,
+            0.0,
+            25,
         );
         let payload = rollshot_agent::product_task::SmartRedactionReviewPayload {
-            source: rollshot_agent::product_task::PayloadSourceV1 { kind: "agent_run".into(), validation_summary: "0".into() },
-            proposal: rollshot_agent::product_task::PayloadProposalV1 { proposal_id: "proposal-test".into(), candidate_count: 0 },
-            dry_run: rollshot_agent::product_task::PayloadDryRunV1 { candidate_count: 0, affected_area: 0.0 },
+            source: rollshot_agent::product_task::PayloadSourceV1 {
+                kind: "agent_run".into(),
+                validation_summary: "0".into(),
+            },
+            proposal: rollshot_agent::product_task::PayloadProposalV1 {
+                proposal_id: "proposal-test".into(),
+                candidate_count: 0,
+            },
+            dry_run: rollshot_agent::product_task::PayloadDryRunV1 {
+                candidate_count: 0,
+                affected_area: 0.0,
+            },
             config: rollshot_agent::product_task::PayloadConfigV1 {
-                provider: String::new(), model: String::new(),
+                provider: String::new(),
+                model: String::new(),
                 payload_mode: rollshot_agent::product_task::PayloadMode::Author,
                 run_kind: "smart_redaction".into(),
                 budget_dimensions: std::collections::BTreeMap::new(),
@@ -4308,7 +4431,10 @@ mod reducer_tests {
         };
         let promo_result = loaded.record_ready_for_review(meta, payload, None, 30);
         assert!(
-            matches!(promo_result, Err(rollshot_agent::product_task::TaskContractError::MissingRunContract)),
+            matches!(
+                promo_result,
+                Err(rollshot_agent::product_task::TaskContractError::MissingRunContract)
+            ),
             "promotion on CAS-failed state must fail — provider output is suppressed"
         );
     }
@@ -4320,18 +4446,20 @@ mod reducer_tests {
         // When the run contract was bound for a different run_id than the
         // promotion metadata carries, record_ready_for_review must reject
         // the mismatch and yield no proposal.
-        use rollshot_agent::product_task::{
-            ProductTaskSnapshot, TaskAttempt, TaskAttemptId,
-        };
+        use rollshot_agent::product_task::{ProductTaskSnapshot, TaskAttempt, TaskAttemptId};
 
         let task_id = rollshot_agent::product_task::ProductTaskId::parse(
             "task-00000000-0000-4000-8000-000000000001",
         )
         .unwrap();
-        let run_id = rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap();
         let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
-        let snapshot = ProductTaskSnapshot::new_v2(task_id.clone(), Tk::SmartRedactionAuthor, binding, 10).unwrap();
+        let snapshot =
+            ProductTaskSnapshot::new_v2(task_id.clone(), Tk::SmartRedactionAuthor, binding, 10)
+                .unwrap();
         let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), 10);
         let running = snapshot.start_attempt(attempt, 20).unwrap();
 
@@ -4344,9 +4472,14 @@ mod reducer_tests {
         assert!(bound.active_run_contract().is_some());
 
         // Promotion metadata references a DIFFERENT run_id.
-        let wrong_run_id = rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-999999999999").unwrap();
+        let wrong_run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-999999999999")
+                .unwrap();
         let meta = rollshot_agent::product_task::ProductArtifactMetadata::new(
-            rollshot_agent::product_task::ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000001").unwrap(),
+            rollshot_agent::product_task::ArtifactId::parse(
+                "artifact-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap(),
             rollshot_agent::product_task::ArtifactRevision::new(1),
             rollshot_agent::product_task::ArtifactKind::SmartRedaction,
             1,
@@ -4356,14 +4489,29 @@ mod reducer_tests {
             rollshot_agent::product_task::TaskAttemptId::new(1),
             wrong_run_id,
             "proposal-mismatch".into(),
-            String::new(), String::new(), String::new(), 0, 0.0, 25,
+            String::new(),
+            String::new(),
+            String::new(),
+            0,
+            0.0,
+            25,
         );
         let payload = rollshot_agent::product_task::SmartRedactionReviewPayload {
-            source: rollshot_agent::product_task::PayloadSourceV1 { kind: "agent_run".into(), validation_summary: "0".into() },
-            proposal: rollshot_agent::product_task::PayloadProposalV1 { proposal_id: "proposal-mismatch".into(), candidate_count: 0 },
-            dry_run: rollshot_agent::product_task::PayloadDryRunV1 { candidate_count: 0, affected_area: 0.0 },
+            source: rollshot_agent::product_task::PayloadSourceV1 {
+                kind: "agent_run".into(),
+                validation_summary: "0".into(),
+            },
+            proposal: rollshot_agent::product_task::PayloadProposalV1 {
+                proposal_id: "proposal-mismatch".into(),
+                candidate_count: 0,
+            },
+            dry_run: rollshot_agent::product_task::PayloadDryRunV1 {
+                candidate_count: 0,
+                affected_area: 0.0,
+            },
             config: rollshot_agent::product_task::PayloadConfigV1 {
-                provider: "anthropic".into(), model: "claude".into(),
+                provider: "anthropic".into(),
+                model: "claude".into(),
                 payload_mode: rollshot_agent::product_task::PayloadMode::Author,
                 run_kind: "smart_redaction".into(),
                 budget_dimensions: std::collections::BTreeMap::new(),
@@ -4371,7 +4519,10 @@ mod reducer_tests {
         };
         let result = bound.record_ready_for_review(meta, payload, None, 30);
         assert!(
-            matches!(result, Err(rollshot_agent::product_task::TaskContractError::RunMismatch { .. })),
+            matches!(
+                result,
+                Err(rollshot_agent::product_task::TaskContractError::RunMismatch { .. })
+            ),
             "mismatched run_id between contract and promotion must fail, got: {result:?}"
         );
 
@@ -4387,21 +4538,27 @@ mod reducer_tests {
         // in the contract matches.  The store's CAS compares
         // snapshot_revision: a stale snapshot has a lower revision and
         // therefore loses the CAS race.
-        use rollshot_agent::product_task::{
-            ProductTaskSnapshot, TaskAttempt, TaskAttemptId,
-        };
         use super::super::task_store::TaskStore;
+        use rollshot_agent::product_task::{ProductTaskSnapshot, TaskAttempt, TaskAttemptId};
 
         let task_id = rollshot_agent::product_task::ProductTaskId::parse(
             "task-00000000-0000-4000-8000-000000000001",
         )
         .unwrap();
-        let run_id = rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap();
 
         // Original source binding (what the run was started with).
         let original_binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
-        let snapshot = ProductTaskSnapshot::new_v2(task_id.clone(), Tk::SmartRedactionAuthor, original_binding, 10).unwrap();
+        let snapshot = ProductTaskSnapshot::new_v2(
+            task_id.clone(),
+            Tk::SmartRedactionAuthor,
+            original_binding,
+            10,
+        )
+        .unwrap();
         let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), 10);
         let running = snapshot.start_attempt(attempt, 20).unwrap();
 
@@ -4421,10 +4578,12 @@ mod reducer_tests {
         // Advance the store to a terminal state — this increments the
         // snapshot_revision, making the original `bound` stale.
         let loaded = store.load(&task_id).unwrap();
-        let terminal = loaded.record_terminal(
-            rollshot_agent::product_task::TaskTerminal::RuntimeFailure,
-            30,
-        ).unwrap();
+        let terminal = loaded
+            .record_terminal(
+                rollshot_agent::product_task::TaskTerminal::RuntimeFailure,
+                30,
+            )
+            .unwrap();
         store.compare_and_swap(&loaded, &terminal).unwrap();
 
         // Now `bound` is stale (its snapshot_revision is behind the store).

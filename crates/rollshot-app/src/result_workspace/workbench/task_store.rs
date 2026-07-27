@@ -816,14 +816,16 @@ fn truncate_error(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rollshot_agent::authority::{
+        AuthoritySnapshotReceiptV1, DisclosureCeiling, PreparedCapability, RunOperation,
+    };
     use rollshot_agent::domain::RunId;
-    use rollshot_agent::authority::{AuthoritySnapshotReceiptV1, DisclosureCeiling,
-        PreparedCapability, RunOperation};
     use rollshot_agent::product_task::{
-        ArtifactId, ArtifactKind, ArtifactRevision, PayloadConfigV1, PayloadDryRunV1, PayloadMode,
-        PayloadProposalV1, PayloadSourceV1, ProductArtifactMetadata, RunConfigFingerprintV1,
-        RunConfigFingerprintV2, RunContractReceiptV1, SmartRedactionReviewPayload, TaskAttempt,
-        TaskAttemptId, TaskKind, TaskTerminal, canonical_config_v2_digest, canonical_payload_bytes,
+        canonical_config_v2_digest, canonical_payload_bytes, ArtifactId, ArtifactKind,
+        ArtifactRevision, PayloadConfigV1, PayloadDryRunV1, PayloadMode, PayloadProposalV1,
+        PayloadSourceV1, ProductArtifactMetadata, RunConfigFingerprintV1, RunConfigFingerprintV2,
+        RunContractReceiptV1, SmartRedactionReviewPayload, TaskAttempt, TaskAttemptId, TaskKind,
+        TaskTerminal,
     };
     use rollshot_agent::skills::{SkillInvocationKind, SkillUseReceiptV1};
     use sha2::{Digest, Sha256};
@@ -1006,9 +1008,7 @@ mod tests {
         }
     }
 
-    fn v2_metadata_with_contract(
-        contract: &RunContractReceiptV1,
-    ) -> ProductArtifactMetadata {
+    fn v2_metadata_with_contract(contract: &RunContractReceiptV1) -> ProductArtifactMetadata {
         let payload = payload_fixture();
         let payload_bytes = canonical_payload_bytes(&payload).unwrap();
         let payload_sha = {
@@ -1086,8 +1086,7 @@ mod tests {
         let snapshot = running_task_fixture();
         store.create(&snapshot).unwrap();
         let path = store.task_path(snapshot.task_id()).unwrap();
-        let mut raw: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let mut raw: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         raw["store_schema_version"] = serde_json::json!(version);
         fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
         store.load(snapshot.task_id())
@@ -1670,7 +1669,10 @@ mod tests {
     #[test]
     fn schema_three_fails_closed() {
         let error = load_snapshot_with_schema(3).unwrap_err();
-        assert!(matches!(error, TaskStoreError::UnsupportedSchema { version: 3 }));
+        assert!(matches!(
+            error,
+            TaskStoreError::UnsupportedSchema { version: 3 }
+        ));
     }
 
     #[test]
@@ -1682,10 +1684,7 @@ mod tests {
         assert_eq!(loaded.store_schema_version(), 2);
         assert_eq!(loaded, bound);
         assert!(loaded.active_run_contract().is_some());
-        assert_eq!(
-            loaded.active_run_contract(),
-            bound.active_run_contract()
-        );
+        assert_eq!(loaded.active_run_contract(), bound.active_run_contract());
     }
 
     #[test]

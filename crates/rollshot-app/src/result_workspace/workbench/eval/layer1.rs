@@ -107,10 +107,13 @@ pub(crate) async fn replay_full_loop(
     .map_err(|e| format!("input: {e:?}"))?;
 
     // 4. Run the full loop against the replayed cassette.
-    let skill_use = rollshot_agent::skills::bundled_smart_redaction_use()
-        .expect("bundled skill should load");
+    let skill_use =
+        rollshot_agent::skills::bundled_smart_redaction_use().expect("bundled skill should load");
     let authority_binding = rollshot_agent::authority::AuthorityBinding::new(
-        rollshot_agent::product_task::ProductTaskId::parse("task-00000000-0000-4000-8000-000000000001").unwrap(),
+        rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap(),
         rollshot_agent::product_task::TaskAttemptId::new(1),
         RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
         binding_for_authority,
