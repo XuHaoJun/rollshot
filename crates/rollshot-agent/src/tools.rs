@@ -209,15 +209,16 @@ impl ToolRegistry {
         Ok(outcome)
     }
 
-    /// Execute the batch serially in response order. Stops after a hard error
-    /// or after the first successful call whose name is in `stop_after_success`
-    /// — used to halt remaining calls once a terminal tool succeeds (§8.3), so
-    /// later calls in the same batch never run.
-    pub async fn execute_calls(
+    /// Shared serial loop used by both [`execute_calls`] and
+    /// [`execute_authorized_calls`]. The `authority` and `tool_ctx` params
+    /// are `None` for unauthenticated batches and `Some` for authorized ones.
+    async fn execute_serial_loop(
         &self,
         calls: &[ToolCall],
         cancellation: &RunCancellation,
         stop_after_success: &std::collections::BTreeSet<String>,
+        authority: Option<&crate::authority::AuthoritySnapshot>,
+        tool_ctx: Option<&ToolContext>,
     ) -> Vec<Result<ToolOutcome, ToolError>> {
         let mut results = Vec::with_capacity(calls.len());
         for call in calls {
@@ -229,7 +230,9 @@ impl ToolRegistry {
                 }
             };
 
-            let result = self.execute_single(index, call, cancellation, None, None).await;
+            let result = self
+                .execute_single(index, call, cancellation, authority, tool_ctx)
+                .await;
             let stop = match &result {
                 Err(_) => true,
                 Ok(ToolOutcome::Success { .. }) => stop_after_success.contains(&call.name),
@@ -242,6 +245,20 @@ impl ToolRegistry {
             }
         }
         results
+    }
+
+    /// Execute the batch serially in response order. Stops after a hard error
+    /// or after the first successful call whose name is in `stop_after_success`
+    /// — used to halt remaining calls once a terminal tool succeeds (§8.3), so
+    /// later calls in the same batch never run.
+    pub async fn execute_calls(
+        &self,
+        calls: &[ToolCall],
+        cancellation: &RunCancellation,
+        stop_after_success: &std::collections::BTreeSet<String>,
+    ) -> Vec<Result<ToolOutcome, ToolError>> {
+        self.execute_serial_loop(calls, cancellation, stop_after_success, None, None)
+            .await
     }
 
     /// Execute the batch with authority enforcement.
@@ -260,31 +277,14 @@ impl ToolRegistry {
         authority: &crate::authority::AuthoritySnapshot,
         tool_ctx: &ToolContext,
     ) -> Vec<Result<ToolOutcome, ToolError>> {
-        let mut results = Vec::with_capacity(calls.len());
-        for call in calls {
-            let index = match self.tools.iter().position(|t| t.name() == call.name) {
-                Some(i) => i,
-                None => {
-                    results.push(Err(ToolError::UnknownTool(call.name.clone())));
-                    break;
-                }
-            };
-
-            let result = self
-                .execute_single(index, call, cancellation, Some(authority), Some(tool_ctx))
-                .await;
-            let stop = match &result {
-                Err(_) => true,
-                Ok(ToolOutcome::Success { .. }) => stop_after_success.contains(&call.name),
-                Ok(ToolOutcome::Recoverable { .. }) => false,
-            };
-            results.push(result);
-
-            if stop {
-                break;
-            }
-        }
-        results
+        self.execute_serial_loop(
+            calls,
+            cancellation,
+            stop_after_success,
+            Some(authority),
+            Some(tool_ctx),
+        )
+        .await
     }
 }
 
