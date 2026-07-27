@@ -539,15 +539,16 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                     Task::perform(setup_import_toolchain(operation_id), Message::HomeMsg)
                 }
                 action_guide_home::Effect::StartImport {
-                    operation_id,
+                    job_id: _,
                     path,
                     toolchain,
                     cancellation,
+                    reporter,
                 } => action_guide_home::update::run_import_task(
-                    operation_id,
                     path,
                     toolchain,
                     cancellation,
+                    reporter,
                 )
                 .map(Message::HomeMsg),
                 action_guide_home::Effect::OpenImportedTimeline(seed) => {
@@ -1038,8 +1039,8 @@ fn view(product: &MacosProduct, window: window::Id) -> Element<'_, Message> {
 fn subscription(product: &MacosProduct) -> iced::Subscription<Message> {
     let phase = match &product.phase {
         #[cfg(feature = "action-guide")]
-        Phase::Home(_) | Phase::Opening(_) | Phase::LockConflict(_) => {
-            action_guide_home::update::subscription().map(Message::HomeMsg)
+        Phase::Home(home) | Phase::Opening(home) | Phase::LockConflict(home) => {
+            action_guide_home::update::subscription(home).map(Message::HomeMsg)
         }
         Phase::Capture(component) => component.subscription().map(Message::Capture),
         Phase::Thumbnail(_) => {
@@ -2083,17 +2084,20 @@ mod tests {
 
         fn drive_import_success(product: &mut MacosProduct) {
             let home = product.home_mut().expect("should be in home-capable phase");
-            let id = home
-                .import_coordinator_mut()
-                .begin(PathBuf::from("test.mp4"));
+            let (_job_id, mut reporter) = home.bind_test_import();
+            let t = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX);
+            reporter.mark_running(t).unwrap();
             let scratch_dir = tempfile::tempdir().unwrap();
             let seed = dummy_import_seed(&scratch_dir);
+            reporter.succeed(seed, t + 1).unwrap();
             let _task = update(
                 product,
-                Message::HomeMsg(action_guide_home::Message::ImportFinished {
-                    operation_id: id,
-                    result: Ok(std::sync::Arc::new(std::sync::Mutex::new(Some(seed)))),
-                }),
+                Message::HomeMsg(action_guide_home::Message::ImportJobsChanged),
             );
         }
 

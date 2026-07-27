@@ -128,15 +128,16 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
                     iced::Task::perform(setup_import_toolchain(operation_id), Message::Home)
                 }
                 action_guide_home::Effect::StartImport {
-                    operation_id,
+                    job_id: _,
                     path,
                     toolchain,
                     cancellation,
+                    reporter,
                 } => action_guide_home::update::run_import_task(
-                    operation_id,
                     path,
                     toolchain,
                     cancellation,
+                    reporter,
                 )
                 .map(Message::Home),
                 action_guide_home::Effect::OpenImportedTimeline(seed) => {
@@ -303,7 +304,7 @@ fn lock_conflict_view<'a>() -> iced::Element<'a, Message> {
 fn subscription(state: &State) -> iced::Subscription<Message> {
     match state.phase {
         Phase::Home | Phase::Opening | Phase::LockConflict => iced::Subscription::batch([
-            crate::action_guide_home::update::subscription().map(Message::Home),
+            crate::action_guide_home::update::subscription(&state.home).map(Message::Home),
             iced::window::close_requests().map(Message::CloseRequested),
         ]),
         Phase::Timeline => {
@@ -866,18 +867,20 @@ mod tests {
     }
 
     fn drive_import_success(state: &mut State) {
-        let id = state
-            .home_mut()
-            .import_coordinator_mut()
-            .begin(PathBuf::from("test.mp4"));
+        let (_job_id, mut reporter) = state.home_mut().bind_test_import();
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        reporter.mark_running(t).unwrap();
         let scratch_dir = tempfile::tempdir().unwrap();
         let seed = dummy_import_seed(&scratch_dir);
+        reporter.succeed(seed, t + 1).unwrap();
         let _task = update(
             state,
-            Message::Home(action_guide_home::Message::ImportFinished {
-                operation_id: id,
-                result: Ok(std::sync::Arc::new(std::sync::Mutex::new(Some(seed)))),
-            }),
+            Message::Home(action_guide_home::Message::ImportJobsChanged),
         );
     }
 
