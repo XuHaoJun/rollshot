@@ -808,6 +808,12 @@ async fn persist_terminal_outcome(
 
     let next = match terminal {
         RunTerminalState::ReadyForReview(ready) => {
+            // V2: require an active run contract on the attempt.
+            let run_contract = match current.active_run_contract() {
+                Some(rc) => rc.clone(),
+                None => return Some("missing run contract for V2 promotion".into()),
+            };
+
             let source_binding = SourceBinding::new(
                 *content_binding.base_image_digest(),
                 *content_binding.annotation_state_digest(),
@@ -820,7 +826,23 @@ async fn persist_terminal_outcome(
             );
             let artifact_id = ArtifactId::parse(format!("artifact-{}", uuid::Uuid::new_v4()))
                 .expect("v4 UUID is valid");
-            let metadata = ProductArtifactMetadata::new(
+
+            // Build V2 run-config fingerprint from the bound receipt.
+            let v2_config = rollshot_agent::product_task::RunConfigFingerprintV2 {
+                provider: String::new(),
+                model: String::new(),
+                payload_mode: rollshot_agent::product_task::PayloadMode::Author,
+                run_kind: "smart_redaction".into(),
+                budget_dimensions: std::collections::BTreeMap::new(),
+                authority_snapshot_digest: run_contract.authority.snapshot_digest.clone(),
+                skill_use: run_contract.skill_use.clone(),
+            };
+            let run_config_digest = rollshot_agent::product_task::canonical_config_v2_digest(
+                &v2_config,
+            )
+            .unwrap_or_default();
+
+            let metadata = ProductArtifactMetadata::new_v2(
                 artifact_id,
                 ArtifactRevision::new(1),
                 ArtifactKind::SmartRedaction,
@@ -833,10 +855,11 @@ async fn persist_terminal_outcome(
                 proposal_id_str.to_owned(),
                 String::new(), // provider_id — not available here
                 String::new(), // model_id — not available here
-                String::new(), // run_config_digest
+                run_config_digest,
                 ready.automation.dry_run.candidate_count,
                 ready.automation.dry_run.affected_area,
                 now,
+                run_contract,
             );
             // Build a minimal SmartRedactionReviewPayload for persistence.
             let payload = rollshot_agent::product_task::SmartRedactionReviewPayload {
@@ -1089,6 +1112,131 @@ pub fn start_agent_run(
             }
         };
 
+        // ── Resolve bundled skill ───────────────────────────────────────
+        let skill_use = match rollshot_agent::skills::bundled_smart_redaction_use() {
+            Some(skill) => skill,
+            None => {
+                let err = WorkbenchError::RuntimeFailure;
+                persist_terminal_if_possible(
+                    task_store.clone(), &task_id, &run_id, &err,
+                ).await;
+                yield crate::result_workspace::Message::Workbench(
+                    super::WorkbenchMessage::RunFailed {
+                        task_id: task_id.clone(),
+                        run_id: run_id.clone(),
+                        error: err,
+                    },
+                );
+                return;
+            }
+        };
+
+        // ── Build authority snapshot ─────────────────────────────────────
+        let disclosure = match payload_mode {
+            PayloadMode::FullScreenshot => rollshot_agent::authority::DisclosureCeiling::FullScreenshot,
+            PayloadMode::OcrLayoutOnly => rollshot_agent::authority::DisclosureCeiling::OcrLayoutOnly,
+        };
+        let mut prepared_caps = std::collections::BTreeSet::new();
+        prepared_caps.insert(rollshot_agent::authority::PreparedCapability::RegionFeatures);
+        #[cfg(feature = "ocr")]
+        prepared_caps.insert(rollshot_agent::authority::PreparedCapability::Ocr);
+        let mut grants = std::collections::BTreeSet::new();
+        use rollshot_agent::authority::RunOperation;
+        grants.insert(RunOperation::ReadDraft);
+        grants.insert(RunOperation::WriteDraft);
+        grants.insert(RunOperation::InspectPreparedImage);
+        grants.insert(RunOperation::ExecuteRestrictedAutomation);
+        grants.insert(RunOperation::SubmitReviewCandidate);
+        grants.insert(RunOperation::RequestUserInput);
+        let authority_binding = rollshot_agent::authority::AuthorityBinding::new(
+            task_id.clone(),
+            rollshot_agent::product_task::TaskAttemptId::new(1),
+            run_id.clone(),
+            content_binding.clone(),
+        );
+        let authority = match rollshot_agent::authority::AuthoritySnapshot::new(
+            authority_binding,
+            "rollshot-v1".into(),
+            disclosure,
+            true,
+            prepared_caps,
+            grants,
+        ) {
+            Ok(auth) => auth,
+            Err(e) => {
+                let err = WorkbenchError::StorePersist {
+                    message: format!("build authority: {e}"),
+                };
+                persist_terminal_if_possible(
+                    task_store.clone(), &task_id, &run_id, &err,
+                ).await;
+                yield crate::result_workspace::Message::Workbench(
+                    super::WorkbenchMessage::RunFailed {
+                        task_id: task_id.clone(),
+                        run_id: run_id.clone(),
+                        error: err,
+                    },
+                );
+                return;
+            }
+        };
+
+        // ── CAS-bind the run contract ───────────────────────────────────
+        if let Some(ref store) = task_store {
+            let now = chrono::Utc::now().timestamp_millis();
+            let contract = rollshot_agent::product_task::RunContractReceiptV1 {
+                authority: authority.receipt(now),
+                skill_use: skill_use.receipt(),
+                bound_at_unix_ms: now,
+            };
+            let store_clone = store.clone();
+            let task_id_clone = task_id.clone();
+            let bind_result = tokio::task::spawn_blocking(move || {
+                let current = store_clone.load(&task_id_clone)?;
+                let bound = current.bind_run_contract(contract, now)
+                    .map_err(|e| super::task_store::TaskStoreError::PreCommit {
+                        reason: format!("bind run contract: {e}"),
+                    })?;
+                store_clone.compare_and_swap(&current, &bound)
+            })
+            .await;
+            match bind_result {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    let err = WorkbenchError::StorePersist {
+                        message: format!("bind run contract: {e}"),
+                    };
+                    persist_terminal_if_possible(
+                        task_store.clone(), &task_id, &run_id, &err,
+                    ).await;
+                    yield crate::result_workspace::Message::Workbench(
+                        super::WorkbenchMessage::RunFailed {
+                            task_id: task_id.clone(),
+                            run_id: run_id.clone(),
+                            error: err,
+                        },
+                    );
+                    return;
+                }
+                Err(e) => {
+                    let err = WorkbenchError::StorePersist {
+                        message: format!("spawn_blocking: {e}"),
+                    };
+                    persist_terminal_if_possible(
+                        task_store.clone(), &task_id, &run_id, &err,
+                    ).await;
+                    yield crate::result_workspace::Message::Workbench(
+                        super::WorkbenchMessage::RunFailed {
+                            task_id: task_id.clone(),
+                            run_id: run_id.clone(),
+                            error: err,
+                        },
+                    );
+                    return;
+                }
+            }
+        }
+
         let validation_limits = rollshot_automation::ValidationLimits::default();
         let policy = rollshot_automation::ExecutionPolicy::smart_redaction_default(
             std::time::Duration::from_secs(25), 80_000_000, 8_000_000,
@@ -1202,6 +1350,7 @@ pub fn start_agent_run(
             runner.run_with_provider(
                 model_input, &mut session, &registry, budget,
                 &cancellation_for_task, &sink, &tool_ctx, adapter.as_ref(),
+                &authority, &skill_use,
             ).await
         });
 

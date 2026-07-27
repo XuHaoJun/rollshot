@@ -57,76 +57,12 @@ use crate::runtime::{
     RunEvent, RunEventSink, UsageSnapshot,
 };
 use crate::tools::{ToolCall, ToolContext, ToolOutcome, ToolRegistry};
-use crate::skills::{bundled_smart_redaction_use, SMART_REDACTION_PACKAGE_ID};
+use crate::skills::SMART_REDACTION_PACKAGE_ID;
 
 // ---------- Configuration ----------
 
-const SMART_REDACTION_SYSTEM_PROMPT: &str = r#"You are Rollshot Smart Redaction Agent.
-Your only job is to create editable redaction candidates for the current screenshot.
-Rollshot has already captured the current screenshot for this run. Use the provided screenshot attachment, local context, and available tools; do not ask the user to upload, attach, or take another screenshot.
+// SMART_REDACTION_SYSTEM_PROMPT removed: all runs now use compose_smart_redaction_prompt().
 
-Interpret user requests like "hide the URL bar", "hide emails", or "redact names" as redaction targets.
-For common screenshot regions such as a browser URL/address bar, infer the visible target from the current screenshot instead of asking what device or app environment the user is using.
-If the request is not about hiding or redacting visible content, refuse briefly and ask for a redaction target.
-If the redaction target is ambiguous after inspecting the available screenshot/context, ask one brief clarifying question about what visible content should be redacted.
-Do not provide general advice, product support, or workflow guidance.
-
-Rollshot JavaScript authoring guide:
-- Write exactly one synchronous function main(input). Do not use async, imports, exports, timers, eval, Function, DOM, filesystem, network, process APIs, dynamic property access, or loops that can run forever.
-- Available input fields use camelCase: input.imageWidth, input.imageHeight, input.region, input.annotations, input.capabilityHandles.
-- Return an object shaped like { candidates: [...] }.
-- Each candidate must be { kind: "addRedaction", bounds, confidence, label } with optional rationale.
-- bounds is { x, y, width, height } in image pixels. width and height must be positive.
-- confidence must be between 0 and 1. label must be short and non-empty.
-- Supported capability calls are rollshot.ocr(query), rollshot.layout(query) when available, rollshot.regionFeatures(query), and rollshot.templateMatch(query) only when a matching input.capabilityHandles entry exists.
-- Use only template handles listed by inspect_image_context capability_handles before calling rollshot.templateMatch. Do not invent template handles when that list is empty.
-- Refer to template handles through input.capabilityHandles.<alias>; do not hard-code raw handle strings.
-- In OCR-enabled runs, call inspect_ocr for text-driven redaction requests before writing source. inspect_ocr returns full recognized text, bounds, and confidence for canonical regions. Use OCR bounds as evidence for candidate rectangles.
-- If OCR is unavailable, treat that as a harness limitation and do not invent text evidence.
-- Prefer deterministic regionFeatures strip regions for simple screenshot chrome targets, for example:
-  const bounds = { x: 0, y: 0, width: input.imageWidth, height: Math.min(96, input.imageHeight) };
-  const features = rollshot.regionFeatures({ region: { kind: "rect", bounds: bounds }, limit: 1 });
-- Example empty result: function main(input) { return { candidates: [] }; }
-- Example redaction from a strip:
-  function main(input) {
-    const bounds = { x: 0, y: 0, width: input.imageWidth, height: Math.min(96, input.imageHeight) };
-    const features = rollshot.regionFeatures({ region: { kind: "rect", bounds: bounds }, limit: 1 });
-    const hasFeatures = features.length > 0;
-    return { candidates: hasFeatures ? [{ kind: "addRedaction", bounds: bounds, confidence: 0.6, label: "top-strip" }] : [] };
-  }
-- Example OCR redaction when OCR is available:
-  function expand(rect, padding) {
-    return { x: Math.max(0, rect.x - padding), y: Math.max(0, rect.y - padding), width: rect.width + padding * 2, height: rect.height + padding * 2 };
-  }
-  function main(input) {
-    const matches = rollshot.ocr({ region: input.region, limit: 20 });
-    return { candidates: matches.map((match) => ({ kind: "addRedaction", bounds: expand(match.bounds, 6), confidence: match.confidence, label: "ocr-match" })) };
-  }
-
-Inspection loop:
-1. Call inspect_image_context before writing or replacing source.
-2. Check capability_handles before writing source that calls rollshot.templateMatch.
-3. Call inspect_ocr for text-driven redaction requests such as visible words, names, emails, ids, labels, form fields, or account-like strings.
-4. Use inspect_region_features with canonical regions when coarse visual evidence is needed.
-5. Valid canonical regions are full, top_strip, left_strip, right_strip, bottom_strip.
-6. Do not ask for raw pixels or custom crop inspection; use dry_run to verify source behavior.
-
-Authoring loop:
-1. Use read_current_source to inspect the current source, generation, validation summary, and recent evidence before editing.
-2. Prefer edit_source with unique exact old/new text for small changes; use replace_source only when a full rewrite is clearer.
-3. Use validate_source on the current generation.
-4. Use dry_run on the current generation.
-5. If validation or dry_run fails, read_current_source, edit_source, and retry validation/dry-run on the new generation.
-6. Use submit_for_review only after the current generation has successful validate_source and dry_run evidence.
-7. A successful dry_run means "ready for user review", not "safe to export".
-
-Improve runs:
-1. The user message may contain reviewed correction evidence from a previous detector run.
-2. Treat rejected candidates as false positives to remove or narrow.
-3. Treat resized candidates as geometry corrections for the intended target.
-4. Treat manually added candidates as missed targets the detector should learn to include.
-5. Preserve unrelated useful detections from the current source.
-6. Explain what changed in the detector before submit_for_review."#;
 
 const VISUAL_ANNOTATION_SYSTEM_PROMPT: &str = r#"You are Rollshot Visual Annotation Agent.
 Your only job is to suggest visual annotations for the single most important UI
@@ -239,7 +175,6 @@ pub(crate) fn compose_smart_redaction_prompt(
 }
 
 pub(crate) enum AgentTaskProfile {
-    SmartRedaction,
     #[allow(dead_code)]
     VisualAnnotation,
 }
@@ -247,7 +182,6 @@ pub(crate) enum AgentTaskProfile {
 impl AgentTaskProfile {
     pub(crate) fn system_prompt(&self) -> &'static str {
         match self {
-            Self::SmartRedaction => SMART_REDACTION_SYSTEM_PROMPT,
             Self::VisualAnnotation => VISUAL_ANNOTATION_SYSTEM_PROMPT,
         }
     }
@@ -255,7 +189,6 @@ impl AgentTaskProfile {
     #[allow(dead_code)]
     pub(crate) fn terminal_tools(&self) -> &'static [&'static str] {
         match self {
-            Self::SmartRedaction => &["submit_for_review", "request_user_input"],
             Self::VisualAnnotation => &["submit_visual_annotation_suggestions"],
         }
     }
@@ -543,6 +476,7 @@ impl AgentRunner {
                             tool_ctx,
                             &last_assistant_text,
                             &mut last_failure_kind,
+                            None,
                         )
                         .await
                     {
@@ -609,6 +543,8 @@ impl AgentRunner {
         event_sink: &dyn RunEventSink,
         tool_ctx: &ToolContext,
         provider: &dyn ProviderAdapter,
+        authority: &crate::authority::AuthoritySnapshot,
+        skill_use: &crate::skills::SkillUse,
     ) -> RunTerminalState {
         session.push_user(input.user_message.clone());
 
@@ -677,6 +613,7 @@ impl AgentRunner {
                             cancellation,
                             &input,
                             &mut last_assistant_text,
+                            skill_use,
                         )
                         .await
                     {
@@ -705,6 +642,7 @@ impl AgentRunner {
                             tool_ctx,
                             &last_assistant_text,
                             &mut last_failure_kind,
+                            Some(authority),
                         )
                         .await
                     {
@@ -997,6 +935,7 @@ impl AgentRunner {
         cancellation: &RunCancellation,
         input: &AuthorizedModelInput,
         last_assistant_text: &mut String,
+        skill_use: &crate::skills::SkillUse,
     ) -> Result<(), DriverError> {
         let turn_index = rig_run.turn();
 
@@ -1016,7 +955,7 @@ impl AgentRunner {
             history: history_msgs,
             turn: turn_index,
             tool_definitions: tool_definitions.to_vec(),
-            system_prompt: Some(AgentTaskProfile::SmartRedaction.system_prompt().to_string()),
+            system_prompt: Some(compose_smart_redaction_prompt(skill_use)?),
             max_tokens: None,
             attachments: vec![],
         };
@@ -1237,6 +1176,7 @@ impl AgentRunner {
         tool_ctx: &ToolContext,
         assistant_text: &str,
         last_failure_kind: &mut Option<ToolFailureKind>,
+        authority: Option<&crate::authority::AuthoritySnapshot>,
     ) -> Result<Option<RunTerminalState>, DriverError> {
         if cancellation.is_cancelled() {
             return Err(DriverError::Cancelled);
@@ -1274,9 +1214,14 @@ impl AgentRunner {
             .into_iter()
             .map(String::from)
             .collect();
-        let results = tool_registry
-            .execute_calls(&tool_calls, cancellation, &terminal_tools)
-            .await;
+        let results = match authority {
+            Some(auth) => tool_registry
+                .execute_authorized_calls(&tool_calls, cancellation, &terminal_tools, auth, tool_ctx)
+                .await,
+            None => tool_registry
+                .execute_calls(&tool_calls, cancellation, &terminal_tools)
+                .await,
+        };
 
         let mut rig_results = Vec::new();
         let mut terminal_error: Option<String> = None;
@@ -1733,18 +1678,6 @@ pub(crate) mod tests {
     // ---- Task profile parity ----
 
     #[test]
-    fn smart_redaction_profile_matches_existing_prompt_and_tools() {
-        assert_eq!(
-            AgentTaskProfile::SmartRedaction.system_prompt(),
-            SMART_REDACTION_SYSTEM_PROMPT,
-        );
-        assert_eq!(
-            AgentTaskProfile::SmartRedaction.terminal_tools(),
-            &["submit_for_review", "request_user_input"],
-        );
-    }
-
-    #[test]
     fn visual_annotation_profile_advertises_only_submit_visual_annotation_suggestions() {
         assert_eq!(
             AgentTaskProfile::VisualAnnotation.system_prompt(),
@@ -1831,6 +1764,43 @@ pub(crate) mod tests {
 
     fn valid_js() -> &'static str {
         "function main(input) { return [{kind: 'addRedaction', bounds: {x: 0, y: 0, width: 10, height: 10}, confidence: 0.9, label: 'test'}]; }"
+    }
+
+    fn test_skill_use() -> crate::skills::SkillUse {
+        crate::skills::bundled_smart_redaction_use()
+            .expect("bundled skill should load")
+    }
+
+    fn test_authority(ctx: &Arc<ToolContext>) -> crate::authority::AuthoritySnapshot {
+        use crate::authority::{
+            AuthorityBinding, AuthoritySnapshot, DisclosureCeiling, PreparedCapability, RunOperation,
+        };
+        use std::collections::BTreeSet;
+
+        let binding = AuthorityBinding::new(
+            crate::product_task::ProductTaskId::parse("task-00000000-0000-4000-8000-00000000002a").unwrap(),
+            crate::product_task::TaskAttemptId::new(1),
+            ctx.run_id.clone(),
+            ctx.content_binding.clone(),
+        );
+        let mut grants = BTreeSet::new();
+        grants.insert(RunOperation::ReadDraft);
+        grants.insert(RunOperation::WriteDraft);
+        grants.insert(RunOperation::InspectPreparedImage);
+        grants.insert(RunOperation::ExecuteRestrictedAutomation);
+        grants.insert(RunOperation::SubmitReviewCandidate);
+        grants.insert(RunOperation::RequestUserInput);
+        let mut caps = BTreeSet::new();
+        caps.insert(PreparedCapability::RegionFeatures);
+        AuthoritySnapshot::new(
+            binding,
+            "rollshot-test-v1".into(),
+            DisclosureCeiling::FullScreenshot,
+            true,
+            caps,
+            grants,
+        )
+        .expect("test authority should be valid")
     }
 
     fn register_all_tools(reg: &mut ToolRegistry, ctx: &Arc<ToolContext>) {
@@ -3950,9 +3920,12 @@ pub(crate) mod tests {
                     &NullEventSink,
                     &ctx,
                     &provider,
+                    &test_authority(&ctx),
+                    &test_skill_use(),
                 )
                 .await;
 
+            let expected_prompt = compose_smart_redaction_prompt(&test_skill_use()).unwrap();
             let requests = provider.requests.lock().unwrap();
             assert!(
                 requests.len() >= 2,
@@ -3961,11 +3934,11 @@ pub(crate) mod tests {
             );
             assert_eq!(
                 requests[0].system_prompt.as_deref(),
-                Some(SMART_REDACTION_SYSTEM_PROMPT)
+                Some(expected_prompt.as_str())
             );
             assert_eq!(
                 requests[1].system_prompt.as_deref(),
-                Some(SMART_REDACTION_SYSTEM_PROMPT)
+                Some(expected_prompt.as_str())
             );
             assert!(
                 requests[0]
@@ -4195,7 +4168,9 @@ pub(crate) mod tests {
 
     #[test]
     fn smart_redaction_system_prompt_documents_improve_runs() {
-        let system_prompt = SMART_REDACTION_SYSTEM_PROMPT;
+        let skill = crate::skills::bundled_smart_redaction_use()
+            .expect("bundled skill should load");
+        let system_prompt = compose_smart_redaction_prompt(&skill).unwrap();
         assert!(
             system_prompt.contains("Improve runs"),
             "system prompt should document improve runs, got: {:?}",
