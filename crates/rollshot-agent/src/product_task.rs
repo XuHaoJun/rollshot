@@ -919,6 +919,7 @@ impl ProductTaskSnapshot {
         let mut next = self.clone();
         next.status = TaskStatus::Stale;
         next.pending_artifact_payload = None;
+        next.pending_proposal_payload = None;
         next.snapshot_revision += 1;
         next.updated_at_unix_ms = now;
         Ok(next)
@@ -1629,10 +1630,13 @@ mod tests {
 
     #[test]
     fn mark_stale_clears_pending_payload() {
-        let ready = ready_task_fixture();
+        let ready = ready_task_fixture()
+            .with_proposal_payload(b"proposal-bytes".to_vec())
+            .unwrap();
         let stale = ready.mark_stale(40).unwrap();
         assert_eq!(stale.status(), TaskStatus::Stale);
         assert!(stale.pending_artifact_payload().is_none());
+        assert!(stale.pending_proposal_payload().is_none());
         assert!(stale.artifact_metadata().is_some());
     }
 
