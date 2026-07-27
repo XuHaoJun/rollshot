@@ -2021,7 +2021,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                             Message::Workbench(
                                 super::workbench::WorkbenchMessage::ApplyingPersisted {
                                     operation_id: token,
-                                    outcome: result.map(|_| ()),
+                                    outcome: result,
                                 },
                             )
                         },
@@ -2035,14 +2035,20 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     if operation_id != workbench.review_operation_id {
                         return Task::none();
                     }
-                    if let Err(e) = outcome {
-                        workbench.error =
-                            Some(super::workbench::WorkbenchError::StorePersist {
-                                message: e,
-                            });
-                        workbench.review_operation_active = false;
-                        return Task::none();
-                    }
+                    let applying_snapshot = match outcome {
+                        Ok(snapshot) => snapshot,
+                        Err(e) => {
+                            workbench.error =
+                                Some(super::workbench::WorkbenchError::StorePersist {
+                                    message: e,
+                                });
+                            workbench.review_operation_active = false;
+                            return Task::none();
+                        }
+                    };
+                    // Store the Applying snapshot so Phase 2 complete_apply
+                    // CAS succeeds (it requires status == Applying).
+                    workbench.cached_task_snapshot = Some(applying_snapshot);
 
                     // Phase 2: apply candidates to document.
                     let Some(proposal) = workbench.pending_proposal.clone() else {
@@ -2172,8 +2178,29 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         }
                         Err(e) => {
                             // Pre-commit failure: undo if document changed.
-                            if state.document.image.can_undo() {
+                            let did_undo = state.document.image.can_undo();
+                            if did_undo {
                                 state.document.image.undo();
+                            }
+                            // Compensation CAS: revert store from Applying to
+                            // Interrupted so the task is recoverable on restart
+                            // and the user can retry.
+                            if did_undo {
+                                if let Some(snapshot) = workbench.cached_task_snapshot.as_ref() {
+                                    if let Some(store) = workbench.task_store.clone() {
+                                        let now = chrono::Utc::now().timestamp_millis();
+                                        if let Ok(Some(interrupted)) =
+                                            snapshot.reconcile_interrupted(now)
+                                        {
+                                            let _ = store.compare_and_swap(
+                                                snapshot,
+                                                &interrupted,
+                                            );
+                                            workbench.cached_task_snapshot =
+                                                Some(interrupted);
+                                        }
+                                    }
+                                }
                             }
                             workbench.error = Some(e);
                             workbench.review_operation_active = false;
@@ -2591,11 +2618,27 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                                 };
                             let now = chrono::Utc::now().timestamp_millis();
                             if let Ok(rejected) = snapshot.reject(receipt, now) {
-                                let _ =
-                                    store.compare_and_swap(snapshot, &rejected);
+                                match store.compare_and_swap(snapshot, &rejected) {
+                                    Ok(_) => {
+                                        workbench.cached_task_snapshot = None;
+                                        workbench.pending_proposal = None;
+                                        workbench.review = super::workbench::CandidateReview::default();
+                                        workbench.selected_candidate = None;
+                                        workbench.corrections_non_empty = false;
+                                    }
+                                    Err(e) => {
+                                        workbench.error = Some(
+                                            super::workbench::WorkbenchError::StorePersist {
+                                                message: format!("discard CAS: {e}"),
+                                            },
+                                        );
+                                    }
+                                }
+                                return Task::none();
                             }
                         }
                     }
+                    // No store or reject failed — clear UI locally.
                     workbench.cached_task_snapshot = None;
                     workbench.pending_proposal = None;
                     workbench.review = super::workbench::CandidateReview::default();
