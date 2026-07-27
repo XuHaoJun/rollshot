@@ -1275,7 +1275,7 @@ impl<P, R: Send + 'static> JobReporter<P, R> {
         }
 
         if record.diagnostics.len() >= MAX_DIAGNOSTIC_ENTRIES {
-            record.diagnostics.remove(0);
+            record.diagnostics.pop_front();
             record.dropped_diagnostics += 1;
         }
         record.diagnostics.push_back(diagnostic);

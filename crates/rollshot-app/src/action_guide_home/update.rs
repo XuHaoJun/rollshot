@@ -628,7 +628,14 @@ fn import_admission_message(error: rollshot_agent::jobs::JobAdmissionError) -> S
         | rollshot_agent::jobs::JobAdmissionError::TerminalCapacity { .. } => {
             "Too many imports are still active or awaiting cleanup.".to_string()
         }
-        _ => "Import could not start because authorization was rejected.".to_string(),
+        rollshot_agent::jobs::JobAdmissionError::ShuttingDown => {
+            "Cannot start import while the application is shutting down.".to_string()
+        }
+        rollshot_agent::jobs::JobAdmissionError::KindAuthorityMismatch
+        | rollshot_agent::jobs::JobAdmissionError::OwnerAuthorityMismatch
+        | rollshot_agent::jobs::JobAdmissionError::UnsupportedAuthoritySource => {
+            "Import could not start because authorization was rejected.".to_string()
+        }
     }
 }
 
@@ -644,7 +651,7 @@ fn import_job_changes(
     let mut receiver = watch_mut.receiver();
     iced::stream::channel(1, async move |mut output| loop {
         if receiver.changed().await.is_err() {
-            std::future::pending::<()>().await;
+            return;
         }
         if output.send(Message::ImportJobsChanged).await.is_err() {
             return;
