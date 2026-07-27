@@ -37,6 +37,23 @@ pub enum PayloadMode {
     OcrLayoutOnly,
 }
 
+/// Monotonically increasing token that guards stale restore completions.
+/// Incremented on every new restore or run start; a completion whose
+/// `RestoreOperationId` doesn't match the current one is silently dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RestoreOperationId(u64);
+
+impl RestoreOperationId {
+    pub fn next(&mut self) -> Self {
+        self.0 += 1;
+        *self
+    }
+
+    pub fn value(&self) -> u64 {
+        self.0
+    }
+}
+
 /// Prepared vision state for the current run.
 #[derive(Debug)]
 pub struct VisionContext {
@@ -93,6 +110,14 @@ pub struct WorkbenchState {
     /// Filesystem-backed task store for run-outcome persistence.
     /// `None` when no config directory is available (e.g. tests).
     pub task_store: Option<std::sync::Arc<task_store::TaskStore>>,
+    /// Monotonically increasing token for stale restore guards.
+    pub restore_operation_id: RestoreOperationId,
+    /// Source binding cached at restore time; used to validate the
+    /// completion matches the current document state.
+    pub cached_source_binding: Option<rollshot_agent::product_task::SourceBinding>,
+    /// Base-image digest cached at restore time; a new image invalidates
+    /// any in-flight restore.
+    pub cached_base_digest: Option<[u8; 32]>,
 }
 
 /// Parameters captured at Send time and consumed when disclosure is confirmed.
@@ -147,6 +172,9 @@ impl Default for WorkbenchState {
             next_manual_candidate_id: 1,
             corrections_non_empty: false,
             task_store: None,
+            restore_operation_id: RestoreOperationId::default(),
+            cached_source_binding: None,
+            cached_base_digest: None,
         }
     }
 }
@@ -228,4 +256,12 @@ pub enum WorkbenchMessage {
     CancelRun,
     // Settings (minimal key-presence surface)
     OpenProviderSettings,
+    /// Restore completion from `reconcile_for_source`. Carries the operation
+    /// token so stale completions (from a superseded restore or run) are
+    /// silently dropped.
+    TaskRestoreFinished {
+        operation_id: RestoreOperationId,
+        source_binding: rollshot_agent::product_task::SourceBinding,
+        result: Option<rollshot_agent::product_task::ProductTaskSnapshot>,
+    },
 }

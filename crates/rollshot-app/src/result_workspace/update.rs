@@ -1663,8 +1663,64 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     wb.task_store = Some(std::sync::Arc::new(store));
                 }
             }
+
+            // Build source binding for the current document state.
+            let (w, h) = (
+                state.document.image.source().width(),
+                state.document.image.source().height(),
+            );
+            let annotation_state = rollshot_agent::product_task::AnnotationStateV1 {
+                width: w,
+                height: h,
+                state_id: state.document.image.state_id() as u32,
+                annotations: vec![],
+            };
+            let base_digest = state.base_image_digest;
+            let source_binding = rollshot_agent::product_task::SourceBinding::new(
+                base_digest,
+                rollshot_agent::product_task::compute_annotation_state_digest(&annotation_state)
+                    .unwrap_or(base_digest),
+                state.document.image.state_id() as u32,
+                wb.preset
+                    .as_ref()
+                    .map(|p| p.id.0.clone())
+                    .unwrap_or_default(),
+                None,
+            );
+
+            // Cache and bump restore token.
+            let operation_id = wb.restore_operation_id.next();
+            wb.cached_source_binding = Some(source_binding.clone());
+            wb.cached_base_digest = Some(base_digest);
+
+            // Spawn store reconciliation if a task store is available.
+            let task = if let Some(store) = wb.task_store.clone() {
+                let binding_for_store = source_binding.clone();
+                iced::Task::perform(
+                    async move {
+                        let result = tokio::task::spawn_blocking(move || {
+                            let now = chrono::Utc::now().timestamp_millis();
+                            store.reconcile_for_source(&binding_for_store, now).ok().flatten()
+                        })
+                        .await
+                        .ok()
+                        .flatten();
+                        (operation_id, source_binding, result)
+                    },
+                    |(operation_id, source_binding, result)| {
+                        Message::Workbench(super::workbench::WorkbenchMessage::TaskRestoreFinished {
+                            operation_id,
+                            source_binding,
+                            result,
+                        })
+                    },
+                )
+            } else {
+                Task::none()
+            };
+
             state.mode = super::workbench::WorkspaceMode::Workbench(wb);
-            Task::none()
+            task
         }
         Message::ExportBugReport => {
             state.editor.more_menu_open = false;
@@ -2249,6 +2305,46 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 | super::workbench::WorkbenchMessage::ToggleAdvancedDetails
                 | super::workbench::WorkbenchMessage::OpenProviderSettings
                 | super::workbench::WorkbenchMessage::DisclosureRequested(_) => Task::none(),
+                super::workbench::WorkbenchMessage::TaskRestoreFinished {
+                    operation_id,
+                    source_binding,
+                    result,
+                } => {
+                    // Stale guard: drop if operation ID doesn't match.
+                    if operation_id != workbench.restore_operation_id {
+                        return Task::none();
+                    }
+                    // Content guard: drop if base digest changed.
+                    if workbench.cached_base_digest
+                        != Some(*source_binding.base_image_sha256())
+                    {
+                        return Task::none();
+                    }
+                    // Must still be idle (not mid-run).
+                    if !workbench.run_state.is_idle() {
+                        return Task::none();
+                    }
+                    // Populate workbench from the restored snapshot.
+                    if let Some(snapshot) = result {
+                        // Deserialize the stored proposal.
+                        if let Some(proposal_bytes) = snapshot.pending_proposal_payload() {
+                            if let Ok(proposal) =
+                                serde_json::from_slice::<rollshot_edit_proposal::EditProposal>(
+                                    proposal_bytes,
+                                )
+                            {
+                                let ids: Vec<_> =
+                                    proposal.candidates.iter().map(|c| c.id).collect();
+                                workbench.review =
+                                    super::workbench::CandidateReview::from_candidates(&ids);
+                                workbench.selected_candidate = None;
+                                workbench.corrections_non_empty = false;
+                                workbench.pending_proposal = Some(proposal);
+                            }
+                        }
+                    }
+                    Task::none()
+                }
             }
         }
         Message::NextNumberInputChanged(value) => {

@@ -864,7 +864,18 @@ async fn persist_terminal_outcome(
                 },
             };
             match current.record_ready_for_review(metadata, payload, now) {
-                Ok(s) => s,
+                Ok(s) => {
+                    // Store serialized proposal for later restore.
+                    match serde_json::to_vec(&ready.proposal) {
+                        Ok(proposal_bytes) => {
+                            match s.with_proposal_payload(proposal_bytes) {
+                                Ok(s) => s,
+                                Err(e) => return Some(format!("attach proposal: {e}")),
+                            }
+                        }
+                        Err(e) => return Some(format!("serialize proposal: {e}")),
+                    }
+                }
                 Err(e) => return Some(format!("record ready: {e}")),
             }
         }
@@ -3448,6 +3459,310 @@ mod reducer_tests {
         assert!(
             wb(&ws).pending_proposal.is_none(),
             "RunTerminal must be rejected when Idle"
+        );
+    }
+
+    // -- Restore tests (Task 5) --------------------------------------------
+
+    use rollshot_agent::product_task::{
+        SourceBinding as Sb, TaskKind as Tk, TaskStatus as Ts,
+    };
+
+    /// Create a ReadyForReview snapshot with a serialized EditProposal.
+    fn ready_snapshot_with_proposal(
+        task_id: &rollshot_agent::product_task::ProductTaskId,
+        source_binding: Sb,
+    ) -> rollshot_agent::product_task::ProductTaskSnapshot {
+        use rollshot_agent::product_task::{
+            ArtifactId, ArtifactKind, ArtifactRevision, ProductArtifactMetadata,
+            ProductTaskSnapshot, PayloadConfigV1, PayloadDryRunV1,
+            PayloadProposalV1, PayloadSourceV1, SmartRedactionReviewPayload,
+            TaskAttempt, TaskAttemptId,
+        };
+
+        let run_id = rollshot_agent::domain::RunId::parse(
+            "run-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let now = 1000i64;
+
+        let snapshot = ProductTaskSnapshot::new(
+            task_id.clone(),
+            Tk::SmartRedactionAuthor,
+            source_binding.clone(),
+            now,
+        )
+        .unwrap();
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), now);
+        let running = snapshot.start_attempt(attempt, now + 1).unwrap();
+
+        let proposal = rollshot_edit_proposal::EditProposal {
+            id: rollshot_edit_proposal::ProposalId::parse(
+                "proposal-00000001-0000-4000-8000-000000000000",
+            )
+            .unwrap(),
+            base_document_state_id: 0,
+            candidates: vec![rollshot_edit_proposal::ProposedCandidate {
+                id: rollshot_edit_proposal::CandidateId(1),
+                edit: rollshot_edit_proposal::ProposedEdit::AddRedaction {
+                    bounds: rollshot_image_document::ImageRect {
+                        x: 10.0,
+                        y: 10.0,
+                        width: 50.0,
+                        height: 50.0,
+                    },
+                },
+                confidence: 0.9,
+                label: "email".into(),
+                rationale: None,
+                provenance: rollshot_edit_proposal::Provenance {
+                    source: rollshot_edit_proposal::ProvenanceSource::Agent {
+                        run_id: run_id.as_str().to_string(),
+                    },
+                },
+            }],
+            confidence_summary:
+                rollshot_edit_proposal::ConfidenceSummary::from_confidences(&[0.9]),
+            rationale_summary: None,
+            provenance: rollshot_edit_proposal::Provenance {
+                source: rollshot_edit_proposal::ProvenanceSource::Manual,
+            },
+        };
+
+        let metadata = ProductArtifactMetadata::new(
+            ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000001").unwrap(),
+            ArtifactRevision::new(1),
+            ArtifactKind::SmartRedaction,
+            1,
+            String::new(),
+            source_binding.clone(),
+            task_id.clone(),
+            running.attempts().last().unwrap().attempt_id(),
+            run_id.clone(),
+            "proposal-00000001-0000-4000-8000-000000000000".to_owned(),
+            String::new(),
+            String::new(),
+            String::new(),
+            1,
+            0.42,
+            now + 2,
+        );
+        let payload = SmartRedactionReviewPayload {
+            source: PayloadSourceV1 {
+                kind: "agent_run".into(),
+                validation_summary: "5 nodes".into(),
+            },
+            proposal: PayloadProposalV1 {
+                proposal_id: "proposal-00000001-0000-4000-8000-000000000000".into(),
+                candidate_count: 1,
+            },
+            dry_run: PayloadDryRunV1 {
+                candidate_count: 1,
+                affected_area: 0.42,
+            },
+            config: PayloadConfigV1 {
+                provider: "anthropic".into(),
+                model: "claude".into(),
+                payload_mode: rollshot_agent::product_task::PayloadMode::Author,
+                run_kind: "smart_redaction".into(),
+                budget_dimensions: std::collections::BTreeMap::new(),
+            },
+        };
+
+        let ready = running.record_ready_for_review(metadata, payload, now + 2).unwrap();
+        let proposal_bytes = serde_json::to_vec(&proposal).unwrap();
+        ready.with_proposal_payload(proposal_bytes).unwrap()
+    }
+
+    #[test]
+    fn restore_compatible_review() {
+        // 1. matching content restores exact artifact without provider call.
+        use super::super::task_store::TaskStore;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let snapshot = ready_snapshot_with_proposal(&task_id, binding.clone());
+        store.create(&snapshot).unwrap();
+
+        let mut ws = ws_with_workbench();
+        let store_arc = std::sync::Arc::new(store);
+        {
+            let wb = wb_mut(&mut ws);
+            wb.task_store = Some(store_arc.clone());
+            wb.cached_base_digest = Some([1u8; 32]);
+            let op_id = wb.restore_operation_id.next();
+
+            // Simulate what reconcile_for_source returns.
+            let result = store_arc
+                .reconcile_for_source(&binding, 2000)
+                .unwrap();
+
+            let _ = update(
+                &mut ws,
+                Message::Workbench(WorkbenchMessage::TaskRestoreFinished {
+                    operation_id: op_id,
+                    source_binding: binding,
+                    result,
+                }),
+            );
+        }
+        assert!(
+            wb(&ws).pending_proposal.is_some(),
+            "matching content must restore proposal"
+        );
+        assert_eq!(
+            wb(&ws).pending_proposal.as_ref().unwrap().candidates.len(),
+            1,
+            "restored proposal has 1 candidate"
+        );
+    }
+
+    #[test]
+    fn same_state_different_image_is_ignored() {
+        // 2. unrelated image with same state ID is ignored;
+        //    its task remains ReadyForReview (not restored, not stale).
+        use super::super::task_store::TaskStore;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        // Task was created with base_image = [1u8; 32].
+        let task_binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let snapshot = ready_snapshot_with_proposal(&task_id, task_binding);
+        store.create(&snapshot).unwrap();
+
+        // Current source has a DIFFERENT base image but same state_id.
+        let current_binding = Sb::new([99u8; 32], [2u8; 32], 0, "p".into(), None);
+        let result = store
+            .reconcile_for_source(&current_binding, 2000)
+            .unwrap();
+
+        // reconcile_for_source returns None — unrelated image skipped.
+        assert!(result.is_none(), "unrelated image must not be returned");
+        // The original task is untouched.
+        let loaded = store.load(&task_id).unwrap();
+        assert_eq!(
+            loaded.status(),
+            Ts::ReadyForReview,
+            "unrelated task must remain ReadyForReview"
+        );
+    }
+
+    #[test]
+    fn same_image_changed_annotations_marks_stale() {
+        // 3. same image, different annotation state → task marked stale.
+        use super::super::task_store::TaskStore;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        // Task: base=[1], annotations=[2], state_id=0.
+        let task_binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let snapshot = ready_snapshot_with_proposal(&task_id, task_binding);
+        store.create(&snapshot).unwrap();
+
+        // Current: base=[1], annotations=[99], state_id=0.
+        let current_binding = Sb::new([1u8; 32], [99u8; 32], 0, "p".into(), None);
+        let result = store
+            .reconcile_for_source(&current_binding, 2000)
+            .unwrap();
+
+        assert!(result.is_none(), "changed annotations must not restore");
+        let loaded = store.load(&task_id).unwrap();
+        assert_eq!(
+            loaded.status(),
+            Ts::Stale,
+            "same-image changed-annotations task must be marked stale"
+        );
+    }
+
+    #[test]
+    fn running_becomes_interrupted_on_reconcile() {
+        // 4. running/applying → interrupted on reconcile_for_source.
+        use super::super::task_store::TaskStore;
+        use rollshot_agent::product_task::{
+            ProductTaskSnapshot, TaskAttempt, TaskAttemptId,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+
+        let snapshot = ProductTaskSnapshot::new(
+            task_id.clone(),
+            Tk::SmartRedactionAuthor,
+            binding.clone(),
+            10,
+        )
+        .unwrap();
+        let attempt = TaskAttempt::new(
+            TaskAttemptId::new(1),
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap(),
+            10,
+        );
+        let running = snapshot.start_attempt(attempt, 20).unwrap();
+        store.create(&running).unwrap();
+
+        // Reconcile — running task becomes interrupted.
+        let result = store.reconcile_for_source(&binding, 2000).unwrap();
+        assert!(result.is_none(), "interrupted task is not returned for restore");
+
+        let loaded = store.load(&task_id).unwrap();
+        assert_eq!(
+            loaded.status(),
+            Ts::Interrupted,
+            "running task must become interrupted"
+        );
+    }
+
+    #[test]
+    fn stale_restore_completion_is_ignored() {
+        // 5. old restore completion delivered after a new restore/run is ignored.
+        let mut ws = ws_with_workbench();
+        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+
+        // Set up workbench with a restore operation in progress.
+        let stale_op = {
+            let wb = wb_mut(&mut ws);
+            wb.cached_base_digest = Some([1u8; 32]);
+            wb.restore_operation_id.next() // op 1
+        };
+
+        // A new restore starts — bumps the operation ID.
+        {
+            let wb = wb_mut(&mut ws);
+            wb.restore_operation_id.next(); // op 2
+            wb.cached_base_digest = Some([1u8; 32]);
+        }
+
+        // Deliver the old completion (stale_op = 1, current = 2).
+        let _ = update(
+            &mut ws,
+            Message::Workbench(WorkbenchMessage::TaskRestoreFinished {
+                operation_id: stale_op,
+                source_binding: binding,
+                result: None,
+            }),
+        );
+        assert!(
+            wb(&ws).pending_proposal.is_none(),
+            "stale restore completion must be ignored"
         );
     }
 }

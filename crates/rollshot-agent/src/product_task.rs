@@ -597,6 +597,11 @@ pub struct ProductTaskSnapshot {
     attempts: Vec<TaskAttempt>,
     artifact_metadata: Option<ProductArtifactMetadata>,
     pending_artifact_payload: Option<Vec<u8>>,
+    /// Serialized `EditProposal` JSON, stored at ReadyForReview so the
+    /// workbench can restore the full proposal from the store without a
+    /// provider call.  `#[serde(default)]` for backward compat.
+    #[serde(default)]
+    pending_proposal_payload: Option<Vec<u8>>,
     review_receipt: Option<ReviewReceipt>,
     created_at_unix_ms: i64,
     updated_at_unix_ms: i64,
@@ -620,6 +625,7 @@ impl ProductTaskSnapshot {
             attempts: Vec::new(),
             artifact_metadata: None,
             pending_artifact_payload: None,
+            pending_proposal_payload: None,
             review_receipt: None,
             created_at_unix_ms: now,
             updated_at_unix_ms: now,
@@ -664,6 +670,10 @@ impl ProductTaskSnapshot {
         self.pending_artifact_payload.as_deref()
     }
 
+    pub fn pending_proposal_payload(&self) -> Option<&[u8]> {
+        self.pending_proposal_payload.as_deref()
+    }
+
     pub fn review_receipt(&self) -> Option<&ReviewReceipt> {
         self.review_receipt.as_ref()
     }
@@ -699,7 +709,8 @@ impl ProductTaskSnapshot {
         Ok(next)
     }
 
-    /// Transition: Running → ReadyForReview. Embeds artifact metadata and payload.
+    /// Transition: Running → ReadyForReview. Embeds artifact metadata,
+    /// payload, and optionally the serialized EditProposal for restore.
     pub fn record_ready_for_review(
         &self,
         metadata: ProductArtifactMetadata,
@@ -741,6 +752,23 @@ impl ProductTaskSnapshot {
         next.pending_artifact_payload = Some(payload_bytes);
         next.snapshot_revision += 1;
         next.updated_at_unix_ms = now;
+        Ok(next)
+    }
+
+    /// Attach serialized EditProposal bytes to a ReadyForReview snapshot.
+    /// Used by the workbench to persist the full proposal for later restore.
+    /// Returns `Err` if the snapshot is not in ReadyForReview status.
+    pub fn with_proposal_payload(
+        &self,
+        proposal_payload: Vec<u8>,
+    ) -> Result<Self, TaskContractError> {
+        if self.status != TaskStatus::ReadyForReview {
+            return Err(TaskContractError::IllegalTransition {
+                from: self.status.clone(),
+            });
+        }
+        let mut next = self.clone();
+        next.pending_proposal_payload = Some(proposal_payload);
         Ok(next)
     }
 
@@ -936,6 +964,10 @@ impl fmt::Debug for ProductTaskSnapshot {
             .field(
                 "pending_artifact_payload",
                 &self.pending_artifact_payload.as_ref().map(|b| b.len()),
+            )
+            .field(
+                "pending_proposal_payload",
+                &self.pending_proposal_payload.as_ref().map(|b| b.len()),
             )
             .field("review_receipt", &self.review_receipt)
             .field("created_at_unix_ms", &self.created_at_unix_ms)
