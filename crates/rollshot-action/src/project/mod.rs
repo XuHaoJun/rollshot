@@ -1,10 +1,15 @@
 mod assets;
+pub mod continuity;
 mod error;
 mod model;
-mod publish;
+pub mod publish;
 mod store;
 mod validate;
 
+pub use continuity::{
+    ActionGuideContextProjectionV1, ActionGuideProjectedStepV1, ActionGuideProjectionError,
+    MAX_PROJECTED_BYTES, MAX_PROJECTED_STEPS, MAX_PROJECTED_TEXT_BYTES,
+};
 pub use error::{ProjectError, ProjectErrorCategory};
 pub use model::{
     EnabledOutputs, LoadedProject, PersistedStepAnnotations, ProjectCommit, ProjectFrame,
