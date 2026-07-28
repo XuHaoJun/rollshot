@@ -231,6 +231,75 @@ impl SourceBinding {
             _ => None,
         }
     }
+
+    /// Is this binding about the same source as `other`, regardless of how
+    /// stale either is? Bindings from different domains never match.
+    pub fn identity_matches(&self, other: &SourceBinding) -> bool {
+        match (self, other) {
+            (
+                Self::SmartRedaction {
+                    base_image_sha256: a,
+                    ..
+                },
+                Self::SmartRedaction {
+                    base_image_sha256: b,
+                    ..
+                },
+            ) => a == b,
+            (
+                Self::ActionGuideProject {
+                    project_root_sha256: a,
+                    ..
+                },
+                Self::ActionGuideProject {
+                    project_root_sha256: b,
+                    ..
+                },
+            ) => a == b,
+            (
+                Self::ActionGuideEphemeralGuide { guide_digest: a },
+                Self::ActionGuideEphemeralGuide { guide_digest: b },
+            ) => a == b,
+            _ => false,
+        }
+    }
+
+    /// Given matching identity, is this binding still valid for `other`'s state?
+    ///
+    /// Ephemeral guides are trivially fresh: identity and freshness are the same
+    /// digest. Their staleness after a restart is enforced by the store's
+    /// open-time sweep, not by this comparison.
+    pub fn freshness_matches(&self, other: &SourceBinding) -> bool {
+        match (self, other) {
+            (
+                Self::SmartRedaction {
+                    annotation_state_sha256: a,
+                    ..
+                },
+                Self::SmartRedaction {
+                    annotation_state_sha256: b,
+                    ..
+                },
+            ) => a == b,
+            (
+                Self::ActionGuideProject {
+                    revision: ra,
+                    projection_digest: da,
+                    ..
+                },
+                Self::ActionGuideProject {
+                    revision: rb,
+                    projection_digest: db,
+                    ..
+                },
+            ) => ra == rb && da == db,
+            (
+                Self::ActionGuideEphemeralGuide { guide_digest: a },
+                Self::ActionGuideEphemeralGuide { guide_digest: b },
+            ) => a == b,
+            _ => false,
+        }
+    }
 }
 
 // ========================================================================
@@ -2755,5 +2824,54 @@ mod tests {
             let back: SourceBinding = serde_json::from_str(&json).unwrap();
             assert_eq!(case, back, "round trip failed for {json}");
         }
+    }
+
+    #[test]
+    fn identity_ignores_freshness_and_rejects_other_domains() {
+        let a = SourceBinding::ActionGuideProject {
+            project_root_sha256: [1u8; 32],
+            revision: 1,
+            projection_digest: "aa".repeat(32),
+        };
+        let same_project_newer = SourceBinding::ActionGuideProject {
+            project_root_sha256: [1u8; 32],
+            revision: 2,
+            projection_digest: "bb".repeat(32),
+        };
+        let other_project = SourceBinding::ActionGuideProject {
+            project_root_sha256: [9u8; 32],
+            revision: 1,
+            projection_digest: "aa".repeat(32),
+        };
+        let smart = SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
+
+        assert!(a.identity_matches(&same_project_newer));
+        assert!(!a.freshness_matches(&same_project_newer));
+        assert!(!a.identity_matches(&other_project));
+        assert!(!a.identity_matches(&smart));
+        assert!(!smart.identity_matches(&a));
+    }
+
+    #[test]
+    fn smart_redaction_identity_is_base_image_freshness_is_annotation() {
+        let a = SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let edited = SourceBinding::smart_redaction([1u8; 32], [3u8; 32], 1, "p".into(), None);
+        let different_image =
+            SourceBinding::smart_redaction([8u8; 32], [2u8; 32], 0, "p".into(), None);
+
+        assert!(a.identity_matches(&edited));
+        assert!(!a.freshness_matches(&edited));
+        assert!(!a.identity_matches(&different_image));
+    }
+
+    #[test]
+    fn ephemeral_freshness_is_trivially_true_for_matching_identity() {
+        let a = SourceBinding::ActionGuideEphemeralGuide {
+            guide_digest: "ee".repeat(32),
+        };
+        let b = a.clone();
+
+        assert!(a.identity_matches(&b));
+        assert!(a.freshness_matches(&b));
     }
 }

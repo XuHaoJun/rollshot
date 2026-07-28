@@ -1288,32 +1288,13 @@ impl TaskStore {
                     continue;
                 }
                 TaskStatus::ReadyForReview => {
-                    // Temporary: Task 3 replaces this with
-                    // identity_matches / freshness_matches.
-                    let (snap_base, snap_annotation) = match snapshot.source_binding() {
-                        SourceBinding::SmartRedaction {
-                            base_image_sha256,
-                            annotation_state_sha256,
-                            ..
-                        } => (base_image_sha256, annotation_state_sha256),
-                        _ => continue,
-                    };
-                    let (want_base, want_annotation) = match binding {
-                        SourceBinding::SmartRedaction {
-                            base_image_sha256,
-                            annotation_state_sha256,
-                            ..
-                        } => (base_image_sha256, annotation_state_sha256),
-                        _ => continue,
-                    };
-                    // Skip tasks with completely unrelated base images.
-                    if snap_base != want_base {
+                    // Different source entirely — not a restore candidate.
+                    if !snapshot.source_binding().identity_matches(binding) {
                         continue;
                     }
 
-                    // Mark same-base-image but mismatching annotation-state
-                    // tasks as stale.
-                    if snap_annotation != want_annotation {
+                    // Same source, moved on — audited mark stale.
+                    if !snapshot.source_binding().freshness_matches(binding) {
                         // Audited mark stale.
                         if let Ok(stale) = snapshot.mark_stale(now) {
                             let event_id = AuditEventId::new_v4();
