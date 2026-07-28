@@ -263,6 +263,11 @@ fn response_to_drafts(
 /// across the RunBudget migration (plan Task 16).
 pub(crate) const TIMEOUT_MESSAGE: &str = "Caption suggestions timed out.";
 
+/// User-visible copy shown while a caption run is in flight. Preserved verbatim
+/// across the RunBudget migration (plan Task 16), which rewrites the handler
+/// that sets it.
+pub(crate) const RUNNING_MESSAGE: &str = "Suggesting captions...";
+
 pub(crate) async fn suggest_captions_task(
     run_id: u64,
     model: String,
@@ -493,6 +498,15 @@ mod tests {
             super::TIMEOUT_MESSAGE,
             "Caption suggestions timed out.",
             "user-visible timeout copy must not change"
+        );
+    }
+
+    #[test]
+    fn running_copy_baseline() {
+        assert_eq!(
+            super::RUNNING_MESSAGE,
+            "Suggesting captions...",
+            "user-visible in-flight copy must not change"
         );
     }
 }

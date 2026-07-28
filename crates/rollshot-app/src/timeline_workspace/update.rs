@@ -1259,7 +1259,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                 }
             };
 
-            state.message = Some("Suggesting captions...".to_string());
+            state.message = Some(super::caption_agent::RUNNING_MESSAGE.to_string());
             tracing::info!(
                 target: "rollshot::action::caption_agent",
                 run_id,
