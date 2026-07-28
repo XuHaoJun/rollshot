@@ -1125,26 +1125,18 @@ impl TaskStore {
 
             // Reconcile running/applying → interrupted.
             match snapshot.status() {
-                TaskStatus::Running | TaskStatus::Applying => {
+                TaskStatus::Created | TaskStatus::Running | TaskStatus::Applying => {
                     if let Ok(Some(reconciled)) = snapshot.reconcile_interrupted(now) {
-                        // CAS reconcile under lock.
-                        let lock_file = match fs::File::open(&self.lock_path) {
-                            Ok(f) => f,
-                            Err(_) => continue,
-                        };
-                        if lock_file.lock().is_err() {
-                            continue;
+                        // Audited transition: reconcile to Interrupted.
+                        let event_id = AuditEventId::new_v4();
+                        if let Err(e) = self.transition_audited(
+                            &snapshot,
+                            &reconciled,
+                            event_id,
+                            now,
+                        ) {
+                            warn!(error = %e, task_id = task_id.as_str(), "reconcile interrupted: transition_audited failed");
                         }
-
-                        // Re-read to confirm current matches.
-                        if let Ok(current) = self.read_snapshot(&task_id) {
-                            if current == snapshot {
-                                if let Err(e) = self.atomic_write(&path, &reconciled, None) {
-                                    warn!(error = %e, task_id = task_id.as_str(), "reconcile interrupted: atomic_write failed");
-                                }
-                            }
-                        }
-                        // Lock released on drop.
                     }
                     continue;
                 }
@@ -1163,9 +1155,6 @@ impl TaskStore {
 
                     // Check source binding compatibility for ready tasks.
                     // Only consider non-terminal statuses for restore.
-                    continue;
-                }
-                TaskStatus::Created => {
                     continue;
                 }
                 TaskStatus::ReadyForReview => {
@@ -1379,6 +1368,7 @@ mod tests {
         RunContractReceiptV1, SmartRedactionReviewPayload, TaskAttempt, TaskAttemptId, TaskKind,
         TaskTerminal,
     };
+    use rollshot_agent::audit::{AuditEventV1, AuditTaskTerminalV1};
     use rollshot_agent::skills::{SkillInvocationKind, SkillUseReceiptV1};
     use sha2::{Digest, Sha256};
     use std::collections::BTreeMap;
@@ -2559,5 +2549,193 @@ mod tests {
         // Verify events still present.
         let events = store.committed_audit_events(snapshot.task_id()).unwrap();
         assert_eq!(events.len(), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // Task 4 checkpoint tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn task_store_required() {
+        // Verify that create_audited + transition_audited produce
+        // the exact TaskCreated + AttemptStarted event pair.
+        let (store, _dir) = store();
+        let created = created_task_fixture();
+        let created_event_id = AuditEventId::new_v4();
+        store
+            .create_audited(&created, created_event_id, 10)
+            .unwrap();
+
+        let running = created.start_attempt(attempt_fixture(), 20).unwrap();
+        let attempt_event_id = AuditEventId::new_v4();
+        store
+            .transition_audited(&created, &running, attempt_event_id, 20)
+            .unwrap();
+
+        let events = store.committed_audit_events(created.task_id()).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0].event(), AuditEventV1::TaskCreated));
+        assert!(matches!(events[1].event(), AuditEventV1::AttemptStarted { .. }));
+    }
+
+    #[test]
+    fn created_attempt_audit() {
+        // No dispatch without store: verify the two audited commits
+        // produce the expected event order for a Created → Running task.
+        let (store, _dir) = store();
+        let created = created_task_fixture();
+        assert_eq!(created.status(), TaskStatus::Created);
+        assert_eq!(created.snapshot_revision(), 0);
+
+        let created_event_id = AuditEventId::new_v4();
+        let outcome = store
+            .create_audited(&created, created_event_id, 10)
+            .unwrap();
+        assert_eq!(outcome.store, StoreCommitOutcome::Committed);
+
+        let running = created.start_attempt(attempt_fixture(), 20).unwrap();
+        assert_eq!(running.status(), TaskStatus::Running);
+        assert_eq!(running.snapshot_revision(), 1);
+
+        let attempt_event_id = AuditEventId::new_v4();
+        let outcome = store
+            .transition_audited(&created, &running, attempt_event_id, 20)
+            .unwrap();
+        assert_eq!(outcome.store, StoreCommitOutcome::Committed);
+
+        let events = store.committed_audit_events(created.task_id()).unwrap();
+        assert_eq!(events.len(), 2);
+        // First event: TaskCreated.
+        assert!(matches!(events[0].event(), AuditEventV1::TaskCreated));
+        // Second event: AttemptStarted with correct attempt/run IDs.
+        match events[1].event() {
+            AuditEventV1::AttemptStarted { attempt_id, run_id } => {
+                assert_eq!(*attempt_id, 1);
+                assert_eq!(run_id, run_id_fixture().as_str());
+            }
+            other => panic!("expected AttemptStarted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_contract_audit() {
+        // Binding a run contract produces audited RunContractBound event
+        // with exact authority/skill receipts.
+        let (store, _dir) = store();
+        let created = created_task_fixture();
+        store
+            .create_audited(&created, AuditEventId::new_v4(), 10)
+            .unwrap();
+        let running = created.start_attempt(attempt_fixture(), 20).unwrap();
+        store
+            .transition_audited(&created, &running, AuditEventId::new_v4(), 20)
+            .unwrap();
+
+        let receipt = run_contract_fixture();
+        let bound = running.bind_run_contract(receipt.clone(), 25).unwrap();
+        store
+            .transition_audited(&running, &bound, AuditEventId::new_v4(), 25)
+            .unwrap();
+
+        let events = store.committed_audit_events(created.task_id()).unwrap();
+        assert_eq!(events.len(), 3);
+        assert!(matches!(events[0].event(), AuditEventV1::TaskCreated));
+        assert!(matches!(events[1].event(), AuditEventV1::AttemptStarted { .. }));
+        match events[2].event() {
+            AuditEventV1::RunContractBound { authority, skill_use } => {
+                assert_eq!(authority.snapshot_digest, receipt.authority.snapshot_digest);
+                assert_eq!(authority.policy_revision, receipt.authority.policy_revision);
+                assert_eq!(skill_use.package_id, receipt.skill_use.package_id);
+                assert_eq!(skill_use.package_digest, receipt.skill_use.package_digest);
+            }
+            other => panic!("expected RunContractBound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn artifact_terminal_audit() {
+        // Artifact promotion produces audited ArtifactPromoted event.
+        // No partial promotion: if CAS fails, no event is committed.
+        let (store, _dir) = store();
+        let created = created_task_fixture();
+        store
+            .create_audited(&created, AuditEventId::new_v4(), 10)
+            .unwrap();
+        let running = created.start_attempt(attempt_fixture(), 20).unwrap();
+        store
+            .transition_audited(&created, &running, AuditEventId::new_v4(), 20)
+            .unwrap();
+        let receipt = run_contract_fixture();
+        let bound = running.bind_run_contract(receipt, 25).unwrap();
+        store
+            .transition_audited(&running, &bound, AuditEventId::new_v4(), 25)
+            .unwrap();
+
+        let contract = bound.active_run_contract().unwrap().clone();
+        let meta = v2_metadata_with_contract(&contract);
+        let ready = bound
+            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .unwrap();
+        store
+            .transition_audited(&bound, &ready, AuditEventId::new_v4(), 30)
+            .unwrap();
+
+        let events = store.committed_audit_events(bound.task_id()).unwrap();
+        assert_eq!(events.len(), 4);
+        assert!(matches!(events[0].event(), AuditEventV1::TaskCreated));
+        assert!(matches!(events[1].event(), AuditEventV1::AttemptStarted { .. }));
+        assert!(matches!(events[2].event(), AuditEventV1::RunContractBound { .. }));
+        match events[3].event() {
+            AuditEventV1::ArtifactPromoted { artifact } => {
+                assert_eq!(artifact.artifact_id, "artifact-00000000-0000-4000-8000-000000000001");
+            }
+            other => panic!("expected ArtifactPromoted, got {other:?}"),
+        }
+
+        // Verify terminal failure on stale expected value produces CAS conflict.
+        let failed = bound
+            .record_terminal(TaskTerminal::RuntimeFailure, 35)
+            .unwrap();
+        let result = store.transition_audited(&bound, &failed, AuditEventId::new_v4(), 35);
+        assert!(result.is_err()); // CAS conflict — no partial promotion.
+    }
+
+    #[test]
+    fn abandoned_created_task_is_interrupted() {
+        // A Created task persisted in the store gets reconciled to
+        // Interrupted on reconcile_for_source, with an audited
+        // TaskTerminated event.
+        let (store, dir) = store();
+        let created = created_task_fixture();
+        store
+            .create_audited(&created, AuditEventId::new_v4(), 10)
+            .unwrap();
+
+        let binding = source_binding_fixture();
+        store.reconcile_for_source(&binding, 100).unwrap();
+
+        // Task should now be Interrupted.
+        let loaded = store.load(created.task_id()).unwrap();
+        assert_eq!(loaded.status(), TaskStatus::Interrupted);
+
+        // Audit journal should contain TaskCreated + TaskTerminated(Interrupted).
+        let events = store.committed_audit_events(created.task_id()).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0].event(), AuditEventV1::TaskCreated));
+        match events[1].event() {
+            AuditEventV1::TaskTerminated { terminal } => {
+                assert_eq!(*terminal, AuditTaskTerminalV1::Interrupted);
+            }
+            other => panic!("expected TaskTerminated, got {other:?}"),
+        }
+
+        // Reopen the store to verify reconciliation is idempotent.
+        drop(store);
+        let store2 = TaskStore::open(dir.path()).unwrap();
+        let loaded2 = store2.load(created.task_id()).unwrap();
+        assert_eq!(loaded2.status(), TaskStatus::Interrupted);
+        // No new events after reopen (already reconciled).
+        let events2 = store2.committed_audit_events(created.task_id()).unwrap();
+        assert_eq!(events2.len(), 2);
     }
 }

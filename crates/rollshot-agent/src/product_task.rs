@@ -1147,11 +1147,11 @@ impl ProductTaskSnapshot {
         Ok(next)
     }
 
-    /// Reconcile Running or Applying to Interrupted (startup recovery).
+    /// Reconcile Created, Running, or Applying to Interrupted (startup recovery).
     /// Returns `Ok(None)` if already terminal or not in a reconcilable state.
     pub fn reconcile_interrupted(&self, now: i64) -> Result<Option<Self>, TaskContractError> {
         match self.status {
-            TaskStatus::Running | TaskStatus::Applying => {}
+            TaskStatus::Created | TaskStatus::Running | TaskStatus::Applying => {}
             _ => return Ok(None),
         }
         if now < self.updated_at_unix_ms {

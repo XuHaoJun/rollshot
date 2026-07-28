@@ -973,6 +973,13 @@ fn derive_event(
             },
         ),
 
+        // TaskTerminated: Created → Interrupted (startup interruption)
+        (Some(TaskStatus::Created), TaskStatus::Interrupted) => Ok(
+            AuditEventV1::TaskTerminated {
+                terminal: AuditTaskTerminalV1::Interrupted,
+            },
+        ),
+
         // TaskTerminated: Running|Applying → Interrupted
         (Some(TaskStatus::Running | TaskStatus::Applying), TaskStatus::Interrupted) => Ok(
             AuditEventV1::TaskTerminated {
