@@ -247,14 +247,23 @@ skill and an authority snapshot.
 `action-guide` feature disabled. Only Action Guide task-kind construction sites
 are feature-gated.
 
-Exactly one `TaskStore` instance exists per process. It is opened at application
-initialization instead of inside `result_workspace/update.rs:1664`, and shared as
-an `Arc` clone into both workspaces; the existing
+Exactly one `TaskStore` instance exists per process, opened at the workspace
+root and shared as an `Arc` clone within it. The existing
 `workbench.task_store: Option<Arc<TaskStore>>` field shape is retained on both
 sides. `acquire_lock` takes a blocking fs4 exclusive lock per operation
 (`task_store.rs:797`), and two instances in one process hold distinct file
 descriptors that flock treats as unrelated holders, so a second instance would
 block or self-deadlock.
+
+**Corrected 2026-07-28 after engineering review.** An earlier draft said the
+store is opened once at application initialization and handed to both workspaces.
+That describes an architecture this code does not have: `main.rs:74`'s `run`
+dispatches into mutually exclusive `LaunchMode` branches, and
+`result_workspace::run` and `timeline_workspace::run` are separate iced
+applications that never coexist in one process. The one-instance-per-process rule
+stands and is in fact trivially satisfied; what does not follow is the claim that
+the two domains can contend for the lock inside a single process. Cross-process
+contention is real and is what the lock already existed for.
 
 ## 4. The bounded run
 
@@ -276,6 +285,7 @@ existing `AgentTaskProfile` enum (`driver.rs:177`, today a single
 ```rust
 pub enum SingleSubmitTerminal {
     Submitted { arguments: serde_json::Value },
+    TextCompleted { text: String },
     Cancelled,
     BudgetExhausted { dimension: BudgetDimension },
     ProviderFailure,
@@ -296,6 +306,17 @@ recognized today inside `decode_visual_annotation_terminal`
 a schema-agnostic profile cannot do. Declining is therefore a decode outcome the
 caller reports, not a profile terminal.
 
+`TextCompleted` exists for the same reason, in the opposite direction. The
+caption flow today falls back to `parse_caption_response` on the assistant
+message when no tool call arrives (`caption_agent.rs:343`-346), and the
+instruction text this slice preserves verbatim tells the model it may return JSON
+that way. Inheriting the visual annotation run's behavior — a completion with no
+terminal tool call is a protocol failure (`driver.rs:1960`-1965) — would delete
+that fallback silently while the skill body still promised it. The profile
+therefore hands the accumulated text back and the caller decodes it. Slice B maps
+`TextCompleted` to a protocol failure to keep visual annotation's behavior
+identical.
+
 The profile does four things `run_visual_annotation_with_provider` does not,
 and those four are the point of this slice:
 
@@ -303,7 +324,12 @@ and those four are the point of this slice:
    `authorize_tool(run_id, subject, RunOperation::SubmitReviewCandidate)` before
    accepting a submitted payload; denial yields `AuthorityDenied` and appends
    the audit event;
-2. takes `skill_use: &SkillUse` and composes the system prompt from it;
+2. holds `skill_use: &SkillUse` and is constructible only through
+   `SingleSubmitProfile::from_skill`, which rejects a system prompt not
+   containing the skill's digest. Composition itself happens in the caller,
+   because `AgentTaskProfile::system_prompt` returns `&'static str` and a
+   digest-bearing prompt cannot be one; the constructor is what keeps the
+   compose-from-skill invariant checkable rather than merely conventional;
 3. takes an audit sink, so `AuthorityDenied` is appendable from inside the run,
    as `run_with_provider` already does;
 4. calls `validate_model_input` before dispatch, so the `TextMetadataOnly`
@@ -533,6 +559,9 @@ Slice A additionally requires:
 | Authority digest formula change | Resolved by test before adoption; documented fallback in §3.6 |
 | Project identity is a path digest | Accepted. Moving a project orphans pending tasks, which reconcile to `Stale` |
 | Prompt relocation may shift model output | Instruction text proven identical; structural delta recorded; no eval harness in this slice |
-| Two domains now share one lock | Covered by the concurrency test; single-instance rule enforced by construction |
+| Two domains now share one lock | Covered by the concurrency test; single-instance rule enforced by construction. Contention is cross-process, not intra-process — see §3.8's correction |
+| A crash while a batch is partly reviewed leaves the task `Applying`, which reconciles to `Interrupted` with no `ReviewDecisionCommitted`. The audit journal therefore never records which suggestions the user had accepted | Accepted for Slice A and recorded. The applied captions themselves are safe in the project; it is the evidence that is incomplete, for exactly the case audit exists for. Fixing it means emitting `ReviewDecisionCommitted` per decision instead of per task, which is an audit-vocabulary change and therefore an umbrella amendment |
+| `CaptionSuggestionStatus::Stale` is recorded in `rejected_candidates`, conflating "the user said no" with "the project moved" | Accepted for Slice A: `ReviewReceipt` has no third bucket. Must be revisited before Slice B reuses the receipt, where staleness is more common |
+| The open-time sweep and `reconcile_for_source` both own an interrupted-reconciliation rule | One shared helper is a merge condition for Task 19, not an optional cleanup |
 | `load_provider_config` and `build_adapter` still live in the Smart Redaction module and are cross-imported by the timeline workspace | Noted, not done. Not required by captions |
 | `visual_annotation_agent.rs` carries a stale `#![allow(dead_code)]` header comment claiming the flow is unwired | Noted, not done. Slice B owns that file |

@@ -305,8 +305,20 @@ blocking fs4 exclusive lock per operation
 `TaskStore::open` additionally reconciles all audit journals before returning.
 
 Today only one workspace uses the store, so cross-domain contention has never
-occurred. After sharing, Smart Redaction and Action Guide can each drive an
-agent run at the same time.
+occurred. After sharing, Smart Redaction and Action Guide task files, journals,
+and reconcile passes all live in one tree, and two Rollshot processes can operate
+on it at once.
+
+**Corrected 2026-07-28 after engineering review.** An earlier draft of this
+section claimed the two domains could each drive an agent run at the same time
+*within one process*. They cannot: `main.rs:74`'s `run` dispatches into mutually
+exclusive `LaunchMode` branches, so `result_workspace::run` and
+`timeline_workspace::run` never coexist in a process. The exposure is
+cross-process, which the blocking fs4 lock already existed to handle. The rule
+below is unchanged and is trivially satisfied; only its justification was
+overstated. Slice A's two-domain concurrency test is retained as a regression
+test that the lock and the audited-write path behave for two task kinds, not as
+mitigation of a newly created single-process race.
 
 This umbrella therefore fixes:
 
@@ -551,6 +563,7 @@ A discovery contained within one slice belongs in that slice's child spec.
 |---|---|---|
 | 2026-07-28 | §9 gains item 7 (authority binding); item 5's rationale corrected to provenance honesty rather than enforcement | [`2026-07-28-action-guide-authority-binding-amendment-decision.md`](../spikes/2026-07-28-action-guide-authority-binding-amendment-decision.md) |
 | 2026-07-28 | §9 item 4 widened from `pending_proposal_payload` alone to the whole artifact payload surface, including `record_ready_for_review`'s concrete payload parameter | same record, §7 |
+| 2026-07-28 | §10's intra-process contention claim withdrawn as factually wrong; the single-`TaskStore`-per-process rule itself unchanged. Logged as a correction, not an amendment | same record, §8 |
 
 ## 18. Umbrella completion
 

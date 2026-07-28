@@ -133,3 +133,39 @@ These are recorded because the umbrella's Gate B1 tests whether the contracts
 generalize. Two of the surfaces examined generalized without change, which is
 evidence in the affirmative direction and should not be lost among the seven
 that did not.
+
+## 8. Factual correction: the store is not shared across two live workspaces
+
+Found by independent engineering review of the Slice A plan on 2026-07-28,
+verified against code, and applied as a factual correction rather than an
+amendment.
+
+Umbrella §10 and child spec §3.8 both described the shared store as opened once
+at application initialization and handed to both workspaces, and §10 justified
+its single-instance rule by claiming Smart Redaction and Action Guide could each
+drive a run at the same time within one process.
+
+They cannot. `main.rs:74`'s `run` dispatches into mutually exclusive
+`LaunchMode` branches — capture, daemon, open-image, Action Guide — and
+`result_workspace::run` (`result_workspace/mod.rs:371`) and
+`timeline_workspace::run` (`timeline_workspace/mod.rs:864`) are separate iced
+applications that never coexist in a process.
+
+What survives:
+
+- the one-`TaskStore`-per-process rule, unchanged. It is now understood to be
+  trivially satisfied rather than a constraint the design must work to maintain,
+  and it is still worth stating because a future single-process shell would
+  otherwise violate it silently;
+- Slice A's two-domain concurrency test, reframed. It is a regression test that
+  the lock and the audited-write path behave for two task kinds sharing one tree,
+  not mitigation of a newly created intra-process race.
+
+What was wrong: the claimed intra-process exposure. Cross-process contention is
+real and predates this program; the blocking fs4 lock at `task_store.rs:797`
+already existed for it.
+
+This is recorded as a correction, not an amendment, because §17's
+amendment triggers include the single-`TaskStore`-per-process rule and the rule
+did not change — only its justification. The correction is logged in §17.1 so
+Slice B does not plan against the withdrawn claim.
