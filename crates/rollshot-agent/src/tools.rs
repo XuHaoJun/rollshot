@@ -718,6 +718,51 @@ impl ToolContext {
             last_dry_run_source: Mutex::new(None),
         }
     }
+
+    /// Privacy-safe continuity snapshot for emergency manifest construction.
+    ///
+    /// Locks each field in a fixed order and copies only privacy-safe
+    /// metadata. Contains no source, proposals, validated programs,
+    /// metrics debug text, capability handles, or pending review content.
+    #[allow(dead_code)] // exercised by continuity.rs privacy sentinel tests
+    pub(crate) fn continuity_state(&self) -> crate::continuity::ToolContinuitySnapshot {
+        let draft = self.draft.lock().unwrap();
+        let generation = draft.generation();
+
+        // Snapshot current-generation evidence.
+        let current_evidence: Vec<crate::continuity::EvidenceContinuityV1> = draft
+            .evidence()
+            .iter()
+            .filter(|e| e.source_generation == generation)
+            .map(crate::continuity::EvidenceContinuityV1::from_record)
+            .collect();
+
+        drop(draft);
+
+        let has_validation_evidence = current_evidence.iter().any(|e| e.is_validation());
+        let has_dry_run_evidence = current_evidence.iter().any(|e| e.is_dry_run());
+
+        let pending_review = self.pending_ready_for_review.lock().unwrap().is_some();
+
+        let content_binding_digest = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(self.content_binding.base_image_digest());
+            hasher.update(self.content_binding.annotation_state_digest());
+            hasher.update(self.content_binding.state_id().to_le_bytes());
+            format!("{:x}", hasher.finalize())
+        };
+
+        crate::continuity::ToolContinuitySnapshot::new(
+            self.run_id.clone(),
+            content_binding_digest,
+            generation,
+            current_evidence,
+            has_validation_evidence,
+            has_dry_run_evidence,
+            pending_review,
+        )
+    }
 }
 
 // ---------- Concrete authoring tools ----------

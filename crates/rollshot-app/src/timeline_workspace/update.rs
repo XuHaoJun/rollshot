@@ -125,6 +125,11 @@ pub enum Message {
     AnnotationDone,
     AnnotationCancel,
     CaptionProposalLoaded(Result<rollshot_action::CaptionProposal, String>),
+    /// Two-stage caption context preparation completed.
+    CaptionContextPrepared {
+        run_id: u64,
+        result: Result<super::caption_agent::PreparedCaptionContext, String>,
+    },
     AcceptCaptionSuggestion(rollshot_action::CaptionSuggestionId),
     RejectCaptionSuggestion(rollshot_action::CaptionSuggestionId),
     AcceptAllCaptionSuggestions,
@@ -1079,10 +1084,15 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             if !state.can_mutate() {
                 return Update::none();
             }
+            let context = state
+                .caption_proposal
+                .as_ref()
+                .map(|p| state.caption_apply_context(p))
+                .unwrap_or(rollshot_action::CaptionApplyContext::EphemeralGuide);
             let Some(proposal) = &mut state.caption_proposal else {
                 return Update::none();
             };
-            match proposal.apply(&mut state.guide, id) {
+            match proposal.apply(&mut state.guide, &context, id) {
                 rollshot_action::CaptionApplyOutcome::Applied => {
                     state.mark_project_dirty();
                     state.message = Some("Caption suggestion accepted.".to_string());
@@ -1106,8 +1116,13 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             if !state.can_mutate() {
                 return Update::none();
             }
+            let context = state
+                .caption_proposal
+                .as_ref()
+                .map(|p| state.caption_apply_context(p))
+                .unwrap_or(rollshot_action::CaptionApplyContext::EphemeralGuide);
             if let Some(proposal) = &mut state.caption_proposal {
-                let outcomes = proposal.apply_all(&mut state.guide);
+                let outcomes = proposal.apply_all(&mut state.guide, &context);
                 let applied = outcomes
                     .iter()
                     .filter(|&&outcome| outcome == rollshot_action::CaptionApplyOutcome::Applied)
@@ -1142,18 +1157,94 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             }
             state.caption_agent_run_id = state.caption_agent_run_id.saturating_add(1);
             let run_id = state.caption_agent_run_id;
-            let guide = state.guide.clone();
+
+            // Determine context request: durable for saved+clean projects,
+            // ephemeral otherwise.
+            let request = match (&state.project_session, state.save_state) {
+                (
+                    Some(super::project::ProjectSession::Saved {
+                        root,
+                        base_revision,
+                        ..
+                    }),
+                    super::ProjectSaveState::Clean,
+                ) => super::caption_agent::CaptionContextRequest::Durable {
+                    root: root.clone(),
+                    expected_revision: *base_revision,
+                },
+                _ => super::caption_agent::CaptionContextRequest::Ephemeral {
+                    guide: state.guide.clone(),
+                },
+            };
+
+            state.caption_suggestions_running = true;
+            state.message = Some("Preparing caption context...".to_string());
+            tracing::info!(
+                target: "rollshot::action::caption_agent",
+                run_id,
+                is_durable = matches!(request, super::caption_agent::CaptionContextRequest::Durable { .. }),
+                "caption context preparation started"
+            );
+            Update::task(Task::perform(
+                super::caption_agent::prepare_caption_context_task(run_id, request),
+                move |result| Message::CaptionContextPrepared { run_id, result },
+            ))
+        }
+        Message::CaptionContextPrepared { run_id, result } => {
+            // Ignore stale preparation results.
+            if run_id != state.caption_agent_run_id {
+                tracing::debug!(
+                    target: "rollshot::action::caption_agent",
+                    run_id,
+                    current = state.caption_agent_run_id,
+                    "stale caption context preparation ignored"
+                );
+                return Update::none();
+            }
+
+            let prepared = match result {
+                Ok(ctx) => ctx,
+                Err(error) => {
+                    state.caption_suggestions_running = false;
+                    state.message = Some(format!("Caption suggestions failed: {error}"));
+                    return Update::none();
+                }
+            };
+
+            // For durable context, recheck the workspace is still saved+clean
+            // with the same root and revision.
+            if prepared.is_durable() {
+                let still_valid = matches!(
+                    (&state.project_session, state.save_state),
+                    (
+                        Some(super::project::ProjectSession::Saved { .. }),
+                        super::ProjectSaveState::Clean,
+                    )
+                );
+                if !still_valid {
+                    state.caption_suggestions_running = false;
+                    state.message = Some(
+                        "Caption suggestions failed: project was modified during preparation."
+                            .to_string(),
+                    );
+                    return Update::none();
+                }
+            }
+
+            // Load provider config and build adapter (deferred from request time).
             let cfg = match crate::daemon::config::rollshot_config_dir()
                 .map_err(|_| "Rollshot config directory is unavailable.".to_string())
                 .and_then(|dir| crate::result_workspace::workbench::load_provider_config(&dir))
             {
                 Ok(cfg) => cfg,
                 Err(error) => {
+                    state.caption_suggestions_running = false;
                     state.message = Some(format!("Caption suggestions failed: {error}"));
                     return Update::none();
                 }
             };
             if !crate::result_workspace::workbench::has_key(&cfg) {
+                state.caption_suggestions_running = false;
                 state.message =
                     Some("Configure an agent provider before suggesting captions.".to_string());
                 return Update::none();
@@ -1162,20 +1253,22 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             let adapter = match crate::result_workspace::workbench::build_adapter(&cfg) {
                 Ok(adapter) => adapter,
                 Err(error) => {
+                    state.caption_suggestions_running = false;
                     state.message = Some(format!("Caption suggestions failed: {error}"));
                     return Update::none();
                 }
             };
-            state.caption_suggestions_running = true;
+
             state.message = Some("Suggesting captions...".to_string());
             tracing::info!(
                 target: "rollshot::action::caption_agent",
                 run_id,
-                step_count = guide.steps().len(),
+                step_count = prepared.guide().steps().len(),
+                is_durable = prepared.is_durable(),
                 "caption suggestion run started"
             );
             Update::task(Task::perform(
-                super::caption_agent::suggest_captions_task(run_id, model, adapter, guide),
+                super::caption_agent::suggest_captions_task(run_id, model, adapter, prepared),
                 Message::CaptionProposalLoaded,
             ))
         }
@@ -4480,6 +4573,9 @@ mod tests {
         rollshot_action::CaptionProposal::from_agent_drafts(
             rollshot_action::CaptionProposalId(1),
             42,
+            rollshot_action::CaptionProposalOrigin::EphemeralGuide {
+                guide_digest: "0".repeat(64),
+            },
             &state.guide,
             vec![rollshot_action::CaptionSuggestionDraft {
                 step_source: state.guide.steps()[0].source,
@@ -4601,7 +4697,22 @@ mod tests {
         let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
         let mut state = ws(synthetic_recording(1));
 
+        // Stage 1: request prepares context (ephemeral for unsaved workspace).
         let _ = update(&mut state, Message::SuggestCaptionsRequested);
+        assert!(state.caption_suggestions_running);
+
+        // Stage 2: simulate preparation completing, then provider check fails.
+        let context = crate::timeline_workspace::caption_agent::PreparedCaptionContext::Ephemeral {
+            guide: state.guide.clone(),
+            guide_digest: "0".repeat(64),
+        };
+        let _ = update(
+            &mut state,
+            Message::CaptionContextPrepared {
+                run_id: 1,
+                result: Ok(context),
+            },
+        );
 
         assert!(!state.caption_suggestions_running);
         assert_eq!(
@@ -4616,6 +4727,9 @@ mod tests {
         let proposal = rollshot_action::CaptionProposal::from_agent_drafts(
             rollshot_action::CaptionProposalId(1),
             42,
+            rollshot_action::CaptionProposalOrigin::EphemeralGuide {
+                guide_digest: "0".repeat(64),
+            },
             &state.guide,
             vec![rollshot_action::CaptionSuggestionDraft {
                 step_source: state.guide.steps()[0].source,
@@ -4647,6 +4761,9 @@ mod tests {
         let proposal = rollshot_action::CaptionProposal::from_agent_drafts(
             rollshot_action::CaptionProposalId(1),
             42,
+            rollshot_action::CaptionProposalOrigin::EphemeralGuide {
+                guide_digest: "0".repeat(64),
+            },
             &state.guide,
             vec![rollshot_action::CaptionSuggestionDraft {
                 step_source: state.guide.steps()[0].source,

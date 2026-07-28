@@ -334,5 +334,25 @@
     },
     "status": 500,
     "body": "{\"error\":{\"message\":\"Internal server error\",\"type\":\"server_error\",\"code\":\"internal_error\"}}"
+  },
+  "anthropic_context_overflow": {
+    "provenance": {
+      "source_url": "https://docs.anthropic.com/en/api/errors",
+      "retrieved": "2026-07-28",
+      "original_event_names": [],
+      "substitutions": "Content scrubbed. Anthropic context_length_exceeded error for prompt exceeding model context window."
+    },
+    "status": 400,
+    "body": "{\"type\":\"error\",\"error\":{\"type\":\"context_length_exceeded\",\"message\":\"Your request context is too large: prompt=200000 tokens, max=200000 tokens\"}}"
+  },
+  "openai_context_overflow": {
+    "provenance": {
+      "source_url": "https://platform.openai.com/docs/api-reference/errors",
+      "retrieved": "2026-07-28",
+      "original_event_names": [],
+      "substitutions": "Content scrubbed. OpenAI context_length_exceeded error for messages exceeding model context window."
+    },
+    "status": 400,
+    "body": "{\"error\":{\"message\":\"This model's maximum context length is 128000 tokens. However, your messages resulted in 150000 tokens.\",\"type\":\"invalid_request_error\",\"code\":\"context_length_exceeded\"}}"
   }
 }

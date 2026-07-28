@@ -154,6 +154,7 @@ pub(crate) async fn replay_full_loop(
             &adapter,
             &authority,
             &skill_use,
+            &rollshot_agent::continuity::RunContinuitySource::Unavailable,
         )
         .await;
 

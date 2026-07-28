@@ -1,6 +1,67 @@
 use iced::futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::path::PathBuf;
+
+// ========================================================================
+// Two-stage durable caption dispatch types
+// ========================================================================
+
+/// Request to prepare caption context. Captured at `SuggestCaptionsRequested`
+/// and passed to the async preparation worker.
+#[derive(Debug, Clone)]
+pub(crate) enum CaptionContextRequest {
+    Durable {
+        root: PathBuf,
+        expected_revision: u64,
+    },
+    Ephemeral {
+        guide: rollshot_action::Guide,
+    },
+}
+
+/// Prepared caption context returned by the preparation worker. Carries the
+/// guide and origin needed to launch the provider request.
+#[derive(Debug, Clone)]
+pub(crate) enum PreparedCaptionContext {
+    Durable {
+        guide: rollshot_action::Guide,
+        projection: rollshot_action::project::ActionGuideContextProjectionV1,
+    },
+    Ephemeral {
+        guide: rollshot_action::Guide,
+        guide_digest: String,
+    },
+}
+
+impl PreparedCaptionContext {
+    pub(super) fn guide(&self) -> &rollshot_action::Guide {
+        match self {
+            Self::Durable { guide, .. } => guide,
+            Self::Ephemeral { guide, .. } => guide,
+        }
+    }
+
+    pub(super) fn origin(&self) -> rollshot_action::CaptionProposalOrigin {
+        match self {
+            Self::Durable { projection, .. } => {
+                rollshot_action::CaptionProposalOrigin::DurableProject {
+                    revision: projection.revision(),
+                    projection_digest: projection.digest().to_string(),
+                }
+            }
+            Self::Ephemeral { guide_digest, .. } => {
+                rollshot_action::CaptionProposalOrigin::EphemeralGuide {
+                    guide_digest: guide_digest.clone(),
+                }
+            }
+        }
+    }
+
+    pub(super) fn is_durable(&self) -> bool {
+        matches!(self, Self::Durable { .. })
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct CaptionAgentStep {
@@ -53,6 +114,80 @@ Prefer calling the submit_caption_suggestions tool. If tool calling is unavailab
 Use the source values exactly. Omit a title by using null when the current title is already good. Do not invent raw typed text.\n\
 Steps: {json}"
     )
+}
+
+/// Compute a deterministic SHA-256 digest of the guide content for ephemeral
+/// provenance. Hashes title, step count, and each step's (source, keyframe,
+/// title, caption) with a domain separator.
+fn compute_guide_digest(guide: &rollshot_action::Guide) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"rollshot-guide-ephemeral-v1\0");
+    hasher.update(guide.title().as_bytes());
+    hasher.update((guide.steps().len() as u64).to_le_bytes());
+    for step in guide.steps() {
+        hasher.update(step.source.to_le_bytes());
+        hasher.update(step.keyframe.to_le_bytes());
+        hasher.update(step.title.as_bytes());
+        hasher.update(step.caption.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// Async preparation worker for two-stage durable caption dispatch.
+///
+/// For durable input, loads the project from disk and builds an
+/// [`ActionGuideContextProjectionV1`]. For ephemeral input, computes
+/// a guide digest for provenance.
+pub(crate) async fn prepare_caption_context_task(
+    run_id: u64,
+    request: CaptionContextRequest,
+) -> Result<PreparedCaptionContext, String> {
+    match request {
+        CaptionContextRequest::Durable {
+            root,
+            expected_revision,
+        } => {
+            let loaded =
+                tokio::task::spawn_blocking(move || rollshot_action::project::load_project(&root))
+                    .await
+                    .map_err(|_| "Project load task panicked.".to_string())?
+                    .map_err(|e| e.to_string())?;
+
+            if loaded.manifest.revision != expected_revision {
+                return Err(format!(
+                    "Project was modified externally (expected revision {expected_revision}, got {}).",
+                    loaded.manifest.revision
+                ));
+            }
+
+            let projection =
+                rollshot_action::project::ActionGuideContextProjectionV1::from_loaded_project(
+                    &loaded,
+                )
+                .map_err(|e| format!("Caption context projection failed: {e}"))?;
+            let guide = projection
+                .to_guide()
+                .map_err(|e| format!("Guide from projection failed: {e}"))?;
+
+            tracing::info!(
+                target: "rollshot::action::caption_agent",
+                run_id,
+                revision = projection.revision(),
+                step_count = guide.steps().len(),
+                "durable caption context prepared"
+            );
+
+            Ok(PreparedCaptionContext::Durable { guide, projection })
+        }
+        CaptionContextRequest::Ephemeral { guide } => {
+            let guide_digest = compute_guide_digest(&guide);
+            Ok(PreparedCaptionContext::Ephemeral {
+                guide,
+                guide_digest,
+            })
+        }
+    }
 }
 
 pub(crate) fn caption_tool_definition() -> rollshot_agent::model::ToolDefinition {
@@ -128,13 +263,13 @@ pub(crate) async fn suggest_captions_task(
     run_id: u64,
     model: String,
     adapter: Box<dyn rollshot_agent::ProviderAdapter>,
-    guide: rollshot_action::Guide,
+    context: PreparedCaptionContext,
 ) -> Result<rollshot_action::CaptionProposal, String> {
     suggest_captions_with_timeout(
         run_id,
         model,
         adapter,
-        guide,
+        context,
         std::time::Duration::from_secs(30),
     )
     .await
@@ -144,10 +279,12 @@ async fn suggest_captions_with_timeout(
     run_id: u64,
     model: String,
     adapter: Box<dyn rollshot_agent::ProviderAdapter>,
-    guide: rollshot_action::Guide,
+    context: PreparedCaptionContext,
     timeout: std::time::Duration,
 ) -> Result<rollshot_action::CaptionProposal, String> {
-    let steps = steps_from_guide(&guide);
+    let guide = context.guide();
+    let origin = context.origin();
+    let steps = steps_from_guide(guide);
     if steps.is_empty() {
         return Err("No reviewed steps to caption.".to_string());
     }
@@ -210,7 +347,8 @@ async fn suggest_captions_with_timeout(
     let proposal = rollshot_action::CaptionProposal::from_agent_drafts(
         rollshot_action::CaptionProposalId(run_id),
         run_id,
-        &guide,
+        origin,
+        guide,
         drafts,
     );
     if proposal.suggestions.is_empty() {
@@ -387,6 +525,13 @@ mod provider_tests {
         }])
     }
 
+    fn ephemeral_context() -> PreparedCaptionContext {
+        PreparedCaptionContext::Ephemeral {
+            guide: guide(),
+            guide_digest: "0".repeat(64),
+        }
+    }
+
     fn run<F: Future>(future: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -415,7 +560,7 @@ mod provider_tests {
             42,
             "fake-model".to_string(),
             Box::new(provider),
-            guide(),
+            ephemeral_context(),
             std::time::Duration::from_secs(1),
         ))
         .unwrap();
@@ -450,7 +595,7 @@ mod provider_tests {
             42,
             "fake-model".to_string(),
             Box::new(provider),
-            guide(),
+            ephemeral_context(),
             std::time::Duration::from_secs(1),
         ))
         .unwrap();
@@ -474,7 +619,7 @@ mod provider_tests {
             42,
             "fake-model".to_string(),
             Box::new(provider),
-            guide(),
+            ephemeral_context(),
             std::time::Duration::from_secs(1),
         ))
         .unwrap_err();
@@ -493,7 +638,7 @@ mod provider_tests {
             42,
             "fake-model".to_string(),
             Box::new(provider),
-            guide(),
+            ephemeral_context(),
             std::time::Duration::from_millis(1),
         ))
         .unwrap_err();

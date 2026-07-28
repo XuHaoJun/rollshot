@@ -908,6 +908,12 @@ async fn persist_terminal_outcome(
                 RunTerminalState::RuntimeFailure => TaskTerminal::RuntimeFailure,
                 RunTerminalState::AgentProtocolFailure { .. } => TaskTerminal::AgentProtocolFailure,
                 RunTerminalState::ProviderFailure { .. } => TaskTerminal::ProviderFailure,
+                RunTerminalState::ContextOverflow => TaskTerminal::ContextOverflow,
+                RunTerminalState::ContextRecoveryFailure { category } => {
+                    TaskTerminal::ContextRecoveryFailure {
+                        category: category.to_string(),
+                    }
+                }
                 RunTerminalState::ReadyForReview(_) => unreachable!(),
             };
             match current.record_terminal(task_terminal, now) {
@@ -1236,6 +1242,84 @@ pub fn start_agent_run(
             }
         }
 
+        // ── Build continuity context after run-contract CAS ─────────────
+        // Load the exact bound snapshot and build ContinuityProjectionV1.
+        // Build RunContinuitySource::Durable if store exists and projection succeeds.
+        // If projection fails while store exists, persist terminal and abort.
+        let continuity_source: rollshot_agent::continuity::RunContinuitySource =
+            if let Some(ref store) = task_store {
+                let store_clone = store.clone();
+                let task_id_clone = task_id.clone();
+                let load_result = tokio::task::spawn_blocking(move || {
+                    store_clone.load(&task_id_clone)
+                })
+                .await;
+                match load_result {
+                    Ok(Ok(snapshot)) => {
+                        match rollshot_agent::continuity::ContinuityProjectionV1::try_from(&snapshot) {
+                            Ok(projection) => {
+                                rollshot_agent::continuity::RunContinuitySource::Durable {
+                                    expected: Box::new(projection),
+                                    source: std::sync::Arc::new(
+                                        super::task_store::TaskStoreContinuitySource::new(store.clone()),
+                                    ),
+                                }
+                            }
+                            Err(e) => {
+                                let err = WorkbenchError::StorePersist {
+                                    message: format!("build continuity projection: {e}"),
+                                };
+                                persist_terminal_if_possible(
+                                    task_store.clone(), &task_id, &run_id, &err,
+                                ).await;
+                                yield crate::result_workspace::Message::Workbench(
+                                    super::WorkbenchMessage::RunFailed {
+                                        task_id: task_id.clone(),
+                                        run_id: run_id.clone(),
+                                        error: err,
+                                    },
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        let err = WorkbenchError::StorePersist {
+                            message: format!("post-bind load: {e}"),
+                        };
+                        persist_terminal_if_possible(
+                            task_store.clone(), &task_id, &run_id, &err,
+                        ).await;
+                        yield crate::result_workspace::Message::Workbench(
+                            super::WorkbenchMessage::RunFailed {
+                                task_id: task_id.clone(),
+                                run_id: run_id.clone(),
+                                error: err,
+                            },
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        let err = WorkbenchError::StorePersist {
+                            message: format!("spawn_blocking: {e}"),
+                        };
+                        persist_terminal_if_possible(
+                            task_store.clone(), &task_id, &run_id, &err,
+                        ).await;
+                        yield crate::result_workspace::Message::Workbench(
+                            super::WorkbenchMessage::RunFailed {
+                                task_id: task_id.clone(),
+                                run_id: run_id.clone(),
+                                error: err,
+                            },
+                        );
+                        return;
+                    }
+                }
+            } else {
+                rollshot_agent::continuity::RunContinuitySource::Unavailable
+            };
+
         let validation_limits = rollshot_automation::ValidationLimits::default();
         let policy = rollshot_automation::ExecutionPolicy::smart_redaction_default(
             std::time::Duration::from_secs(25), 80_000_000, 8_000_000,
@@ -1350,6 +1434,7 @@ pub fn start_agent_run(
                 model_input, &mut session, &registry, budget,
                 &cancellation_for_task, &sink, &tool_ctx, adapter.as_ref(),
                 &authority, &skill_use,
+                &continuity_source,
             ).await
         });
 
@@ -4605,6 +4690,458 @@ mod reducer_tests {
             final_loaded.snapshot_revision(),
             bound.snapshot_revision(),
             "store revision must be ahead of stale snapshot"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Continuity source binding tests (Task 8)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn continuity_source_loads_exact_snapshot_after_cas_bind() {
+        use super::super::task_store::{TaskStore, TaskStoreContinuitySource};
+        use rollshot_agent::product_task::{ProductTaskSnapshot, TaskAttempt, TaskAttemptId};
+
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+
+        let snapshot = ProductTaskSnapshot::new(
+            task_id.clone(),
+            Tk::SmartRedactionAuthor,
+            Sb::new([1u8; 32], [2u8; 32], 0, "preset".into(), None),
+            10,
+        )
+        .unwrap();
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), 10);
+        let running = snapshot.start_attempt(attempt, 20).unwrap();
+        store.create(&running).unwrap();
+
+        // Bind contract via CAS.
+        let contract = run_contract_for_provenance(
+            authority_receipt_for_provenance(),
+            skill_use_receipt_for_provenance(),
+        );
+        let loaded = store.load(&task_id).unwrap();
+        let bound = loaded.bind_run_contract(contract, 25).unwrap();
+        store.compare_and_swap(&loaded, &bound).unwrap();
+
+        // Build continuity source.
+        let source = TaskStoreContinuitySource::new(std::sync::Arc::new(store));
+        let source: std::sync::Arc<dyn rollshot_agent::continuity::ContinuitySnapshotSource> =
+            std::sync::Arc::new(source);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let loaded = rt.block_on(source.load(task_id.clone())).unwrap();
+
+        // Verify: snapshot revision matches.
+        assert_eq!(loaded.snapshot_revision(), bound.snapshot_revision());
+        // Verify: has run contract after CAS.
+        assert!(loaded.active_run_contract().is_some());
+    }
+
+    #[test]
+    fn continuity_source_reload_reflects_store_changes() {
+        use super::super::task_store::{TaskStore, TaskStoreContinuitySource};
+        use rollshot_agent::product_task::{ProductTaskSnapshot, TaskAttempt, TaskAttemptId};
+
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+
+        let snapshot = ProductTaskSnapshot::new(
+            task_id.clone(),
+            Tk::SmartRedactionAuthor,
+            Sb::new([1u8; 32], [2u8; 32], 0, "preset".into(), None),
+            10,
+        )
+        .unwrap();
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), 10);
+        let running = snapshot.start_attempt(attempt, 20).unwrap();
+        store.create(&running).unwrap();
+
+        let source = TaskStoreContinuitySource::new(std::sync::Arc::new(store));
+        let source: std::sync::Arc<dyn rollshot_agent::continuity::ContinuitySnapshotSource> =
+            std::sync::Arc::new(source);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // First load: running snapshot.
+        let first = rt.block_on(source.clone().load(task_id.clone())).unwrap();
+        assert_eq!(first.status(), Ts::Running);
+
+        // Advance store to terminal.
+        let store2 = TaskStore::open(tmp.path()).unwrap();
+        let loaded = store2.load(&task_id).unwrap();
+        let terminal = loaded
+            .record_terminal(
+                rollshot_agent::product_task::TaskTerminal::RuntimeFailure,
+                30,
+            )
+            .unwrap();
+        store2.compare_and_swap(&loaded, &terminal).unwrap();
+
+        // Second load: terminal snapshot (revision changed).
+        let second = rt.block_on(source.load(task_id.clone())).unwrap();
+        assert!(matches!(second.status(), Ts::Failed { .. }));
+        assert!(second.snapshot_revision() > first.snapshot_revision());
+    }
+
+    #[test]
+    fn continuity_source_returns_missing_for_empty_store() {
+        use super::super::task_store::{TaskStore, TaskStoreContinuitySource};
+
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+
+        let source = TaskStoreContinuitySource::new(std::sync::Arc::new(store));
+        let source: std::sync::Arc<dyn rollshot_agent::continuity::ContinuitySnapshotSource> =
+            std::sync::Arc::new(source);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let err = rt.block_on(source.load(task_id)).unwrap_err();
+        assert_eq!(
+            err,
+            rollshot_agent::continuity::ContextRecoveryError::MissingTask
+        );
+    }
+
+    // -- Task 9: projection validation before restored review display/apply ---
+
+    #[test]
+    fn restore_validates_projection_before_display() {
+        // Restored ReadyForReview with valid projection populates proposal and
+        // caches the snapshot for the apply CAS path.
+        use super::super::task_store::TaskStore;
+        use rollshot_agent::continuity::{ContinuityProjectionV1, ReviewContinuityStateV1};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let snapshot = ready_snapshot_with_proposal(&task_id, binding.clone());
+        store.create(&snapshot).unwrap();
+
+        // Verify the projection from the snapshot is PendingExactRevision.
+        let projection = ContinuityProjectionV1::try_from(&snapshot).unwrap();
+        assert_eq!(
+            projection.review_state(),
+            ReviewContinuityStateV1::PendingExactRevision,
+            "snapshot must project as PendingExactRevision"
+        );
+        assert_eq!(
+            projection.artifact_revision().unwrap(),
+            rollshot_agent::product_task::ArtifactRevision::new(1),
+        );
+
+        // Restore through the full update path.
+        let mut ws = ws_with_workbench();
+        let store_arc = std::sync::Arc::new(store);
+        {
+            let wb = wb_mut(&mut ws);
+            wb.task_store = Some(store_arc.clone());
+            wb.cached_base_digest = Some([1u8; 32]);
+            let op_id = wb.restore_operation_id.next();
+
+            let result = store_arc.reconcile_for_source(&binding, 2000).unwrap();
+            let _ = update(
+                &mut ws,
+                Message::Workbench(WorkbenchMessage::TaskRestoreFinished {
+                    operation_id: op_id,
+                    source_binding: binding,
+                    result,
+                }),
+            );
+        }
+        // Valid projection: proposal populated.
+        assert!(
+            wb(&ws).pending_proposal.is_some(),
+            "valid projection must restore proposal"
+        );
+        // Snapshot cached for apply CAS.
+        assert!(
+            wb(&ws).cached_task_snapshot.is_some(),
+            "valid projection must cache snapshot for apply CAS"
+        );
+    }
+
+    #[test]
+    fn restore_rejects_mutated_artifact_revision() {
+        // Two ReadyForReview snapshots with different artifact revisions
+        // produce different projection digests. The projection validation
+        // ensures we can detect revision drift.
+        use rollshot_agent::continuity::{ContinuityProjectionV1, ReviewContinuityStateV1};
+        use rollshot_agent::product_task::{
+            ArtifactId, ArtifactKind, ArtifactRevision, PayloadConfigV1, PayloadDryRunV1,
+            PayloadProposalV1, PayloadSourceV1, ProductArtifactMetadata,
+            SmartRedactionReviewPayload, TaskAttempt, TaskAttemptId,
+        };
+
+        // Build two separate ReadyForReview snapshots with different artifact revisions.
+        let build_ready = |revision: u32| {
+            let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+                "task-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap();
+            let run_id =
+                rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                    .unwrap();
+            let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+            let snapshot = rollshot_agent::product_task::ProductTaskSnapshot::new(
+                task_id.clone(),
+                Tk::SmartRedactionAuthor,
+                binding.clone(),
+                10,
+            )
+            .unwrap();
+            let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), 10);
+            let running = snapshot.start_attempt(attempt, 20).unwrap();
+
+            let metadata = ProductArtifactMetadata::new(
+                ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000001").unwrap(),
+                ArtifactRevision::new(revision),
+                ArtifactKind::SmartRedaction,
+                1,
+                String::new(),
+                binding,
+                task_id,
+                TaskAttemptId::new(1),
+                run_id,
+                "proposal-00000001-0000-4000-8000-000000000000".to_owned(),
+                String::new(),
+                String::new(),
+                String::new(),
+                1,
+                0.42,
+                30,
+            );
+            let payload = SmartRedactionReviewPayload {
+                source: PayloadSourceV1 {
+                    kind: "agent_run".into(),
+                    validation_summary: "5 nodes".into(),
+                },
+                proposal: PayloadProposalV1 {
+                    proposal_id: "proposal-00000001-0000-4000-8000-000000000000".into(),
+                    candidate_count: 1,
+                },
+                dry_run: PayloadDryRunV1 {
+                    candidate_count: 1,
+                    affected_area: 0.42,
+                },
+                config: PayloadConfigV1 {
+                    provider: "anthropic".into(),
+                    model: "claude".into(),
+                    payload_mode: rollshot_agent::product_task::PayloadMode::Author,
+                    run_kind: "smart_redaction".into(),
+                    budget_dimensions: std::collections::BTreeMap::new(),
+                },
+            };
+            let proposal_bytes = serde_json::to_vec(
+                &crate::result_workspace::tests::workbench_proposal_with_candidate(),
+            )
+            .unwrap();
+            running
+                .record_ready_for_review(metadata, payload, Some(proposal_bytes), 30)
+                .unwrap()
+        };
+
+        let ready1 = build_ready(1);
+        let ready2 = build_ready(2);
+
+        let proj1 = ContinuityProjectionV1::try_from(&ready1).unwrap();
+        let proj2 = ContinuityProjectionV1::try_from(&ready2).unwrap();
+
+        assert_eq!(
+            proj1.review_state(),
+            ReviewContinuityStateV1::PendingExactRevision
+        );
+        assert_eq!(
+            proj2.review_state(),
+            ReviewContinuityStateV1::PendingExactRevision
+        );
+        assert_eq!(proj1.artifact_revision(), Some(ArtifactRevision::new(1)));
+        assert_eq!(proj2.artifact_revision(), Some(ArtifactRevision::new(2)));
+
+        // Different revisions produce different projection digests.
+        assert_ne!(proj1.digest(), proj2.digest());
+    }
+
+    #[test]
+    fn restore_caches_snapshot_for_apply_cas() {
+        // After a successful restore, the cached_task_snapshot must be populated
+        // so the async apply CAS path can use it.
+        use super::super::task_store::TaskStore;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let snapshot = ready_snapshot_with_proposal(&task_id, binding.clone());
+        store.create(&snapshot).unwrap();
+
+        let mut ws = ws_with_workbench();
+        let store_arc = std::sync::Arc::new(store);
+        {
+            let wb = wb_mut(&mut ws);
+            wb.task_store = Some(store_arc.clone());
+            wb.cached_base_digest = Some([1u8; 32]);
+            let op_id = wb.restore_operation_id.next();
+
+            let result = store_arc.reconcile_for_source(&binding, 2000).unwrap();
+            let _ = update(
+                &mut ws,
+                Message::Workbench(WorkbenchMessage::TaskRestoreFinished {
+                    operation_id: op_id,
+                    source_binding: binding,
+                    result,
+                }),
+            );
+        }
+        // Snapshot must be cached for the apply CAS path.
+        let cached = wb(&ws).cached_task_snapshot.as_ref();
+        assert!(cached.is_some(), "restore must cache task snapshot");
+        let cached = cached.unwrap();
+        assert_eq!(
+            cached.status(),
+            rollshot_agent::product_task::TaskStatus::ReadyForReview,
+            "cached snapshot must be ReadyForReview"
+        );
+        assert!(
+            cached.pending_proposal_payload().is_some(),
+            "cached snapshot must have proposal payload"
+        );
+    }
+
+    #[test]
+    fn projection_validation_failure_drops_restore() {
+        // If ContinuityProjectionV1 construction fails (e.g. corrupt snapshot),
+        // the restore must be silently dropped.
+        use rollshot_agent::product_task::{
+            ArtifactId, ArtifactKind, ArtifactRevision, PayloadConfigV1, PayloadDryRunV1,
+            PayloadProposalV1, PayloadSourceV1, ProductArtifactMetadata,
+            SmartRedactionReviewPayload, TaskAttempt, TaskAttemptId,
+        };
+
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap();
+        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let snapshot = rollshot_agent::product_task::ProductTaskSnapshot::new(
+            task_id.clone(),
+            Tk::SmartRedactionAuthor,
+            binding.clone(),
+            10,
+        )
+        .unwrap();
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), 10);
+        let running = snapshot.start_attempt(attempt, 20).unwrap();
+
+        // Metadata with wrong task_id to trigger projection error.
+        let wrong_task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-999999999999",
+        )
+        .unwrap();
+        let metadata = ProductArtifactMetadata::new(
+            ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000001").unwrap(),
+            ArtifactRevision::new(1),
+            ArtifactKind::SmartRedaction,
+            1,
+            String::new(),
+            binding.clone(),
+            wrong_task_id, // mismatched task ID
+            TaskAttemptId::new(1),
+            run_id,
+            "proposal-00000001-0000-4000-8000-000000000000".to_owned(),
+            String::new(),
+            String::new(),
+            String::new(),
+            1,
+            0.42,
+            30,
+        );
+        let payload = SmartRedactionReviewPayload {
+            source: PayloadSourceV1 {
+                kind: "agent_run".into(),
+                validation_summary: "5 nodes".into(),
+            },
+            proposal: PayloadProposalV1 {
+                proposal_id: "proposal-00000001-0000-4000-8000-000000000000".into(),
+                candidate_count: 1,
+            },
+            dry_run: PayloadDryRunV1 {
+                candidate_count: 1,
+                affected_area: 0.42,
+            },
+            config: PayloadConfigV1 {
+                provider: "anthropic".into(),
+                model: "claude".into(),
+                payload_mode: rollshot_agent::product_task::PayloadMode::Author,
+                run_kind: "smart_redaction".into(),
+                budget_dimensions: std::collections::BTreeMap::new(),
+            },
+        };
+        let proposal_bytes = serde_json::to_vec(
+            &crate::result_workspace::tests::workbench_proposal_with_candidate(),
+        )
+        .unwrap();
+        let ready = running
+            .record_ready_for_review(metadata, payload, Some(proposal_bytes), 30)
+            .unwrap();
+
+        // Projection must fail due to task ID mismatch.
+        let proj_result = rollshot_agent::continuity::ContinuityProjectionV1::try_from(&ready);
+        assert!(
+            proj_result.is_err(),
+            "projection must fail for mismatched artifact task ID"
+        );
+
+        // Simulate restore: the snapshot is passed to TaskRestoreFinished.
+        // Because projection fails, the proposal must NOT be populated.
+        let mut ws = ws_with_workbench();
+        {
+            let wb = wb_mut(&mut ws);
+            wb.cached_base_digest = Some([1u8; 32]);
+            let op_id = wb.restore_operation_id.next();
+
+            let _ = update(
+                &mut ws,
+                Message::Workbench(WorkbenchMessage::TaskRestoreFinished {
+                    operation_id: op_id,
+                    source_binding: binding,
+                    result: Some(ready),
+                }),
+            );
+        }
+        assert!(
+            wb(&ws).pending_proposal.is_none(),
+            "corrupt snapshot must not populate proposal"
+        );
+        assert!(
+            wb(&ws).cached_task_snapshot.is_none(),
+            "corrupt snapshot must not cache snapshot"
         );
     }
 }

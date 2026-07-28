@@ -446,6 +446,10 @@ pub fn terminal_state_label(state: &RunTerminalState) -> String {
         SourceValidationFailure => "Validation failed".into(),
         RuntimeFailure => "Runtime error".into(),
         AgentProtocolFailure { message } => format!("Agent error: {message}"),
+        ContextOverflow => "Context overflow".into(),
+        ContextRecoveryFailure { category } => {
+            format!("Context recovery failed: {category}")
+        }
     }
 }
 
