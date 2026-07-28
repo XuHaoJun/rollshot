@@ -126,6 +126,7 @@ impl TaskAttemptId {
 pub enum TaskKind {
     SmartRedactionAuthor,
     SmartRedactionImprove,
+    ActionGuideCaptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -168,6 +169,7 @@ pub enum TaskTerminal {
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
     SmartRedaction,
+    ActionGuideCaptions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -3246,6 +3248,18 @@ mod tests {
         assert!(
             !json.contains("dry_run_affected_area"),
             "caption artifacts must not carry Smart Redaction dry-run fields: {json}"
+        );
+    }
+
+    #[test]
+    fn action_guide_caption_kinds_serialize_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&TaskKind::ActionGuideCaptions).unwrap(),
+            "\"action_guide_captions\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ArtifactKind::ActionGuideCaptions).unwrap(),
+            "\"action_guide_captions\""
         );
     }
 }
