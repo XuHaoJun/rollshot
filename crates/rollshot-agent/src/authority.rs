@@ -213,6 +213,36 @@ impl AuthoritySnapshot {
         }
     }
 
+    /// Task ID from the authority binding.
+    pub fn task_id(&self) -> &ProductTaskId {
+        &self.binding.task_id
+    }
+
+    /// Attempt ID from the authority binding.
+    pub fn attempt_id(&self) -> TaskAttemptId {
+        self.binding.attempt_id
+    }
+
+    /// Run ID from the authority binding.
+    pub fn run_id(&self) -> &RunId {
+        &self.binding.run_id
+    }
+
+    /// Policy revision.
+    pub fn policy_revision(&self) -> &str {
+        &self.policy_revision
+    }
+
+    /// Disclosure ceiling.
+    pub fn disclosure(&self) -> DisclosureCeiling {
+        self.disclosure
+    }
+
+    /// Whether an existing product capture was present.
+    pub fn existing_product_capture(&self) -> bool {
+        self.existing_product_capture
+    }
+
     /// The canonical snapshot digest.
     pub fn digest(&self) -> &str {
         &self.digest

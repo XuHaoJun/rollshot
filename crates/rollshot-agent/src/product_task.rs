@@ -161,6 +161,7 @@ pub enum TaskTerminal {
     Stale,
     ContextOverflow,
     ContextRecoveryFailure { category: String },
+    AuditFailure { category: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -438,6 +439,14 @@ impl ProductArtifactMetadata {
     pub fn attempt_id(&self) -> TaskAttemptId {
         self.attempt_id
     }
+
+    pub fn provider_id(&self) -> &str {
+        &self.provider_id
+    }
+
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
 }
 
 // ========================================================================
@@ -638,6 +647,12 @@ pub struct RunConfigFingerprintV2 {
     pub budget_dimensions: BTreeMap<String, u64>,
     pub authority_snapshot_digest: String,
     pub skill_use: SkillUseReceiptV1,
+}
+
+impl ValidateFinite for SourceBinding {
+    fn check_finite(&self) -> Result<(), CanonicalError> {
+        Ok(())
+    }
 }
 
 impl ValidateFinite for RunConfigFingerprintV2 {
@@ -1133,11 +1148,11 @@ impl ProductTaskSnapshot {
         Ok(next)
     }
 
-    /// Reconcile Running or Applying to Interrupted (startup recovery).
+    /// Reconcile Created, Running, or Applying to Interrupted (startup recovery).
     /// Returns `Ok(None)` if already terminal or not in a reconcilable state.
     pub fn reconcile_interrupted(&self, now: i64) -> Result<Option<Self>, TaskContractError> {
         match self.status {
-            TaskStatus::Running | TaskStatus::Applying => {}
+            TaskStatus::Created | TaskStatus::Running | TaskStatus::Applying => {}
             _ => return Ok(None),
         }
         if now < self.updated_at_unix_ms {

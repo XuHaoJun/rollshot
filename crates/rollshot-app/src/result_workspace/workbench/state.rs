@@ -166,6 +166,7 @@ impl WorkbenchError {
             RunTerminalState::BudgetExhausted { dimension } => Some(Self::BudgetExhausted {
                 dimension: *dimension,
             }),
+            RunTerminalState::AuditFailure { .. } => Some(Self::RuntimeFailure),
             _ => None,
         }
     }
@@ -450,6 +451,7 @@ pub fn terminal_state_label(state: &RunTerminalState) -> String {
         ContextRecoveryFailure { category } => {
             format!("Context recovery failed: {category}")
         }
+        AuditFailure { category } => format!("Audit failure: {category:?}"),
     }
 }
 

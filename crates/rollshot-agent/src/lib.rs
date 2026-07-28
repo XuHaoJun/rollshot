@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod authority;
 pub mod continuity;
 pub mod domain;
