@@ -259,6 +259,10 @@ fn response_to_drafts(
     Ok(drafts)
 }
 
+/// User-visible copy for a caption run that ran out of time. Preserved verbatim
+/// across the RunBudget migration (plan Task 16).
+pub(crate) const TIMEOUT_MESSAGE: &str = "Caption suggestions timed out.";
+
 pub(crate) async fn suggest_captions_task(
     run_id: u64,
     model: String,
@@ -308,7 +312,7 @@ async fn suggest_captions_with_timeout(
 
     let mut stream = tokio::time::timeout_at(deadline, adapter.stream(request, bounds))
         .await
-        .map_err(|_| "Caption suggestions timed out.".to_string())?
+        .map_err(|_| TIMEOUT_MESSAGE.to_string())?
         .map_err(|e| e.to_string())?;
     let mut text = String::new();
     let mut tool_args = None;
@@ -338,7 +342,7 @@ async fn suggest_captions_with_timeout(
         Ok::<(), String>(())
     })
     .await
-    .map_err(|_| "Caption suggestions timed out.".to_string())??;
+    .map_err(|_| TIMEOUT_MESSAGE.to_string())??;
 
     let drafts = match tool_args {
         Some(arguments) => parse_caption_tool_args(&arguments)?,
@@ -457,6 +461,39 @@ mod tests {
         assert_eq!(tool.name, "submit_caption_suggestions");
         assert_eq!(tool.parameters["type"], "object");
         assert!(tool.parameters["properties"]["suggestions"].is_object());
+    }
+
+    /// Today's exact static instruction text, captured before the skill move.
+    /// Task 13 asserts the bundled SKILL.md body equals this byte for byte.
+    pub(crate) const CAPTION_INSTRUCTION_BASELINE: &str = "Suggest concise Action Guide titles and one-sentence captions for these reviewed workflow steps.\nPrefer calling the submit_caption_suggestions tool. If tool calling is unavailable, return only JSON in the same schema.\nUse the source values exactly. Omit a title by using null when the current title is already good. Do not invent raw typed text.";
+
+    #[test]
+    fn prompt_baseline_is_instruction_text_then_steps() {
+        let prompt = build_caption_prompt(&steps());
+
+        let (instructions, tail) = prompt
+            .split_once("\nSteps: ")
+            .expect("prompt must end with a Steps: section");
+
+        assert_eq!(
+            instructions, CAPTION_INSTRUCTION_BASELINE,
+            "instruction text drifted from the recorded baseline"
+        );
+        assert!(
+            tail.starts_with('['),
+            "steps payload must be a JSON array, got {tail}"
+        );
+    }
+
+    #[test]
+    fn timeout_copy_baseline() {
+        // Task 16 replaces the timeout with a RunBudget wall_time dimension and
+        // must map it back to this exact string.
+        assert_eq!(
+            super::TIMEOUT_MESSAGE,
+            "Caption suggestions timed out.",
+            "user-visible timeout copy must not change"
+        );
     }
 }
 
