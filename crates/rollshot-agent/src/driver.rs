@@ -465,6 +465,9 @@ impl AgentRunner {
             "run started"
         );
 
+        // This scripted entry point is `#[cfg(test)]`-only and has no product
+        // audit binding; production runs go through `run_with_provider`, which
+        // takes the sink as a parameter.
         let audit_sink: Option<&dyn crate::audit::AuditAppendSink> = None;
 
         loop {
@@ -1561,41 +1564,62 @@ impl AgentRunner {
                         name: tool_name.clone(),
                         success: false,
                     });
-                    let category = if let Some(sink) = audit_sink {
-                        if let Some(auth) = authority {
-                            let event = crate::audit::AuditEventV1::AuthorityDenied {
-                                authority: auth.audit_ref(),
-                                tool_name: tool.clone(),
-                                required_operation: format!("{operation:?}"),
-                            };
-                            let task_id = auth.task_id().as_str().to_owned();
-                            let correlation = crate::audit::AuditCorrelationV1::for_task(task_id);
-                            let event_id = crate::audit::AuditEventId::new_v4();
+                    // Persist the denial before returning any terminal.
+                    // Only a failure to acknowledge that evidence becomes an
+                    // `AuditFailure`; a recorded denial keeps the denial as
+                    // the run's terminal reason (spec §10.3).
+                    match (audit_sink, authority) {
+                        (Some(sink), Some(auth)) => {
                             let now = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_millis() as i64;
-                            match crate::audit::AuditEnvelopeV1::new(
-                                event_id,
+                            let envelope = match crate::audit::authority_denied_envelope(
+                                auth,
+                                tool.clone(),
+                                format!("{operation:?}"),
+                                crate::audit::AuditEventId::new_v4(),
                                 now,
-                                event,
-                                correlation,
                             ) {
-                                Ok(envelope) => match sink.append(envelope).await {
-                                    Ok(_) => crate::audit::AuditFailureCategory::Unavailable,
-                                    Err(crate::audit::AuditAppendError::AppendFailed {
-                                        category,
-                                    }) => category,
-                                },
-                                Err(_) => crate::audit::AuditFailureCategory::CorrelationMismatch,
+                                Ok(envelope) => envelope,
+                                Err(e) => {
+                                    tracing::error!(
+                                        target: "rollshot::agent::driver",
+                                        tool = tool.as_str(),
+                                        error = %e,
+                                        "authority denial evidence could not be built"
+                                    );
+                                    return Err(DriverError::AuditFailure(
+                                        crate::audit::AuditFailureCategory::CorrelationMismatch,
+                                    ));
+                                }
+                            };
+                            if let Err(crate::audit::AuditAppendError::AppendFailed { category }) =
+                                sink.append(envelope).await
+                            {
+                                tracing::error!(
+                                    target: "rollshot::agent::driver",
+                                    tool = tool.as_str(),
+                                    category = ?category,
+                                    "authority denial evidence could not be acknowledged"
+                                );
+                                return Err(DriverError::AuditFailure(category));
                             }
-                        } else {
-                            crate::audit::AuditFailureCategory::Unavailable
                         }
-                    } else {
-                        crate::audit::AuditFailureCategory::Unavailable
-                    };
-                    return Err(DriverError::AuditFailure(category));
+                        _ => {
+                            tracing::warn!(
+                                target: "rollshot::agent::driver",
+                                tool = tool.as_str(),
+                                has_sink = audit_sink.is_some(),
+                                has_authority = authority.is_some(),
+                                "authority denial not durably recorded: no audit binding"
+                            );
+                        }
+                    }
+                    terminal_error = Some(format!(
+                        "authority denied: tool={tool} operation={operation:?}"
+                    ));
+                    break;
                 }
                 Err(e) => {
                     tracing::debug!(
@@ -6492,26 +6516,77 @@ main = "SKILL.md"
                 )
                 .await;
 
-            // The audit sink must have received the AuthorityDenied envelope.
+            // The audit sink must have received the AuthorityDenied envelope,
+            // correlated to the exact task/attempt/run that was denied.
             let envelopes = sink.take_envelopes();
             assert_eq!(
                 envelopes.len(),
                 1,
                 "audit sink must receive exactly one envelope"
             );
+            let envelope = &envelopes[0];
             assert!(matches!(
-                envelopes[0].event(),
+                envelope.event(),
                 crate::audit::AuditEventV1::AuthorityDenied { .. }
             ));
-
-            // The terminal must be AuditFailure.
-            assert!(
-                matches!(terminal, RunTerminalState::AuditFailure { .. }),
-                "expected AuditFailure, got {terminal:?}"
+            assert_eq!(
+                envelope.correlation().task_id(),
+                authority.task_id().as_str()
             );
+            assert_eq!(
+                envelope.correlation().attempt_id(),
+                Some(authority.attempt_id())
+            );
+            assert_eq!(
+                envelope.correlation().run_id_str(),
+                Some(authority.run_id().as_str())
+            );
+
+            // The denial itself is the terminal reason. `AuditFailure` is
+            // reserved for evidence that could not be acknowledged.
+            match terminal {
+                RunTerminalState::AgentProtocolFailure { message } => {
+                    assert!(
+                        message.contains("authority denied"),
+                        "terminal must name the denial: {message}"
+                    );
+                }
+                other => panic!("expected AgentProtocolFailure, got {other:?}"),
+            }
         }
 
-        /// Step 5 checkpoint: `AuditFailure` terminal carries the failure category.
+        /// Sink that cannot acknowledge an append.
+        struct FailingAuditSink {
+            category: crate::audit::AuditFailureCategory,
+            calls: std::sync::atomic::AtomicUsize,
+        }
+
+        impl crate::audit::AuditAppendSink for FailingAuditSink {
+            fn append(
+                &self,
+                _envelope: crate::audit::AuditEnvelopeV1,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<
+                                crate::audit::AuditAppendReceiptV1,
+                                crate::audit::AuditAppendError,
+                            >,
+                        > + Send
+                        + '_,
+                >,
+            > {
+                self.calls
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let category = self.category;
+                Box::pin(
+                    async move { Err(crate::audit::AuditAppendError::from_category(category)) },
+                )
+            }
+        }
+
+        /// Step 5 checkpoint: `AuditFailure` terminal carries the failure category
+        /// of the append that could not be acknowledged.
         #[tokio::test]
         async fn authority_denial_audit_failure() {
             let ctx = test_ctx("src");
@@ -6539,7 +6614,10 @@ main = "SKILL.md"
 
             let cancel = RunCancellation::new();
             let runner = AgentRunner::new(AgentConfig::default());
-            let sink = MockAuditSink::new();
+            let sink = FailingAuditSink {
+                category: crate::audit::AuditFailureCategory::CorruptJournal,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            };
 
             let terminal = runner
                 .run_with_provider(
@@ -6568,77 +6646,24 @@ main = "SKILL.md"
                 )
                 .await;
 
+            assert_eq!(
+                sink.calls.load(std::sync::atomic::Ordering::Relaxed),
+                1,
+                "the denial must be offered to the sink before the terminal"
+            );
             match terminal {
                 RunTerminalState::AuditFailure { category } => {
-                    let _ = category;
+                    assert_eq!(category, crate::audit::AuditFailureCategory::CorruptJournal);
                 }
                 other => panic!("expected AuditFailure, got {other:?}"),
             }
         }
     }
 
-    // ==================================================================
-    // Drop-all transient sink: proves RunEvent delivery is independent
-    // from durable audit. NullEventSink silently discards every event;
-    // audit append sink receives the same envelopes regardless.
-    // ==================================================================
-
-    mod dropped_display_events {
-        use super::*;
-
-        /// A sink that records whether it was called, proving that
-        /// transient event delivery (RunEventSink) is orthogonal to
-        /// the audit append path (AuditAppendSink).
-        #[derive(Default)]
-        struct DropAllSink {
-            count: std::sync::atomic::AtomicUsize,
-        }
-
-        impl crate::runtime::RunEventSink for DropAllSink {
-            fn emit(&self, _event: crate::runtime::RunEvent) {
-                self.count
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-
-        #[test]
-        fn null_event_sink_discards_all_run_events() {
-            let sink = NullEventSink;
-            // Emit every variant of RunEvent.
-            sink.emit(crate::runtime::RunEvent::TextChunk {
-                text: "hello".to_owned(),
-            });
-            sink.emit(crate::runtime::RunEvent::ToolCallStart {
-                name: "tool".to_owned(),
-            });
-            sink.emit(crate::runtime::RunEvent::ToolCallEnd {
-                name: "tool".to_owned(),
-                success: true,
-            });
-            sink.emit(crate::runtime::RunEvent::SourceChanged {
-                tool: "edit".to_owned(),
-                diff: crate::runtime::SourceDiffSummary {
-                    old_generation: 0,
-                    new_generation: 1,
-                    old_source_bytes: 0,
-                    new_source_bytes: 10,
-                    omitted_lines: 0,
-                    lines: vec![],
-                },
-            });
-            sink.emit(crate::runtime::RunEvent::TurnComplete);
-            // NullEventSink has no state — all events silently dropped.
-            // The audit path is unaffected by any of these.
-        }
-
-        #[test]
-        fn drop_all_sink_counts_events() {
-            let sink = DropAllSink::default();
-            sink.emit(crate::runtime::RunEvent::TextChunk {
-                text: "x".to_owned(),
-            });
-            sink.emit(crate::runtime::RunEvent::TurnComplete);
-            assert_eq!(sink.count.load(std::sync::atomic::Ordering::Relaxed), 2);
-        }
-    }
+    // Durable audit is independent of transient display delivery: the
+    // `authority_denial_audit` tests above run with `NullEventSink`, which
+    // discards every `RunEvent`, and still require the audit sink to receive
+    // the denial envelope. Repair of visible state from authoritative task
+    // snapshots is proved in `rollshot-app`
+    // (`result_workspace::workbench::run::dropped_display_events`).
 }

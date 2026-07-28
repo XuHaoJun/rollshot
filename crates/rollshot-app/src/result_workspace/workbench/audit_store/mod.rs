@@ -30,6 +30,9 @@ const AUDIT_DIR: &str = "audit";
 const JOURNAL_FILE_PREFIX: &str = "task-";
 const JOURNAL_FILE_SUFFIX: &str = ".jsonl";
 
+/// Window size for the backwards tail scan in [`AuditJournal::repair_tail`].
+const TAIL_SCAN_WINDOW_BYTES: u64 = 8192;
+
 // ============================================================================
 // Failpoint (test-only injection)
 // ============================================================================
@@ -66,7 +69,9 @@ pub(crate) struct PhysicalAppendReceipt {
 /// Result of scanning and verifying a journal's hash chain.
 #[derive(Debug, Clone)]
 pub(crate) struct VerifiedJournal {
-    pub(crate) last_sequence: u64,
+    /// Sequence the next append must use, i.e. one past the last verified
+    /// record (also the number of verified records).
+    pub(crate) next_sequence: u64,
     pub(crate) last_hash: String,
     pub(crate) pending_transaction: Option<PendingTransaction>,
 }
@@ -247,7 +252,7 @@ impl AuditJournal {
                 "scan: no journal file, returning empty"
             );
             return Ok(VerifiedJournal {
-                last_sequence: 0,
+                next_sequence: 0,
                 last_hash: String::new(),
                 pending_transaction: None,
             });
@@ -276,10 +281,11 @@ impl AuditJournal {
         let reader = BufReader::new(file);
         let result = self.scan_reader(reader, task_id);
         match &result {
-            Ok(vj) => tracing::info!(
+            // Every append scans first, so this is per-record volume.
+            Ok(vj) => tracing::debug!(
                 target: "rollshot::app::agent_audit_store",
                 task_id = task_id.as_str(),
-                records = vj.last_sequence,
+                records = vj.next_sequence,
                 has_pending = vj.pending_transaction.is_some(),
                 "scan complete"
             ),
@@ -306,6 +312,7 @@ impl AuditJournal {
         let mut last_hash = String::new();
         let mut first_line = true;
         let mut pending_txn: Option<PendingTransaction> = None;
+        let mut saw_blank_line = false;
 
         for (line_no, line_result) in reader.split(b'\n').enumerate() {
             let line = line_result.map_err(|e| AuditStoreError::Io {
@@ -313,8 +320,18 @@ impl AuditJournal {
                 source: e,
             })?;
 
+            // A trailing newline yields one empty final chunk. Any blank
+            // line followed by more content means the file is not the
+            // one-record-per-line journal this store wrote.
             if line.is_empty() {
+                saw_blank_line = true;
                 continue;
+            }
+            if saw_blank_line {
+                return Err(AuditStoreError::CorruptJournal {
+                    line: line_no,
+                    reason: "blank interior line".to_owned(),
+                });
             }
 
             // Parse.
@@ -393,19 +410,55 @@ impl AuditJournal {
                 });
             }
 
-            // Track pending transactions.
+            // Track transaction linkage: every outcome record must resolve
+            // the transaction its own prepare opened (spec §9.4).
             match &record.payload {
                 JournalPayloadV1::Prepared(prep) => {
+                    if let Some(open) = &pending_txn {
+                        return Err(AuditStoreError::CorruptJournal {
+                            line: line_no,
+                            reason: format!(
+                                "prepare at sequence {} while transaction {} is unresolved",
+                                record.sequence,
+                                open.transaction_id.as_str()
+                            ),
+                        });
+                    }
                     pending_txn = Some(PendingTransaction {
                         transaction_id: prep.transaction_id.clone(),
                         event_id: prep.event_id.clone(),
                         sequence: record.sequence,
                     });
                 }
-                JournalPayloadV1::Committed { .. } | JournalPayloadV1::Aborted { .. } => {
+                JournalPayloadV1::Committed { transaction_id, .. }
+                | JournalPayloadV1::Aborted { transaction_id, .. } => {
+                    match &pending_txn {
+                        Some(open) if open.transaction_id == *transaction_id => {}
+                        Some(open) => {
+                            return Err(AuditStoreError::CorruptJournal {
+                                line: line_no,
+                                reason: format!(
+                                    "outcome at sequence {} resolves {} but {} is open",
+                                    record.sequence,
+                                    transaction_id.as_str(),
+                                    open.transaction_id.as_str()
+                                ),
+                            });
+                        }
+                        None => {
+                            return Err(AuditStoreError::CorruptJournal {
+                                line: line_no,
+                                reason: format!(
+                                    "outcome at sequence {} for {} has no prepare",
+                                    record.sequence,
+                                    transaction_id.as_str()
+                                ),
+                            });
+                        }
+                    }
                     pending_txn = None;
                 }
-                _ => {}
+                JournalPayloadV1::Standalone { .. } | JournalPayloadV1::Bootstrap { .. } => {}
             }
 
             last_sequence = record.sequence;
@@ -414,7 +467,7 @@ impl AuditJournal {
         }
 
         Ok(VerifiedJournal {
-            last_sequence: if first_line { 0 } else { last_sequence + 1 },
+            next_sequence: if first_line { 0 } else { last_sequence + 1 },
             last_hash,
             pending_transaction: pending_txn,
         })
@@ -443,21 +496,53 @@ impl AuditJournal {
             "append: starting"
         );
 
-        // Determine next sequence.
-        let (next_sequence, previous_hash) = if path.exists() {
-            // Scan to find last sequence and hash.
-            self.verify_file_safety(&path)?;
-            let file = File::open(&path).map_err(|e| AuditStoreError::Io {
-                category: "open_for_append".to_owned(),
-                source: e,
-            })?;
-            let reader = BufReader::new(file);
-            let verified = self.scan_reader(reader, task_id)?;
-            // last_sequence from scan_reader is next_sequence for append.
-            (verified.last_sequence, verified.last_hash)
-        } else {
-            (0, String::new())
-        };
+        // Determine the next sequence from the verified journal. `scan`
+        // performs the same file-safety checks and unacknowledged-tail
+        // repair as startup, so both entry points agree on what the
+        // journal contains.
+        let verified = self.scan(task_id)?;
+
+        // Refuse to write a record that would contradict the journal's
+        // transaction state, so the file can never contain a commit without
+        // a prepare or two open transactions (spec §9.4).
+        match (&payload, &verified.pending_transaction) {
+            (JournalPayloadV1::Prepared(prep), Some(open)) => {
+                return Err(AuditStoreError::CorruptJournal {
+                    line: verified.next_sequence as usize,
+                    reason: format!(
+                        "prepare {} while transaction {} is unresolved",
+                        prep.transaction_id.as_str(),
+                        open.transaction_id.as_str()
+                    ),
+                });
+            }
+            (
+                JournalPayloadV1::Committed { transaction_id, .. }
+                | JournalPayloadV1::Aborted { transaction_id, .. },
+                open,
+            ) => match open {
+                Some(open) if open.transaction_id == *transaction_id => {}
+                Some(open) => {
+                    return Err(AuditStoreError::CorruptJournal {
+                        line: verified.next_sequence as usize,
+                        reason: format!(
+                            "outcome for {} but {} is open",
+                            transaction_id.as_str(),
+                            open.transaction_id.as_str()
+                        ),
+                    });
+                }
+                None => {
+                    return Err(AuditStoreError::CorruptJournal {
+                        line: verified.next_sequence as usize,
+                        reason: format!("outcome for {} has no prepare", transaction_id.as_str()),
+                    });
+                }
+            },
+            _ => {}
+        }
+
+        let (next_sequence, previous_hash) = (verified.next_sequence, verified.last_hash);
 
         // Check for sequence overflow.
         if next_sequence == u64::MAX {
@@ -475,10 +560,7 @@ impl AuditJournal {
             next_sequence,
             previous_hash_opt.clone(),
             payload,
-        )
-        .map_err(|e| AuditStoreError::PreCommit {
-            reason: e.to_string(),
-        })?;
+        );
 
         // Serialize and check size.
         let mut record_bytes =
@@ -675,6 +757,10 @@ impl AuditJournal {
     /// Finds the last complete newline and truncates everything after it.
     /// Only the unterminated final fragment is repairable; interior
     /// corruption fails closed during scan.
+    ///
+    /// The backwards search walks the whole file in windows. A fragment
+    /// larger than one window must never be mistaken for "no complete
+    /// record exists" — that would discard already-acknowledged records.
     fn repair_tail(&self, path: &Path) -> Result<(), AuditStoreError> {
         let metadata = fs::metadata(path).map_err(|e| AuditStoreError::Io {
             category: "repair_tail_metadata".to_owned(),
@@ -685,77 +771,61 @@ impl AuditJournal {
             return Ok(());
         }
 
-        // Check if the file ends with a newline (complete record).
-        // If so, no repair needed — save the I/O.
-
-        // Read backwards to find the last newline.
-        // Use a small buffer for the tail scan.
-        let scan_len = file_len.min(8192);
         let mut file = File::open(path).map_err(|e| AuditStoreError::Io {
             category: "repair_tail_open".to_owned(),
             source: e,
         })?;
-        file.seek(SeekFrom::End(-(scan_len as i64)))
-            .map_err(|e| AuditStoreError::Io {
-                category: "repair_tail_seek".to_owned(),
+
+        // Walk backwards in windows until a newline is found or the whole
+        // file has been examined.
+        let mut window_end = file_len;
+        let mut truncate_to: Option<u64> = None;
+        while window_end > 0 {
+            let window_len = window_end.min(TAIL_SCAN_WINDOW_BYTES);
+            let window_start = window_end - window_len;
+            file.seek(SeekFrom::Start(window_start))
+                .map_err(|e| AuditStoreError::Io {
+                    category: "repair_tail_seek".to_owned(),
+                    source: e,
+                })?;
+            let mut window = vec![0u8; window_len as usize];
+            io::Read::read_exact(&mut file, &mut window).map_err(|e| AuditStoreError::Io {
+                category: "repair_tail_read".to_owned(),
                 source: e,
             })?;
-        let mut tail = vec![0u8; scan_len as usize];
-        io::Read::read_exact(&mut file, &mut tail).map_err(|e| AuditStoreError::Io {
-            category: "repair_tail_read".to_owned(),
+            if let Some(pos) = window.iter().rposition(|&b| b == b'\n') {
+                truncate_to = Some(window_start + pos as u64 + 1);
+                break;
+            }
+            window_end = window_start;
+        }
+
+        // No newline anywhere: the whole file is one unterminated fragment.
+        let truncate_to = truncate_to.unwrap_or(0);
+        if truncate_to >= file_len {
+            return Ok(());
+        }
+
+        tracing::warn!(
+            target: "rollshot::app::agent_audit_store",
+            path = %path.display(),
+            file_len = file_len,
+            truncate_to = truncate_to,
+            bytes_dropped = file_len - truncate_to,
+            "repair_tail: truncating unterminated fragment"
+        );
+        let f = OpenOptions::new()
+            .write(true)
+            .open(path)
+            .map_err(|e| AuditStoreError::Io {
+                category: "repair_tail_open_write".to_owned(),
+                source: e,
+            })?;
+        f.set_len(truncate_to).map_err(|e| AuditStoreError::Io {
+            category: "repair_tail_truncate".to_owned(),
             source: e,
         })?;
-
-        // Find the position of the last newline.
-        if let Some(last_newline_pos) = tail.iter().rposition(|&b| b == b'\n') {
-            let truncate_to = (file_len - scan_len) + (last_newline_pos as u64) + 1;
-            if truncate_to < file_len {
-                // Truncate the unterminated fragment.
-                tracing::warn!(
-                    target: "rollshot::app::agent_audit_store",
-                    path = %path.display(),
-                    file_len = file_len,
-                    truncate_to = truncate_to,
-                    bytes_dropped = file_len - truncate_to,
-                    "repair_tail: truncating unterminated fragment"
-                );
-                let f =
-                    OpenOptions::new()
-                        .write(true)
-                        .open(path)
-                        .map_err(|e| AuditStoreError::Io {
-                            category: "repair_tail_open_write".to_owned(),
-                            source: e,
-                        })?;
-                f.set_len(truncate_to).map_err(|e| AuditStoreError::Io {
-                    category: "repair_tail_truncate".to_owned(),
-                    source: e,
-                })?;
-                f.sync_all().map_err(|_| AuditStoreError::FileSyncFailed)?;
-            }
-        }
-        // If no newline found, the entire file is one unterminated fragment.
-        // Truncate to 0.
-        else {
-            tracing::warn!(
-                target: "rollshot::app::agent_audit_store",
-                path = %path.display(),
-                file_len = file_len,
-                "repair_tail: no complete record found, truncating entire file"
-            );
-            let f = OpenOptions::new()
-                .write(true)
-                .open(path)
-                .map_err(|e| AuditStoreError::Io {
-                    category: "repair_tail_open_write".to_owned(),
-                    source: e,
-                })?;
-            f.set_len(0).map_err(|e| AuditStoreError::Io {
-                category: "repair_tail_truncate".to_owned(),
-                source: e,
-            })?;
-            f.sync_all().map_err(|_| AuditStoreError::FileSyncFailed)?;
-        }
+        f.sync_all().map_err(|_| AuditStoreError::FileSyncFailed)?;
 
         Ok(())
     }
@@ -815,7 +885,9 @@ impl AuditAppendSink for TaskAuditSink {
                         error = %e,
                         "standalone audit append failed"
                     );
-                    AuditAppendError::from_category(AuditFailureCategory::AppendPreCommitFailure)
+                    // Preserve the bounded category: the caller records it as
+                    // terminal evidence (spec §11).
+                    AuditAppendError::from_category(e.audit_failure_category())
                 })
         })
     }
@@ -848,41 +920,96 @@ pub(crate) mod tests {
         AuditEventId::parse(format!("audit-00000000-0000-4000-8000-{n:012x}")).unwrap()
     }
 
-    fn aborted_payload() -> JournalPayloadV1 {
-        JournalPayloadV1::Aborted {
-            transaction_id: AuditTransactionId::new("txn-00000000-0000-4000-8000-000000000001"),
-            event_id: audit_event_id(1),
-            reason: AuditAbortCategory::TaskStoreCommitFailed,
-        }
+    fn authority_snapshot_fixture() -> rollshot_agent::authority::AuthoritySnapshot {
+        use rollshot_agent::authority::{
+            AuthorityBinding, AuthoritySnapshot, DisclosureCeiling, PreparedCapability,
+            RunOperation,
+        };
+        use rollshot_agent::product_task::{
+            AnnotationStateV1, DocumentContentBinding, TaskAttemptId,
+        };
+        let state = AnnotationStateV1 {
+            width: 100,
+            height: 80,
+            state_id: 1,
+            annotations: vec![],
+        };
+        let document_binding = DocumentContentBinding::new([0xAB_u8; 32], &state, 1).unwrap();
+        AuthoritySnapshot::new(
+            AuthorityBinding::new(
+                task_id(),
+                TaskAttemptId::new(1),
+                rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                    .unwrap(),
+                document_binding,
+            ),
+            "rollshot-v1".into(),
+            DisclosureCeiling::FullScreenshot,
+            true,
+            [PreparedCapability::Ocr].into_iter().collect(),
+            [RunOperation::SubmitReviewCandidate].into_iter().collect(),
+        )
+        .unwrap()
     }
 
-    fn committed_payload() -> JournalPayloadV1 {
-        JournalPayloadV1::Committed {
-            transaction_id: AuditTransactionId::new("txn-00000000-0000-4000-8000-000000000001"),
-            event_id: audit_event_id(1),
-        }
+    fn txn_id(n: u64) -> AuditTransactionId {
+        AuditTransactionId::new(format!("txn-00000000-0000-4000-8000-{n:012x}"))
     }
 
+    /// Non-transactional record, valid on its own at any position.
     fn standalone_payload() -> JournalPayloadV1 {
         JournalPayloadV1::Standalone {
-            envelope: test_envelope(),
+            envelope: test_envelope(1),
         }
     }
 
-    fn test_envelope() -> AuditEnvelopeV1 {
+    fn standalone_payload_b() -> JournalPayloadV1 {
+        JournalPayloadV1::Standalone {
+            envelope: test_envelope(2),
+        }
+    }
+
+    fn task_fixture() -> rollshot_agent::product_task::ProductTaskSnapshot {
         use rollshot_agent::product_task::{ProductTaskSnapshot, SourceBinding, TaskKind};
-        let task = ProductTaskSnapshot::new(
+        ProductTaskSnapshot::new(
             task_id(),
             TaskKind::SmartRedactionAuthor,
             SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None),
             10,
         )
-        .unwrap();
-        let _receipt = task.audit_transition_receipt();
-        // Build a TaskCreated envelope for testing.
+        .unwrap()
+    }
+
+    fn prepared_payload(n: u64) -> JournalPayloadV1 {
+        JournalPayloadV1::Prepared(record::PreparedTransactionV1 {
+            transaction_id: txn_id(n),
+            event_id: audit_event_id(n),
+            envelope: test_envelope(n),
+            expected_revision: 0,
+            replacement_revision: 0,
+            replacement_receipt: task_fixture().audit_transition_receipt().unwrap(),
+        })
+    }
+
+    fn committed_payload(n: u64) -> JournalPayloadV1 {
+        JournalPayloadV1::Committed {
+            transaction_id: txn_id(n),
+            event_id: audit_event_id(n),
+        }
+    }
+
+    fn aborted_payload(n: u64) -> JournalPayloadV1 {
+        JournalPayloadV1::Aborted {
+            transaction_id: txn_id(n),
+            event_id: audit_event_id(n),
+            reason: AuditAbortCategory::TaskStoreCommitFailed,
+        }
+    }
+
+    fn test_envelope(n: u64) -> AuditEnvelopeV1 {
         let correlation = AuditCorrelationV1::for_task(task_id().as_str().to_owned());
         AuditEnvelopeV1::new(
-            audit_event_id(1),
+            audit_event_id(n),
             10,
             AuditEventV1::TaskCreated,
             correlation,
@@ -913,7 +1040,7 @@ pub(crate) mod tests {
         fn empty_journal_returns_zero_sequence() {
             let (journal, _dir) = store();
             let verified = journal.scan(&task_id()).unwrap();
-            assert_eq!(verified.last_sequence, 0);
+            assert_eq!(verified.next_sequence, 0);
             assert!(verified.last_hash.is_empty());
             assert!(verified.pending_transaction.is_none());
         }
@@ -921,19 +1048,19 @@ pub(crate) mod tests {
         #[test]
         fn acknowledged_append_survives_fresh_reopen() {
             let (journal, dir) = store();
-            journal.append(&task_id(), aborted_payload()).unwrap();
+            journal.append(&task_id(), standalone_payload()).unwrap();
             // Reopen fresh.
             let journal2 = AuditJournal::open(dir.path()).unwrap();
             let verified = journal2.scan(&task_id()).unwrap();
-            assert_eq!(verified.last_sequence, 1);
+            assert_eq!(verified.next_sequence, 1);
             assert!(!verified.last_hash.is_empty());
         }
 
         #[test]
         fn only_unterminated_final_fragment_is_repairable() {
             let (journal, dir) = store();
-            journal.append(&task_id(), aborted_payload()).unwrap();
-            let receipt = journal.append(&task_id(), committed_payload()).unwrap();
+            journal.append(&task_id(), standalone_payload()).unwrap();
+            let receipt = journal.append(&task_id(), standalone_payload_b()).unwrap();
             assert_eq!(receipt.sequence, 1);
 
             // Append a partial fragment (no trailing newline).
@@ -947,13 +1074,110 @@ pub(crate) mod tests {
             // Reopen and scan — should repair the tail and still find 2 records.
             let journal2 = AuditJournal::open(dir.path()).unwrap();
             let verified = journal2.scan(&task_id()).unwrap();
-            assert_eq!(verified.last_sequence, 2);
+            assert_eq!(verified.next_sequence, 2);
+        }
+
+        #[test]
+        fn large_unterminated_fragment_preserves_prior_records() {
+            // A crash mid-write can leave a fragment larger than the tail
+            // scan window. Acknowledged records must survive it.
+            let (journal, dir) = store();
+            journal.append(&task_id(), standalone_payload()).unwrap();
+            journal.append(&task_id(), standalone_payload_b()).unwrap();
+
+            let path = journal.journal_path(&task_id());
+            {
+                let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+                f.write_all(&vec![b'x'; (TAIL_SCAN_WINDOW_BYTES as usize) + 1])
+                    .unwrap();
+            }
+
+            let journal2 = AuditJournal::open(dir.path()).unwrap();
+            let verified = journal2.scan(&task_id()).unwrap();
+            assert_eq!(
+                verified.next_sequence, 2,
+                "acknowledged records must survive an oversized tail fragment"
+            );
+        }
+
+        #[test]
+        fn commit_without_prepare_is_corruption() {
+            let (journal, _dir) = store();
+            assert!(matches!(
+                journal.append(&task_id(), committed_payload(1)),
+                Err(AuditStoreError::CorruptJournal { .. })
+            ));
+        }
+
+        #[test]
+        fn outcome_for_other_transaction_is_corruption() {
+            let (journal, dir) = store();
+            journal.append(&task_id(), prepared_payload(1)).unwrap();
+            // Write a commit for a different transaction directly.
+            let path = journal.journal_path(&task_id());
+            let first = journal.scan(&task_id()).unwrap();
+            let record = JournalRecordV1::build(
+                task_id(),
+                1,
+                Some(first.last_hash.clone()),
+                committed_payload(2),
+            );
+            let mut bytes = serde_json::to_vec(&record).unwrap();
+            bytes.push(b'\n');
+            {
+                let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+                f.write_all(&bytes).unwrap();
+                f.sync_all().unwrap();
+            }
+
+            let journal2 = AuditJournal::open(dir.path()).unwrap();
+            assert!(matches!(
+                journal2.scan(&task_id()),
+                Err(AuditStoreError::CorruptJournal { .. })
+            ));
+        }
+
+        #[test]
+        fn prepare_while_transaction_open_is_corruption() {
+            let (journal, _dir) = store();
+            journal.append(&task_id(), prepared_payload(1)).unwrap();
+            assert!(matches!(
+                journal.append(&task_id(), prepared_payload(2)),
+                Err(AuditStoreError::CorruptJournal { .. })
+            ));
+        }
+
+        #[test]
+        fn resolved_transaction_allows_the_next_prepare() {
+            let (journal, _dir) = store();
+            journal.append(&task_id(), prepared_payload(1)).unwrap();
+            journal.append(&task_id(), aborted_payload(1)).unwrap();
+            let receipt = journal.append(&task_id(), prepared_payload(2)).unwrap();
+            assert_eq!(receipt.sequence, 2);
+        }
+
+        #[test]
+        fn blank_interior_line_is_corruption() {
+            let (journal, dir) = store();
+            journal.append(&task_id(), standalone_payload()).unwrap();
+            let path = journal.journal_path(&task_id());
+            let existing = fs::read(&path).unwrap();
+            let mut bytes = Vec::new();
+            bytes.push(b'\n');
+            bytes.extend_from_slice(&existing);
+            fs::write(&path, &bytes).unwrap();
+
+            let journal2 = AuditJournal::open(dir.path()).unwrap();
+            assert!(matches!(
+                journal2.scan(&task_id()),
+                Err(AuditStoreError::CorruptJournal { .. })
+            ));
         }
 
         #[test]
         fn malformed_complete_interior_line_fails_closed() {
             let (journal, dir) = store();
-            journal.append(&task_id(), aborted_payload()).unwrap();
+            journal.append(&task_id(), standalone_payload()).unwrap();
 
             // Write a complete malformed interior line.
             let path = journal.journal_path(&task_id());
@@ -1021,7 +1245,7 @@ pub(crate) mod tests {
             // Instead, create the wrong file manually.
             let wrong_path = journal.journal_path(&task_id());
             // Write a record for task_id_2 into task_id's file.
-            let record = JournalRecordV1::build(task_id_2(), 0, None, aborted_payload()).unwrap();
+            let record = JournalRecordV1::build(task_id_2(), 0, None, standalone_payload());
             let mut bytes = serde_json::to_vec(&record).unwrap();
             bytes.push(b'\n');
             fs::write(&wrong_path, &bytes).unwrap();
@@ -1038,7 +1262,7 @@ pub(crate) mod tests {
             let (journal, _dir) = store();
             let path = journal.journal_path(&task_id());
             // Write a record with schema_version = 999.
-            let mut record = JournalRecordV1::build(task_id(), 0, None, aborted_payload()).unwrap();
+            let mut record = JournalRecordV1::build(task_id(), 0, None, standalone_payload());
             record.schema_version = 999;
             let mut bytes = serde_json::to_vec(&record).unwrap();
             bytes.push(b'\n');
@@ -1053,12 +1277,12 @@ pub(crate) mod tests {
         #[test]
         fn duplicate_sequence_rejected() {
             let (journal, _dir) = store();
-            journal.append(&task_id(), aborted_payload()).unwrap();
-            journal.append(&task_id(), committed_payload()).unwrap();
+            journal.append(&task_id(), standalone_payload()).unwrap();
+            journal.append(&task_id(), standalone_payload_b()).unwrap();
 
             // Manually append a duplicate sequence 0 record.
             let path = journal.journal_path(&task_id());
-            let record = JournalRecordV1::build(task_id(), 0, None, aborted_payload()).unwrap();
+            let record = JournalRecordV1::build(task_id(), 0, None, standalone_payload());
             let mut bytes = serde_json::to_vec(&record).unwrap();
             bytes.push(b'\n');
             {
@@ -1078,7 +1302,7 @@ pub(crate) mod tests {
             let (journal, _dir) = store();
             let path = journal.journal_path(&task_id());
             // Write record with sequence 5 (gap from 0).
-            let record = JournalRecordV1::build(task_id(), 5, None, aborted_payload()).unwrap();
+            let record = JournalRecordV1::build(task_id(), 5, None, standalone_payload());
             let mut bytes = serde_json::to_vec(&record).unwrap();
             bytes.push(b'\n');
             fs::write(&path, &bytes).unwrap();
@@ -1095,14 +1319,12 @@ pub(crate) mod tests {
         #[test]
         fn hash_mismatch_rejected() {
             let (journal, _dir) = store();
-            journal.append(&task_id(), aborted_payload()).unwrap();
+            journal.append(&task_id(), standalone_payload()).unwrap();
             // Tamper with the hash in the file.
             let path = journal.journal_path(&task_id());
             let content = fs::read_to_string(&path).unwrap();
             let tampered = content.replacen(
-                &JournalRecordV1::build(task_id(), 0, None, aborted_payload())
-                    .unwrap()
-                    .record_sha256,
+                &JournalRecordV1::build(task_id(), 0, None, standalone_payload()).record_sha256,
                 "0000000000000000000000000000000000000000000000000000000000000000",
                 1,
             );
@@ -1125,7 +1347,7 @@ pub(crate) mod tests {
         #[test]
         fn first_append_returns_sequence_zero() {
             let (journal, _dir) = store();
-            let receipt = journal.append(&task_id(), aborted_payload()).unwrap();
+            let receipt = journal.append(&task_id(), standalone_payload()).unwrap();
             assert_eq!(receipt.sequence, 0);
             assert!(!receipt.record_hash.is_empty());
         }
@@ -1133,8 +1355,8 @@ pub(crate) mod tests {
         #[test]
         fn subsequent_append_increments_sequence() {
             let (journal, _dir) = store();
-            let r0 = journal.append(&task_id(), aborted_payload()).unwrap();
-            let r1 = journal.append(&task_id(), committed_payload()).unwrap();
+            let r0 = journal.append(&task_id(), standalone_payload()).unwrap();
+            let r1 = journal.append(&task_id(), standalone_payload_b()).unwrap();
             assert_eq!(r0.sequence, 0);
             assert_eq!(r1.sequence, 1);
         }
@@ -1149,7 +1371,7 @@ pub(crate) mod tests {
             // by constructing a scenario that would exceed the limit.
             // For now, trust the size check and test with a normal payload.
             // (The record check is serialization-size based, tested implicitly.)
-            let receipt = journal.append(&task_id(), aborted_payload()).unwrap();
+            let receipt = journal.append(&task_id(), standalone_payload()).unwrap();
             assert_eq!(receipt.sequence, 0);
         }
 
@@ -1157,7 +1379,7 @@ pub(crate) mod tests {
         fn record_write_failpoint_returns_io_error() {
             let (journal, _dir) = store_with_failpoint(AuditFailpoint::RecordWrite);
             assert!(matches!(
-                journal.append(&task_id(), aborted_payload()),
+                journal.append(&task_id(), standalone_payload()),
                 Err(AuditStoreError::Io { category, .. }) if category == "failpoint_record_write"
             ));
         }
@@ -1166,7 +1388,7 @@ pub(crate) mod tests {
         fn file_sync_failpoint_returns_sync_error() {
             let (journal, _dir) = store_with_failpoint(AuditFailpoint::FileSync);
             assert!(matches!(
-                journal.append(&task_id(), aborted_payload()),
+                journal.append(&task_id(), standalone_payload()),
                 Err(AuditStoreError::FileSyncFailed)
             ));
         }
@@ -1175,7 +1397,7 @@ pub(crate) mod tests {
         fn directory_sync_failpoint_returns_dir_sync_error() {
             let (journal, _dir) = store_with_failpoint(AuditFailpoint::DirectorySync);
             assert!(matches!(
-                journal.append(&task_id(), aborted_payload()),
+                journal.append(&task_id(), standalone_payload()),
                 Err(AuditStoreError::DirectorySyncFailed)
             ));
         }
@@ -1184,25 +1406,25 @@ pub(crate) mod tests {
         fn append_to_existing_file_skips_dir_sync() {
             let (journal, _dir) = store();
             // First append: creates file + syncs directory.
-            journal.append(&task_id(), aborted_payload()).unwrap();
+            journal.append(&task_id(), standalone_payload()).unwrap();
             // Second append: no directory sync needed.
-            let receipt = journal.append(&task_id(), committed_payload()).unwrap();
+            let receipt = journal.append(&task_id(), standalone_payload_b()).unwrap();
             assert_eq!(receipt.sequence, 1);
         }
 
         #[test]
         fn append_multiple_tasks_independent_journals() {
             let (journal, _dir) = store();
-            let r1 = journal.append(&task_id(), aborted_payload()).unwrap();
-            let r2 = journal.append(&task_id_2(), aborted_payload()).unwrap();
+            let r1 = journal.append(&task_id(), standalone_payload()).unwrap();
+            let r2 = journal.append(&task_id_2(), standalone_payload()).unwrap();
             assert_eq!(r1.sequence, 0);
             assert_eq!(r2.sequence, 0);
 
             // Each task has its own journal.
             let v1 = journal.scan(&task_id()).unwrap();
             let v2 = journal.scan(&task_id_2()).unwrap();
-            assert_eq!(v1.last_sequence, 1);
-            assert_eq!(v2.last_sequence, 1);
+            assert_eq!(v1.next_sequence, 1);
+            assert_eq!(v2.next_sequence, 1);
         }
 
         #[test]
@@ -1214,7 +1436,7 @@ pub(crate) mod tests {
             // we'd need to corrupt the file between write and re-read,
             // which is hard to do deterministically. For now, test that
             // the path executes without panic.
-            let result = journal.append(&task_id(), aborted_payload());
+            let result = journal.append(&task_id(), standalone_payload());
             // With normal write, bytes match, so append succeeds.
             assert!(result.is_ok());
         }
@@ -1231,24 +1453,14 @@ pub(crate) mod tests {
             std::sync::Arc::new(super::super::task_store::TaskStore::open(dir.path()).unwrap());
         let sink = TaskAuditSink::new(store);
 
-        let event = AuditEventV1::AuthorityDenied {
-            authority: rollshot_agent::audit::AuthorityAuditRefV1 {
-                schema_version: 1,
-                task_id: "task-00000000-0000-4000-8000-000000000001".into(),
-                attempt_id: 1,
-                run_id: "run-00000000-0000-4000-8000-000000000001".into(),
-                policy_revision: "rollshot-v1".into(),
-                disclosure_ceiling: rollshot_agent::authority::DisclosureCeiling::FullScreenshot,
-                existing_product_capture: true,
-                snapshot_digest: "a".repeat(64),
-            },
-            tool_name: "replace_source".into(),
-            required_operation: "WriteDraft".into(),
-        };
-        let correlation =
-            AuditCorrelationV1::for_task("task-00000000-0000-4000-8000-000000000001".into());
-        let envelope =
-            AuditEnvelopeV1::new(AuditEventId::new_v4(), 1000, event, correlation).unwrap();
+        let envelope = rollshot_agent::audit::authority_denied_envelope(
+            &authority_snapshot_fixture(),
+            "replace_source",
+            "WriteDraft",
+            AuditEventId::new_v4(),
+            1000,
+        )
+        .unwrap();
 
         let receipt = sink.append(envelope).await.unwrap();
         assert_eq!(receipt.sequence, 0);
@@ -1314,7 +1526,7 @@ pub(crate) mod tests {
         // CorruptJournal, not a panic or silent corruption.
         let (journal, dir) = store();
         let task_id = task_id();
-        journal.append(&task_id, aborted_payload()).unwrap();
+        journal.append(&task_id, standalone_payload()).unwrap();
 
         // Write a malformed interior line.
         let path = journal.journal_path(&task_id);

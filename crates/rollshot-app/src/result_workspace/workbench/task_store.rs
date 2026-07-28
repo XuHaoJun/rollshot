@@ -41,6 +41,10 @@ const TASK_FILE_SUFFIX: &str = ".json";
 const TEMP_PREFIX: &str = ".tmp-";
 const MAX_FILE_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
 const PRUNE_AGE_DAYS: i64 = 30;
+/// Grace window before a `Created` task is treated as interrupted. A launch
+/// commits `Created` and `Running` as two separate audited transitions, so a
+/// concurrent reconcile pass must not abort a run inside that window.
+const CREATED_INTERRUPT_GRACE_MS: i64 = 60_000;
 
 // ============================================================================
 // Failpoint (test-only injection)
@@ -139,6 +143,27 @@ pub enum TaskStoreError {
     Audit(#[from] AuditStoreError),
 }
 
+impl TaskStoreError {
+    /// Bounded audit failure category for this error, for callers that
+    /// record it as terminal evidence (spec §11).
+    pub fn audit_failure_category(&self) -> rollshot_agent::audit::AuditFailureCategory {
+        use rollshot_agent::audit::AuditFailureCategory as Cat;
+        match self {
+            Self::Audit(e) => e.failure_category(),
+            Self::LockContended => Cat::LockContended,
+            Self::UnsupportedSchema { .. } => Cat::UnsupportedSchema,
+            Self::Corrupt { .. } => Cat::CorruptJournal,
+            Self::TaskIdMismatch { .. } | Self::CasTaskIdMismatch { .. } => {
+                Cat::CorrelationMismatch
+            }
+            Self::PreCommit { .. } => Cat::AppendPreCommitFailure,
+            Self::CommitVisibleDurabilityUncertain { .. } => Cat::AppendVisibleDurabilityUncertain,
+            Self::RevisionMismatch { .. } | Self::Conflict => Cat::TransitionMismatch,
+            _ => Cat::Unavailable,
+        }
+    }
+}
+
 // ============================================================================
 // Audited commit outcome
 // ============================================================================
@@ -222,7 +247,7 @@ impl TaskStore {
         // Reconcile all audit journals before returning.
         // Spec §9.4: "TaskStore::open must reconcile all audit journals
         // before Product Task restore or new audited writes."
-        store.reconcile_all_task_audits()?;
+        store.reconcile_all_task_audits();
 
         Ok(store)
     }
@@ -231,8 +256,24 @@ impl TaskStore {
     ///
     /// Called from `open()` to ensure no journal is left in an
     /// unresolved/uncertain/corrupt state.
-    fn reconcile_all_task_audits(&self) -> Result<(), TaskStoreError> {
-        let entries = self.sorted_task_entries()?;
+    ///
+    /// Failures are scoped to the task that owns the journal: an
+    /// unresolvable or corrupt sidecar must not make the whole store — and
+    /// with it every other task's persistence and audit — unavailable.
+    /// The affected task still fails closed, because every audited
+    /// mutation re-runs `reconcile_task_audit_locked` before it writes.
+    fn reconcile_all_task_audits(&self) {
+        let entries = match self.sorted_task_entries() {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::error!(
+                    target: "rollshot::app::agent_audit_store",
+                    error = %e,
+                    "audit reconciliation skipped: task directory unreadable"
+                );
+                return;
+            }
+        };
         for entry in &entries {
             let filename = match entry.file_name().to_str().map(|s| s.to_owned()) {
                 Some(f) => f,
@@ -248,9 +289,65 @@ impl TaskStore {
                 Ok(id) => id,
                 Err(_) => continue,
             };
-            self.reconcile_task_audit(&task_id)?;
+            if let Err(e) = self.reconcile_task_audit(&task_id) {
+                tracing::error!(
+                    target: "rollshot::app::agent_audit_store",
+                    task_id = task_id.as_str(),
+                    category = ?e.audit_failure_category(),
+                    error = %e,
+                    "audit reconciliation failed: task is blocked from audited mutation"
+                );
+            }
         }
-        Ok(())
+        self.remove_orphan_journals();
+    }
+
+    /// Delete audit journals whose Product Task snapshot no longer exists.
+    ///
+    /// Runs only at open, under the exclusive lock, after reconciliation has
+    /// resolved every prepared transaction. A journal that still has an
+    /// unresolved transaction is retained.
+    fn remove_orphan_journals(&self) {
+        let audit_dir = self.config_dir.join("agent-tasks").join("audit");
+        let dir_iter = match fs::read_dir(&audit_dir) {
+            Ok(iter) => iter,
+            Err(_) => return,
+        };
+        let _lock = match self.acquire_lock() {
+            Ok(lock) => lock,
+            Err(_) => return,
+        };
+        for entry in dir_iter.flatten() {
+            let filename = match entry.file_name().to_str().map(|s| s.to_owned()) {
+                Some(f) => f,
+                None => continue,
+            };
+            let Some(id_str) = filename.strip_suffix(".jsonl") else {
+                continue;
+            };
+            let task_id = match ProductTaskId::parse(id_str) {
+                Ok(id) => id,
+                Err(_) => continue,
+            };
+            // Keep the journal while its task snapshot exists.
+            match self.task_path(&task_id) {
+                Ok(path) if path.exists() => continue,
+                Ok(_) => {}
+                Err(_) => continue,
+            }
+            // Keep the journal while any transaction is unresolved.
+            match self.audit_journal.scan(&task_id) {
+                Ok(verified) if verified.pending_transaction.is_none() => {}
+                _ => continue,
+            }
+            if self.audit_journal.remove_journal(&task_id).is_ok() {
+                tracing::info!(
+                    target: "rollshot::app::agent_audit_store",
+                    task_id = task_id.as_str(),
+                    "removed orphan audit journal with no task snapshot"
+                );
+            }
+        }
     }
 
     /// Open with an injected failpoint for deterministic testing.
@@ -557,7 +654,10 @@ impl TaskStore {
     // ------------------------------------------------------------------
 
     /// Create a new task snapshot. Fails if the task file already exists.
-    pub fn create(
+    ///
+    /// Raw (unaudited) mutation: crate-internal so product callsites must
+    /// use [`TaskStore::create_audited`] (spec §10.1).
+    pub(crate) fn create(
         &self,
         snapshot: &ProductTaskSnapshot,
     ) -> Result<StoreCommitOutcome, TaskStoreError> {
@@ -623,7 +723,7 @@ impl TaskStore {
     /// 4. Require replacement same task and revision `expected + 1`.
     /// 5. Serialize, validate size, atomic write.
     /// 6. Release lock.
-    pub fn compare_and_swap(
+    pub(crate) fn compare_and_swap(
         &self,
         expected: &ProductTaskSnapshot,
         replacement: &ProductTaskSnapshot,
@@ -742,7 +842,12 @@ impl TaskStore {
         self.reconcile_task_audit_locked(task_id)?;
 
         let txn_id = Self::new_transaction_id();
-        let replacement_receipt = snapshot.audit_transition_receipt();
+        let replacement_receipt =
+            snapshot
+                .audit_transition_receipt()
+                .map_err(|e| TaskStoreError::PreCommit {
+                    reason: format!("audit receipt: {e}"),
+                })?;
 
         // Prepare: append prepare record.
         let prepare_payload = JournalPayloadV1::Prepared(PreparedTransactionV1 {
@@ -826,7 +931,11 @@ impl TaskStore {
         self.reconcile_task_audit_locked(task_id)?;
 
         let txn_id = Self::new_transaction_id();
-        let replacement_receipt = new.audit_transition_receipt();
+        let replacement_receipt =
+            new.audit_transition_receipt()
+                .map_err(|e| TaskStoreError::PreCommit {
+                    reason: format!("audit receipt: {e}"),
+                })?;
 
         // Prepare: append prepare record.
         let prepare_payload = JournalPayloadV1::Prepared(PreparedTransactionV1 {
@@ -880,6 +989,10 @@ impl TaskStore {
     }
 
     /// Append a standalone (non-transactional) audit envelope.
+    ///
+    /// Takes the exclusive store lock and resolves any unfinished audit
+    /// transaction first: no task may advance while its journal has an
+    /// unresolved transaction (spec §9.4).
     pub fn append_standalone_audit(
         &self,
         envelope: AuditEnvelopeV1,
@@ -889,6 +1002,9 @@ impl TaskStore {
             ProductTaskId::parse(task_id_str.clone()).map_err(|e| TaskStoreError::PreCommit {
                 reason: format!("invalid task ID in envelope: {e}"),
             })?;
+
+        let _lock = self.acquire_lock()?;
+        self.reconcile_task_audit_locked(&task_id)?;
 
         let payload = JournalPayloadV1::Standalone { envelope };
         let receipt = self.audit_journal.append(&task_id, payload)?;
@@ -921,7 +1037,11 @@ impl TaskStore {
 
         // Load the authoritative task receipt (if task exists).
         let authoritative_receipt = match self.load(task_id) {
-            Ok(snapshot) => Some(snapshot.audit_transition_receipt()),
+            Ok(snapshot) => Some(snapshot.audit_transition_receipt().map_err(|e| {
+                TaskStoreError::PreCommit {
+                    reason: format!("audit receipt: {e}"),
+                }
+            })?),
             Err(TaskStoreError::NotFound { .. }) => None,
             Err(e) => return Err(e),
         };
@@ -1120,6 +1240,16 @@ impl TaskStore {
             // Reconcile running/applying → interrupted.
             match snapshot.status() {
                 TaskStatus::Created | TaskStatus::Running | TaskStatus::Applying => {
+                    // A task that was just created is still mid-launch: its
+                    // `Created → Running` transition is a separate audited
+                    // write, so interrupting it immediately would abort a
+                    // live run. Only reconcile once it is older than the
+                    // launch grace window.
+                    if snapshot.status() == TaskStatus::Created
+                        && now - snapshot.updated_at_unix_ms() < CREATED_INTERRUPT_GRACE_MS
+                    {
+                        continue;
+                    }
                     if let Ok(Some(reconciled)) = snapshot.reconcile_interrupted(now) {
                         // Audited transition: reconcile to Interrupted.
                         let event_id = AuditEventId::new_v4();
@@ -1507,6 +1637,32 @@ mod tests {
 
     fn hex_encode(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn authority_snapshot_fixture() -> rollshot_agent::authority::AuthoritySnapshot {
+        use rollshot_agent::authority::{AuthorityBinding, AuthoritySnapshot};
+        use rollshot_agent::product_task::{AnnotationStateV1, DocumentContentBinding};
+        let state = AnnotationStateV1 {
+            width: 100,
+            height: 80,
+            state_id: 1,
+            annotations: vec![],
+        };
+        let document_binding = DocumentContentBinding::new([0xAB_u8; 32], &state, 1).unwrap();
+        AuthoritySnapshot::new(
+            AuthorityBinding::new(
+                task_id_fixture(),
+                TaskAttemptId::new(1),
+                run_id_fixture(),
+                document_binding,
+            ),
+            "rollshot-v1".into(),
+            DisclosureCeiling::FullScreenshot,
+            true,
+            [PreparedCapability::Ocr].into_iter().collect(),
+            [RunOperation::SubmitReviewCandidate].into_iter().collect(),
+        )
+        .unwrap()
     }
 
     fn authority_receipt_fixture() -> AuthoritySnapshotReceiptV1 {
@@ -2506,7 +2662,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let receipt = snapshot.audit_transition_receipt();
+        let receipt = snapshot.audit_transition_receipt().unwrap();
         let prepared = JournalPayloadV1::Prepared(PreparedTransactionV1 {
             transaction_id: AuditTransactionId::new("txn-test-002"),
             event_id: AuditEventId::parse("audit-00000000-0000-4000-8000-000000000006").unwrap(),
@@ -2731,9 +2887,9 @@ mod tests {
 
     #[test]
     fn abandoned_created_task_is_interrupted() {
-        // A Created task persisted in the store gets reconciled to
-        // Interrupted on reconcile_for_source, with an audited
-        // TaskTerminated event.
+        // A Created task abandoned before its attempt started gets
+        // reconciled to Interrupted on reconcile_for_source, with an
+        // audited TaskTerminated event.
         let (store, dir) = store();
         let created = created_task_fixture();
         store
@@ -2741,7 +2897,10 @@ mod tests {
             .unwrap();
 
         let binding = source_binding_fixture();
-        store.reconcile_for_source(&binding, 100).unwrap();
+        // Past the launch grace window: the task is genuinely abandoned.
+        store
+            .reconcile_for_source(&binding, 10 + CREATED_INTERRUPT_GRACE_MS)
+            .unwrap();
 
         // Task should now be Interrupted.
         let loaded = store.load(created.task_id()).unwrap();
@@ -3046,28 +3205,12 @@ mod tests {
         store.create(&snapshot).unwrap();
 
         // Append an AuthorityDenied audit event.
-        let event = rollshot_agent::audit::AuditEventV1::AuthorityDenied {
-            authority: rollshot_agent::audit::AuthorityAuditRefV1 {
-                schema_version: 1,
-                task_id: task_id_fixture().as_str().to_owned(),
-                attempt_id: 1,
-                run_id: "run-00000000-0000-4000-8000-000000000001".into(),
-                policy_revision: "rollshot-v1".into(),
-                disclosure_ceiling: rollshot_agent::authority::DisclosureCeiling::FullScreenshot,
-                existing_product_capture: true,
-                snapshot_digest: "a".repeat(64),
-            },
-            tool_name: "replace_source".into(),
-            required_operation: "WriteDraft".into(),
-        };
-        let correlation = rollshot_agent::audit::AuditCorrelationV1::for_task(
-            task_id_fixture().as_str().to_owned(),
-        );
-        let envelope = rollshot_agent::audit::AuditEnvelopeV1::new(
+        let envelope = rollshot_agent::audit::authority_denied_envelope(
+            &authority_snapshot_fixture(),
+            "replace_source",
+            "WriteDraft",
             AuditEventId::new_v4(),
             2000,
-            event,
-            correlation,
         )
         .unwrap();
         let receipt = store.append_standalone_audit(envelope).unwrap();

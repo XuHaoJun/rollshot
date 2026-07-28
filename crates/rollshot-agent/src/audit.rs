@@ -60,21 +60,7 @@ impl AuditEventId {
 
     /// Generate a new V4 UUID audit event ID with `audit-` prefix.
     pub fn new_v4() -> Self {
-        let mut bytes = [0u8; 16];
-        getrandom(&mut bytes);
-        // Set version 4 (bits 4-7 of byte 6)
-        bytes[6] = (bytes[6] & 0x0F) | 0x40;
-        // Set variant 1 (bits 6-7 of byte 8)
-        bytes[8] = (bytes[8] & 0x3F) | 0x80;
-        let uuid = format!(
-            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            bytes[0], bytes[1], bytes[2], bytes[3],
-            bytes[4], bytes[5],
-            bytes[6], bytes[7],
-            bytes[8], bytes[9],
-            bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
-        );
-        Self(format!("audit-{uuid}"))
+        Self(format!("audit-{}", uuid::Uuid::new_v4()))
     }
 
     pub fn as_str(&self) -> &str {
@@ -86,13 +72,6 @@ impl fmt::Display for AuditEventId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
-}
-
-/// Fill buffer with random bytes. Uses OS entropy; panics on failure.
-fn getrandom(buf: &mut [u8]) {
-    use std::io::Read;
-    let mut f = std::fs::File::open("/dev/urandom").expect("open /dev/urandom");
-    f.read_exact(buf).expect("read /dev/urandom");
 }
 
 // ========================================================================
@@ -168,10 +147,14 @@ pub struct ReviewDecisionAuditV1 {
 // ========================================================================
 
 /// Bounded document state receipt for applied reviews.
+///
+/// `digest` is absent when the product review receipt carried no resulting
+/// document digest. The audit record never invents one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentStateReceipt {
     pub state_id: u32,
-    pub digest: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub digest: Option<String>,
 }
 
 // ========================================================================
@@ -262,39 +245,6 @@ pub enum AuditEventKindV1 {
     ReviewApplyStarted,
     ReviewDecisionCommitted,
     TaskTerminated,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuditBudgetDimensionV1 {
-    WallTime,
-    ModelCalls,
-    InputTokens,
-    OutputTokens,
-    Cost,
-    ToolCalls,
-    PerToolCalls,
-    ArgumentBytes,
-    ResultBytes,
-    SourceBytes,
-    Attachments,
-    ValidationAttempts,
-    DryRunAttempts,
-    CapabilityCalls,
-    CandidateCount,
-    AffectedArea,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuditContextRecoveryFailureCategoryV1 {
-    ParseFailure,
-    SequenceGap,
-    HashMismatch,
-    DuplicateIdentity,
-    CommitWithoutPrepare,
-    ContradictoryOutcome,
-    OversizedRecord,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -466,6 +416,11 @@ impl AuditEnvelopeV1 {
             validate_string_bound(required_operation, "required_operation")?;
         }
 
+        // Validate that the correlation carries exactly the fields this
+        // event variant requires, and that no field contradicts the event
+        // payload or names another task (spec §8.2).
+        validate_correlation(&event, &correlation)?;
+
         let event_payload_digest = Self::compute_digest(
             AUDIT_SCHEMA_VERSION_V1,
             &event_id,
@@ -530,6 +485,218 @@ impl AuditEnvelopeV1 {
         let hash = Sha256::digest(&bytes);
         hex_encode(&hash)
     }
+}
+
+/// Enforce the per-variant correlation contract (spec §8.2, §8.4).
+///
+/// Every mandatory field must be present and equal to the corresponding
+/// event payload field; every field the variant does not use must be
+/// absent. Authority references must name the same task, attempt, and run
+/// as the correlation itself.
+fn validate_correlation(
+    event: &AuditEventV1,
+    correlation: &AuditCorrelationV1,
+) -> Result<(), AuditContractError> {
+    let missing = |field: &str| AuditContractError::CorrelationMismatch {
+        kind: event.kind(),
+        field: field.to_owned(),
+        reason: "missing".to_owned(),
+    };
+    let unexpected = |field: &str| AuditContractError::CorrelationMismatch {
+        kind: event.kind(),
+        field: field.to_owned(),
+        reason: "unexpected for this event".to_owned(),
+    };
+    let contradicts = |field: &str| AuditContractError::CorrelationMismatch {
+        kind: event.kind(),
+        field: field.to_owned(),
+        reason: "contradicts event payload".to_owned(),
+    };
+
+    // Fields no V1 variant may combine with a skill-use or artifact
+    // reference are checked per variant below; these are the shared ones.
+    let require_attempt_run = |c: &AuditCorrelationV1| -> Result<(), AuditContractError> {
+        if c.attempt_id.is_none() {
+            return Err(missing("attempt_id"));
+        }
+        if c.run_id.is_none() {
+            return Err(missing("run_id"));
+        }
+        Ok(())
+    };
+    let require_bound_authority = |c: &AuditCorrelationV1,
+                                   event_auth: &AuthorityAuditRefV1|
+     -> Result<(), AuditContractError> {
+        let auth = c.authority.as_ref().ok_or_else(|| missing("authority"))?;
+        if auth != event_auth {
+            return Err(contradicts("authority"));
+        }
+        if auth.task_id != c.task_id {
+            return Err(contradicts("authority.task_id"));
+        }
+        if Some(auth.attempt_id) != c.attempt_id {
+            return Err(contradicts("authority.attempt_id"));
+        }
+        if Some(auth.run_id.as_str()) != c.run_id.as_deref() {
+            return Err(contradicts("authority.run_id"));
+        }
+        Ok(())
+    };
+
+    match event {
+        AuditEventV1::TaskCreated => {
+            if correlation.attempt_id.is_some() {
+                return Err(unexpected("attempt_id"));
+            }
+            if correlation.run_id.is_some() {
+                return Err(unexpected("run_id"));
+            }
+        }
+        AuditEventV1::AttemptStarted { attempt_id, run_id } => {
+            require_attempt_run(correlation)?;
+            if correlation.attempt_id != Some(*attempt_id) {
+                return Err(contradicts("attempt_id"));
+            }
+            if correlation.run_id.as_deref() != Some(run_id.as_str()) {
+                return Err(contradicts("run_id"));
+            }
+        }
+        AuditEventV1::RunContractBound {
+            authority,
+            skill_use,
+        } => {
+            require_attempt_run(correlation)?;
+            require_bound_authority(correlation, authority)?;
+            let bound = correlation
+                .skill_use
+                .as_ref()
+                .ok_or_else(|| missing("skill_use"))?;
+            if bound != skill_use {
+                return Err(contradicts("skill_use"));
+            }
+        }
+        AuditEventV1::AuthorityDenied { authority, .. } => {
+            require_attempt_run(correlation)?;
+            require_bound_authority(correlation, authority)?;
+        }
+        AuditEventV1::ArtifactPromoted { artifact }
+        | AuditEventV1::ReviewApplyStarted { artifact } => {
+            require_attempt_run(correlation)?;
+            let bound = correlation
+                .artifact
+                .as_ref()
+                .ok_or_else(|| missing("artifact"))?;
+            if bound != artifact {
+                return Err(contradicts("artifact"));
+            }
+            if let Some(proposal_id) = &correlation.proposal_id {
+                if proposal_id != &artifact.proposal_id {
+                    return Err(contradicts("proposal_id"));
+                }
+            }
+        }
+        AuditEventV1::ReviewDecisionCommitted {
+            applied,
+            review_decision,
+            document_state,
+        } => {
+            require_attempt_run(correlation)?;
+            let bound = correlation
+                .review_decision
+                .as_ref()
+                .ok_or_else(|| missing("review_decision"))?;
+            if bound != review_decision {
+                return Err(contradicts("review_decision"));
+            }
+            if correlation.document_state.as_ref() != document_state.as_ref() {
+                return Err(contradicts("document_state"));
+            }
+            if !applied && document_state.is_some() {
+                return Err(unexpected("document_state"));
+            }
+        }
+        AuditEventV1::TaskTerminated { .. } => {
+            if correlation.authority.is_some() {
+                return Err(unexpected("authority"));
+            }
+            if correlation.skill_use.is_some() {
+                return Err(unexpected("skill_use"));
+            }
+            if correlation.review_decision.is_some() {
+                return Err(unexpected("review_decision"));
+            }
+            if correlation.document_state.is_some() {
+                return Err(unexpected("document_state"));
+            }
+        }
+    }
+
+    // Fields that never belong to a non-owning variant.
+    match event {
+        AuditEventV1::RunContractBound { .. } | AuditEventV1::AttemptStarted { .. } => {
+            if correlation.artifact.is_some() {
+                return Err(unexpected("artifact"));
+            }
+            if correlation.review_decision.is_some() {
+                return Err(unexpected("review_decision"));
+            }
+            if correlation.document_state.is_some() {
+                return Err(unexpected("document_state"));
+            }
+        }
+        AuditEventV1::TaskCreated => {
+            if correlation.authority.is_some() {
+                return Err(unexpected("authority"));
+            }
+            if correlation.skill_use.is_some() {
+                return Err(unexpected("skill_use"));
+            }
+            if correlation.artifact.is_some() {
+                return Err(unexpected("artifact"));
+            }
+            if correlation.review_decision.is_some() {
+                return Err(unexpected("review_decision"));
+            }
+            if correlation.document_state.is_some() {
+                return Err(unexpected("document_state"));
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+/// Build the standalone `AuthorityDenied` envelope for a denied tool call.
+///
+/// The correlation is derived from the bound authority snapshot so the
+/// event always carries the exact task, attempt, run, and authority
+/// receipt that the denial was evaluated against (spec §8.4).
+pub fn authority_denied_envelope(
+    authority: &AuthoritySnapshot,
+    tool_name: impl Into<String>,
+    required_operation: impl Into<String>,
+    event_id: AuditEventId,
+    occurred_at_unix_ms: i64,
+) -> Result<AuditEnvelopeV1, AuditContractError> {
+    let audit_ref = authority.audit_ref();
+    let correlation = AuditCorrelationV1 {
+        task_id: audit_ref.task_id.clone(),
+        attempt_id: Some(audit_ref.attempt_id),
+        run_id: Some(audit_ref.run_id.clone()),
+        authority: Some(audit_ref.clone()),
+        skill_use: None,
+        artifact: None,
+        proposal_id: None,
+        review_decision: None,
+        document_state: None,
+    };
+    let event = AuditEventV1::AuthorityDenied {
+        authority: audit_ref,
+        tool_name: tool_name.into(),
+        required_operation: required_operation.into(),
+    };
+    AuditEnvelopeV1::new(event_id, occurred_at_unix_ms, event, correlation)
 }
 
 fn validate_string_bound(value: &str, field: &str) -> Result<(), AuditContractError> {
@@ -618,6 +785,19 @@ pub enum AuditContractError {
     RevisionMismatch { expected: u32, got: u32 },
     #[error("timestamp regression: current={current}, attempted={attempted}")]
     TimestampRegression { current: i64, attempted: i64 },
+    #[error("correlation mismatch for {kind:?} field {field}: {reason}")]
+    CorrelationMismatch {
+        kind: AuditEventKindV1,
+        field: String,
+        reason: String,
+    },
+    #[error("missing {field} for {kind:?}")]
+    MissingTransitionField {
+        kind: AuditEventKindV1,
+        field: String,
+    },
+    #[error("digest computation failed for {field}")]
+    DigestUnavailable { field: String },
 }
 
 // ========================================================================
@@ -663,38 +843,35 @@ impl AuthoritySnapshot {
 
 impl ProductTaskSnapshot {
     /// Privacy-bounded audit receipt. Contains no artifact/proposal payload bytes.
-    pub fn audit_transition_receipt(&self) -> AuditTaskStateReceiptV1 {
-        AuditTaskStateReceiptV1 {
+    ///
+    /// Fails rather than substituting an empty digest when the exact
+    /// source-binding digest cannot be computed (spec §12: only real
+    /// digests are durable evidence).
+    pub fn audit_transition_receipt(&self) -> Result<AuditTaskStateReceiptV1, AuditContractError> {
+        let artifact = match self.artifact_metadata() {
+            Some(meta) => Some(make_artifact_ref(meta)?),
+            None => None,
+        };
+        Ok(AuditTaskStateReceiptV1 {
             task_id: self.task_id().as_str().to_owned(),
             status: map_task_status(&self.status()),
             snapshot_revision: self.snapshot_revision(),
             created_at_unix_ms: self.created_at_unix_ms(),
             updated_at_unix_ms: self.updated_at_unix_ms(),
-            artifact: self.artifact_metadata().map(|meta| {
-                let source_binding_sha256 =
-                    canonical_v1_digest(meta.source_binding()).unwrap_or_default();
-                ArtifactAuditRefV1 {
-                    artifact_id: meta.artifact_id().as_str().to_owned(),
-                    artifact_revision: meta.artifact_revision().get(),
-                    kind: meta.kind(),
-                    schema_version: meta.schema_version(),
-                    canonical_payload_sha256: meta.canonical_payload_sha256().to_owned(),
-                    source_binding_sha256,
-                    proposal_id: meta.proposal_id().to_owned(),
-                    provider_id: meta.provider_id().to_owned(),
-                    model_id: meta.model_id().to_owned(),
-                    run_config_digest: meta.run_config_digest().to_owned(),
-                }
-            }),
-            review_decision: self.review_receipt().map(|rr| ReviewDecisionAuditV1 {
-                artifact_id: rr.artifact_id.as_str().to_owned(),
-                artifact_revision: rr.artifact_revision.get(),
-                proposal_id: rr.proposal_id.clone(),
-                applied_candidate_ids: rr.applied_candidates.clone(),
-                rejected_candidate_ids: rr.rejected_candidates.clone(),
-                decided_at_unix_ms: rr.decided_at_unix_ms,
-            }),
-        }
+            artifact,
+            review_decision: self.review_receipt().map(review_decision_ref),
+        })
+    }
+}
+
+fn review_decision_ref(receipt: &crate::product_task::ReviewReceipt) -> ReviewDecisionAuditV1 {
+    ReviewDecisionAuditV1 {
+        artifact_id: receipt.artifact_id.as_str().to_owned(),
+        artifact_revision: receipt.artifact_revision.get(),
+        proposal_id: receipt.proposal_id.clone(),
+        applied_candidate_ids: receipt.applied_candidates.clone(),
+        rejected_candidate_ids: receipt.rejected_candidates.clone(),
+        decided_at_unix_ms: receipt.decided_at_unix_ms,
     }
 }
 
@@ -793,6 +970,23 @@ pub fn derive_material_transition(
         document_state: None,
     };
 
+    // The active attempt is mandatory for every attempt-scoped variant;
+    // a snapshot without one cannot produce that evidence.
+    let bind_active_attempt = |correlation: &mut AuditCorrelationV1,
+                               kind: AuditEventKindV1|
+     -> Result<(), AuditContractError> {
+        let last = new
+            .attempts()
+            .last()
+            .ok_or(AuditContractError::MissingTransitionField {
+                kind,
+                field: "attempt".to_owned(),
+            })?;
+        correlation.attempt_id = Some(last.attempt_id().get());
+        correlation.run_id = Some(last.run_id().as_str().to_owned());
+        Ok(())
+    };
+
     // Populate correlation fields from event.
     match &event {
         AuditEventV1::AttemptStarted { attempt_id, run_id } => {
@@ -803,43 +997,47 @@ pub fn derive_material_transition(
             authority,
             skill_use,
         } => {
-            let last = new.attempts().last();
-            correlation.attempt_id = last.map(|a| a.attempt_id().get());
-            correlation.run_id = last.map(|a| a.run_id().as_str().to_owned());
+            bind_active_attempt(&mut correlation, AuditEventKindV1::RunContractBound)?;
             correlation.authority = Some(authority.clone());
             correlation.skill_use = Some(skill_use.clone());
         }
         AuditEventV1::ArtifactPromoted { artifact } => {
-            let last = new.attempts().last();
-            correlation.attempt_id = last.map(|a| a.attempt_id().get());
-            correlation.run_id = last.map(|a| a.run_id().as_str().to_owned());
+            bind_active_attempt(&mut correlation, AuditEventKindV1::ArtifactPromoted)?;
             correlation.artifact = Some(artifact.clone());
-            if let Some(meta) = new.artifact_metadata() {
-                correlation.proposal_id = Some(meta.proposal_id().to_owned());
-            }
+            correlation.proposal_id = Some(artifact.proposal_id.clone());
         }
         AuditEventV1::ReviewApplyStarted { artifact } => {
-            let last = new.attempts().last();
-            correlation.attempt_id = last.map(|a| a.attempt_id().get());
-            correlation.run_id = last.map(|a| a.run_id().as_str().to_owned());
+            bind_active_attempt(&mut correlation, AuditEventKindV1::ReviewApplyStarted)?;
             correlation.artifact = Some(artifact.clone());
+            correlation.proposal_id = Some(artifact.proposal_id.clone());
         }
         AuditEventV1::ReviewDecisionCommitted {
             review_decision,
             document_state,
             ..
         } => {
-            let last = new.attempts().last();
-            correlation.attempt_id = last.map(|a| a.attempt_id().get());
-            correlation.run_id = last.map(|a| a.run_id().as_str().to_owned());
+            bind_active_attempt(&mut correlation, AuditEventKindV1::ReviewDecisionCommitted)?;
             correlation.review_decision = Some(review_decision.clone());
             correlation.document_state = document_state.clone();
         }
         AuditEventV1::TaskTerminated { .. } => {
-            // Only task_id needed.
+            // Attempt scope is optional: a task can terminate from Created.
+            if let Some(last) = new.attempts().last() {
+                correlation.attempt_id = Some(last.attempt_id().get());
+                correlation.run_id = Some(last.run_id().as_str().to_owned());
+            }
         }
-        AuditEventV1::TaskCreated | AuditEventV1::AuthorityDenied { .. } => {
-            // Only task_id needed.
+        AuditEventV1::TaskCreated => {
+            // Only task_id applies.
+        }
+        AuditEventV1::AuthorityDenied { .. } => {
+            // Standalone: built by `authority_denied_envelope`, never derived
+            // from a snapshot pair.
+            return Err(AuditContractError::TransitionMismatch {
+                task_id: task_id.as_str().to_owned(),
+                old_status: old_status.as_ref().map(|s| format!("{s:?}")),
+                new_status: format!("{new_status:?}"),
+            });
         }
     }
 
@@ -861,7 +1059,10 @@ fn derive_event(
             let last = new
                 .attempts()
                 .last()
-                .expect("Running task must have at least one attempt");
+                .ok_or(AuditContractError::MissingTransitionField {
+                    kind: AuditEventKindV1::AttemptStarted,
+                    field: "attempt".to_owned(),
+                })?;
             Ok(AuditEventV1::AttemptStarted {
                 attempt_id: last.attempt_id().get(),
                 run_id: last.run_id().as_str().to_owned(),
@@ -903,72 +1104,65 @@ fn derive_event(
 
         // ArtifactPromoted: Running → ReadyForReview
         (Some(TaskStatus::Running), TaskStatus::ReadyForReview) => {
-            let meta = new
-                .artifact_metadata()
-                .expect("ReadyForReview must have artifact metadata");
-            let artifact_ref = make_artifact_ref(meta);
+            let meta =
+                new.artifact_metadata()
+                    .ok_or(AuditContractError::MissingTransitionField {
+                        kind: AuditEventKindV1::ArtifactPromoted,
+                        field: "artifact_metadata".to_owned(),
+                    })?;
             Ok(AuditEventV1::ArtifactPromoted {
-                artifact: artifact_ref,
+                artifact: make_artifact_ref(meta)?,
             })
         }
 
         // ReviewApplyStarted: ReadyForReview → Applying
         (Some(TaskStatus::ReadyForReview), TaskStatus::Applying) => {
-            let meta = new
-                .artifact_metadata()
-                .expect("Applying must have artifact metadata");
-            let artifact_ref = make_artifact_ref(meta);
+            let meta =
+                new.artifact_metadata()
+                    .ok_or(AuditContractError::MissingTransitionField {
+                        kind: AuditEventKindV1::ReviewApplyStarted,
+                        field: "artifact_metadata".to_owned(),
+                    })?;
             Ok(AuditEventV1::ReviewApplyStarted {
-                artifact: artifact_ref,
+                artifact: make_artifact_ref(meta)?,
             })
         }
 
         // ReviewDecisionCommitted::Applied: Applying → Completed
         (Some(TaskStatus::Applying), TaskStatus::Completed) => {
-            let receipt = new
-                .review_receipt()
-                .expect("Completed must have review receipt");
-            let rd = ReviewDecisionAuditV1 {
-                artifact_id: receipt.artifact_id.as_str().to_owned(),
-                artifact_revision: receipt.artifact_revision.get(),
-                proposal_id: receipt.proposal_id.clone(),
-                applied_candidate_ids: receipt.applied_candidates.clone(),
-                rejected_candidate_ids: receipt.rejected_candidates.clone(),
-                decided_at_unix_ms: receipt.decided_at_unix_ms,
-            };
-            let doc_state = receipt.resulting_document_state_id.map(|sid| {
-                let digest = receipt
-                    .resulting_document_digest
-                    .map(|d| hex_encode(&d))
-                    .unwrap_or_default();
-                DocumentStateReceipt {
-                    state_id: sid,
-                    digest,
-                }
-            });
+            let receipt =
+                new.review_receipt()
+                    .ok_or(AuditContractError::MissingTransitionField {
+                        kind: AuditEventKindV1::ReviewDecisionCommitted,
+                        field: "review_receipt".to_owned(),
+                    })?;
+            // The receipt is recorded exactly as accepted by
+            // `complete_apply`: a missing document digest stays missing.
+            let doc_state =
+                receipt
+                    .resulting_document_state_id
+                    .map(|state_id| DocumentStateReceipt {
+                        state_id,
+                        digest: receipt.resulting_document_digest.map(|d| hex_encode(&d)),
+                    });
             Ok(AuditEventV1::ReviewDecisionCommitted {
                 applied: true,
-                review_decision: rd,
+                review_decision: review_decision_ref(receipt),
                 document_state: doc_state,
             })
         }
 
         // ReviewDecisionCommitted::Rejected: ReadyForReview → Rejected
         (Some(TaskStatus::ReadyForReview), TaskStatus::Rejected) => {
-            let receipt = new
-                .review_receipt()
-                .expect("Rejected must have review receipt");
-            let rd = ReviewDecisionAuditV1 {
-                artifact_id: receipt.artifact_id.as_str().to_owned(),
-                artifact_revision: receipt.artifact_revision.get(),
-                proposal_id: receipt.proposal_id.clone(),
-                applied_candidate_ids: receipt.applied_candidates.clone(),
-                rejected_candidate_ids: receipt.rejected_candidates.clone(),
-                decided_at_unix_ms: receipt.decided_at_unix_ms,
-            };
+            let receipt =
+                new.review_receipt()
+                    .ok_or(AuditContractError::MissingTransitionField {
+                        kind: AuditEventKindV1::ReviewDecisionCommitted,
+                        field: "review_receipt".to_owned(),
+                    })?;
             Ok(AuditEventV1::ReviewDecisionCommitted {
                 applied: false,
-                review_decision: rd,
+                review_decision: review_decision_ref(receipt),
                 document_state: None,
             })
         }
@@ -1014,9 +1208,15 @@ fn derive_event(
     }
 }
 
-fn make_artifact_ref(meta: &crate::product_task::ProductArtifactMetadata) -> ArtifactAuditRefV1 {
-    let source_binding_sha256 = canonical_v1_digest(meta.source_binding()).unwrap_or_default();
-    ArtifactAuditRefV1 {
+fn make_artifact_ref(
+    meta: &crate::product_task::ProductArtifactMetadata,
+) -> Result<ArtifactAuditRefV1, AuditContractError> {
+    let source_binding_sha256 = canonical_v1_digest(meta.source_binding()).map_err(|_| {
+        AuditContractError::DigestUnavailable {
+            field: "source_binding_sha256".to_owned(),
+        }
+    })?;
+    Ok(ArtifactAuditRefV1 {
         artifact_id: meta.artifact_id().as_str().to_owned(),
         artifact_revision: meta.artifact_revision().get(),
         kind: meta.kind(),
@@ -1027,7 +1227,7 @@ fn make_artifact_ref(meta: &crate::product_task::ProductArtifactMetadata) -> Art
         provider_id: meta.provider_id().to_owned(),
         model_id: meta.model_id().to_owned(),
         run_config_digest: meta.run_config_digest().to_owned(),
-    }
+    })
 }
 
 // ========================================================================
@@ -1439,7 +1639,7 @@ mod tests {
         #[test]
         fn receipt_contains_no_payload_bytes() {
             let created = created_task_fixture();
-            let receipt = created.audit_transition_receipt();
+            let receipt = created.audit_transition_receipt().unwrap();
             assert_eq!(receipt.task_id, "task-00000000-0000-4000-8000-000000000001");
             assert_eq!(receipt.status, AuditTaskStatusV1::Created);
             assert_eq!(receipt.snapshot_revision, 0);
@@ -1460,7 +1660,7 @@ mod tests {
             let ready = running
                 .record_ready_for_review(meta, payload_fixture(), None, 30)
                 .unwrap();
-            let receipt = ready.audit_transition_receipt();
+            let receipt = ready.audit_transition_receipt().unwrap();
             assert_eq!(receipt.status, AuditTaskStatusV1::ReadyForReview);
             assert!(receipt.artifact.is_some());
             let art = receipt.artifact.as_ref().unwrap();
@@ -1975,6 +2175,197 @@ mod tests {
     }
 
     // ==================================================================
+    // Per-variant correlation contract
+    // ==================================================================
+
+    mod correlation_contract {
+        use super::*;
+
+        fn denial_authority() -> AuthoritySnapshot {
+            authority_snapshot_fixture()
+        }
+
+        #[test]
+        fn authority_denied_envelope_binds_task_attempt_run_and_authority() {
+            let authority = denial_authority();
+            let envelope = authority_denied_envelope(
+                &authority,
+                "replace_source",
+                "WriteDraft",
+                audit_id(1),
+                100,
+            )
+            .unwrap();
+            let correlation = envelope.correlation();
+            assert_eq!(correlation.task_id(), authority.task_id().as_str());
+            assert_eq!(correlation.attempt_id(), Some(authority.attempt_id()));
+            assert_eq!(correlation.run_id_str(), Some(authority.run_id().as_str()));
+            let bound = correlation.authority().expect("authority correlation");
+            assert_eq!(bound.snapshot_digest, authority.digest());
+        }
+
+        #[test]
+        fn attempt_scoped_event_without_attempt_correlation_is_rejected() {
+            let authority = denial_authority();
+            let event = AuditEventV1::AuthorityDenied {
+                authority: authority.audit_ref(),
+                tool_name: "replace_source".to_owned(),
+                required_operation: "WriteDraft".to_owned(),
+            };
+            let correlation = AuditCorrelationV1::for_task(task_id_fixture().as_str().to_owned());
+            assert!(matches!(
+                AuditEnvelopeV1::new(audit_id(2), 100, event, correlation),
+                Err(AuditContractError::CorrelationMismatch { .. })
+            ));
+        }
+
+        #[test]
+        fn cross_task_authority_correlation_is_rejected() {
+            let authority = denial_authority();
+            let audit_ref = authority.audit_ref();
+            let event = AuditEventV1::AuthorityDenied {
+                authority: audit_ref.clone(),
+                tool_name: "replace_source".to_owned(),
+                required_operation: "WriteDraft".to_owned(),
+            };
+            let correlation = AuditCorrelationV1 {
+                task_id: "task-99999999-9999-4999-8999-999999999999".to_owned(),
+                attempt_id: Some(audit_ref.attempt_id),
+                run_id: Some(audit_ref.run_id.clone()),
+                authority: Some(audit_ref),
+                skill_use: None,
+                artifact: None,
+                proposal_id: None,
+                review_decision: None,
+                document_state: None,
+            };
+            assert!(matches!(
+                AuditEnvelopeV1::new(audit_id(3), 100, event, correlation),
+                Err(AuditContractError::CorrelationMismatch { .. })
+            ));
+        }
+
+        #[test]
+        fn contradicting_attempt_correlation_is_rejected() {
+            let event = AuditEventV1::AttemptStarted {
+                attempt_id: 1,
+                run_id: run_id().as_str().to_owned(),
+            };
+            let correlation = AuditCorrelationV1 {
+                task_id: task_id_fixture().as_str().to_owned(),
+                attempt_id: Some(2),
+                run_id: Some(run_id().as_str().to_owned()),
+                authority: None,
+                skill_use: None,
+                artifact: None,
+                proposal_id: None,
+                review_decision: None,
+                document_state: None,
+            };
+            assert!(matches!(
+                AuditEnvelopeV1::new(audit_id(4), 100, event, correlation),
+                Err(AuditContractError::CorrelationMismatch { .. })
+            ));
+        }
+
+        #[test]
+        fn task_created_with_attempt_correlation_is_rejected() {
+            let correlation = AuditCorrelationV1 {
+                task_id: task_id_fixture().as_str().to_owned(),
+                attempt_id: Some(1),
+                run_id: Some(run_id().as_str().to_owned()),
+                authority: None,
+                skill_use: None,
+                artifact: None,
+                proposal_id: None,
+                review_decision: None,
+                document_state: None,
+            };
+            assert!(matches!(
+                AuditEnvelopeV1::new(audit_id(5), 100, AuditEventV1::TaskCreated, correlation),
+                Err(AuditContractError::CorrelationMismatch { .. })
+            ));
+        }
+
+        #[test]
+        fn rejected_review_with_document_receipt_is_rejected() {
+            let review_decision = ReviewDecisionAuditV1 {
+                artifact_id: "artifact-00000000-0000-4000-8000-000000000001".to_owned(),
+                artifact_revision: 1,
+                proposal_id: "proposal-00000000-0000-4000-8000-000000000001".to_owned(),
+                applied_candidate_ids: vec![],
+                rejected_candidate_ids: vec![0],
+                decided_at_unix_ms: 40,
+            };
+            let document_state = Some(DocumentStateReceipt {
+                state_id: 3,
+                digest: None,
+            });
+            let event = AuditEventV1::ReviewDecisionCommitted {
+                applied: false,
+                review_decision: review_decision.clone(),
+                document_state: document_state.clone(),
+            };
+            let correlation = AuditCorrelationV1 {
+                task_id: task_id_fixture().as_str().to_owned(),
+                attempt_id: Some(1),
+                run_id: Some(run_id().as_str().to_owned()),
+                authority: None,
+                skill_use: None,
+                artifact: None,
+                proposal_id: None,
+                review_decision: Some(review_decision),
+                document_state,
+            };
+            assert!(matches!(
+                AuditEnvelopeV1::new(audit_id(6), 100, event, correlation),
+                Err(AuditContractError::CorrelationMismatch { .. })
+            ));
+        }
+
+        #[test]
+        fn authority_denied_is_never_derived_from_a_snapshot_pair() {
+            // A standalone event must not be reachable through the
+            // transition deriver.
+            let created = created_task_fixture();
+            let running = created
+                .start_attempt(TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20), 20)
+                .unwrap();
+            let envelope =
+                derive_material_transition(Some(&created), &running, audit_id(7), 20).unwrap();
+            assert!(matches!(
+                envelope.event(),
+                AuditEventV1::AttemptStarted { .. }
+            ));
+        }
+
+        #[test]
+        fn applied_review_without_document_digest_keeps_digest_absent() {
+            let running = created_task_fixture()
+                .start_attempt(TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20), 20)
+                .unwrap();
+            let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
+            let ready = running
+                .record_ready_for_review(meta, payload_fixture(), None, 30)
+                .unwrap();
+            let applying = ready.begin_apply(35).unwrap();
+            let mut receipt = apply_receipt_fixture();
+            receipt.resulting_document_digest = None;
+            let completed = applying.complete_apply(receipt, 50).unwrap();
+            let envelope =
+                derive_material_transition(Some(&applying), &completed, audit_id(8), 50).unwrap();
+            match envelope.event() {
+                AuditEventV1::ReviewDecisionCommitted { document_state, .. } => {
+                    let ds = document_state.as_ref().expect("state id is available");
+                    assert_eq!(ds.state_id, 1);
+                    assert!(ds.digest.is_none(), "absent digest must stay absent");
+                }
+                other => panic!("expected ReviewDecisionCommitted, got {other:?}"),
+            }
+        }
+    }
+
+    // ==================================================================
     // Privacy sentinels: every AuditEventV1 variant
     // ==================================================================
 
@@ -2113,7 +2504,7 @@ mod tests {
                 review_decision: review_decision_fixture(),
                 document_state: Some(DocumentStateReceipt {
                     state_id: 1,
-                    digest: "dd".repeat(32),
+                    digest: Some("dd".repeat(32)),
                 }),
             };
             assert_no_forbidden_leaks(&event, "ReviewDecisionCommitted");
@@ -2132,11 +2523,22 @@ mod tests {
 
         #[test]
         fn envelope_serialized_event_excludes_sensitive_fields() {
+            let authority = auth_ref();
             let event = AuditEventV1::RunContractBound {
-                authority: auth_ref(),
+                authority: authority.clone(),
                 skill_use: skill_ref(),
             };
-            let correlation = AuditCorrelationV1::for_task(task_id_fixture().as_str().to_owned());
+            let correlation = AuditCorrelationV1 {
+                task_id: task_id_fixture().as_str().to_owned(),
+                attempt_id: Some(authority.attempt_id),
+                run_id: Some(authority.run_id.clone()),
+                authority: Some(authority),
+                skill_use: Some(skill_ref()),
+                artifact: None,
+                proposal_id: None,
+                review_decision: None,
+                document_state: None,
+            };
             let envelope = AuditEnvelopeV1::new(audit_id(99), 9999, event, correlation).unwrap();
             let json = serde_json::to_string(&envelope).unwrap();
             for pat in FORBIDDEN {
@@ -2168,7 +2570,7 @@ mod tests {
                 10,
             )
             .unwrap();
-            let _receipt = task.audit_transition_receipt();
+            let _receipt = task.audit_transition_receipt().unwrap();
             let correlation = AuditCorrelationV1::for_task(task_id_fixture().as_str().to_owned());
             let envelope =
                 AuditEnvelopeV1::new(audit_id(1), 10, AuditEventV1::TaskCreated, correlation)

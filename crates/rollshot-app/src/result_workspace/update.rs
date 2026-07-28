@@ -1661,8 +1661,21 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 if let Ok(cfg) = super::workbench::load_provider_config(&config_dir) {
                     wb.provider_config = cfg;
                 }
-                if let Ok(store) = super::workbench::task_store::TaskStore::open(&config_dir) {
-                    wb.task_store = Some(std::sync::Arc::new(store));
+                match super::workbench::task_store::TaskStore::open(&config_dir) {
+                    Ok(store) => wb.task_store = Some(std::sync::Arc::new(store)),
+                    Err(e) => {
+                        // Without a store there is no durable task state and
+                        // no audit journal. Say so instead of silently
+                        // running unpersisted and unaudited.
+                        tracing::error!(
+                            target: "rollshot::app::agent_audit_store",
+                            error = %e,
+                            "task store unavailable: run will not be persisted or audited"
+                        );
+                        wb.error = Some(super::workbench::WorkbenchError::StorePersist {
+                            message: format!("task store unavailable: {e}"),
+                        });
+                    }
                 }
             }
 
@@ -8460,33 +8473,5 @@ mod tests {
             state.message.as_ref().map(|message| message.text()),
             Some(super::super::secure_sharing::DESTINATION_VERIFICATION_ERROR)
         );
-    }
-
-    // ==================================================================
-    // Dropped display events: transient UI messages are independent from
-    // durable audit journal.
-    // ==================================================================
-
-    #[test]
-    fn dropped_display_events_message_dispatch_does_not_require_audit_journal() {
-        // The update function handles UI messages (display events) without
-        // requiring any audit journal. Proves that transient event delivery
-        // is orthogonal to durable audit.
-        let mut state = workspace();
-        let _ = update(&mut state, Message::SetZoom(ZoomMode::FitWindow));
-        // Workspace state is updated (zoom changed), no audit dependency.
-        assert_eq!(state.viewport.zoom, ZoomMode::FitWindow);
-    }
-
-    #[test]
-    fn dropped_display_events_dropped_task_does_not_corrupt_workspace_state() {
-        // When an iced Task is dropped (display event delivery abandoned),
-        // the workspace state remains consistent.
-        let mut state = workspace();
-        let before_state_id = state.document.image.state_id();
-        let task = update(&mut state, Message::SetZoom(ZoomMode::FitWindow));
-        drop(task);
-        // Workspace state is unaffected by the dropped task.
-        assert_eq!(state.document.image.state_id(), before_state_id);
     }
 }

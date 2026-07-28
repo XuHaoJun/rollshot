@@ -66,7 +66,19 @@ pub(crate) fn classify_unresolved(
 
             if receipt.snapshot_revision == prepared.replacement_revision {
                 // The exact replacement is now authoritative: the task
-                // mutation was committed. Commit the audit record.
+                // mutation was committed. The prepared transition receipt
+                // must match it field for field — a matching revision alone
+                // does not prove this transaction produced the state on
+                // disk (spec §9.4).
+                if *receipt != prepared.replacement_receipt {
+                    return Err(AuditStoreError::ReconciliationRequired {
+                        task_id: task_id.to_owned(),
+                        reason: format!(
+                            "transition receipt mismatch at revision {}",
+                            receipt.snapshot_revision
+                        ),
+                    });
+                }
                 Ok(ReconcileDecision::Commit)
             } else if receipt.snapshot_revision == prepared.expected_revision {
                 // The expected revision is still authoritative: the task

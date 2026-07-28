@@ -146,7 +146,7 @@ impl JournalRecordV1 {
         sequence: u64,
         previous_record_sha256: Option<String>,
         payload: JournalPayloadV1,
-    ) -> Result<Self, RecordBuildError> {
+    ) -> Self {
         let hash = Self::compute_hash(
             task_id.as_str(),
             sequence,
@@ -154,14 +154,14 @@ impl JournalRecordV1 {
             &payload,
         );
 
-        Ok(Self {
+        Self {
             schema_version: JOURNAL_SCHEMA_VERSION_V1,
             task_id,
             sequence,
             previous_record_sha256,
             payload,
             record_sha256: hash,
-        })
+        }
     }
 
     /// Verify this record's hash against its canonical fields.
@@ -231,13 +231,6 @@ impl JournalRecordV1 {
 // Errors
 // ============================================================================
 
-/// Error building a journal record.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum RecordBuildError {
-    #[error("payload serialization failed: {reason}")]
-    PayloadSerialization { reason: String },
-}
-
 /// Hash mismatch during chain verification.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("hash mismatch: expected={expected}, actual={actual}")]
@@ -296,14 +289,13 @@ mod tests {
     }
 
     fn two_record_journal() -> Vec<JournalRecordV1> {
-        let first = JournalRecordV1::build(task_id(), 0, None, aborted_payload_fixture()).unwrap();
+        let first = JournalRecordV1::build(task_id(), 0, None, aborted_payload_fixture());
         let second = JournalRecordV1::build(
             task_id(),
             1,
             Some(first.record_sha256.clone()),
             committed_payload_fixture(),
-        )
-        .unwrap();
+        );
         vec![first, second]
     }
 
@@ -399,7 +391,7 @@ mod tests {
 
     #[test]
     fn first_record_has_sequence_zero_no_previous_hash_and_stable_digest() {
-        let record = JournalRecordV1::build(task_id(), 0, None, aborted_payload_fixture()).unwrap();
+        let record = JournalRecordV1::build(task_id(), 0, None, aborted_payload_fixture());
         assert_eq!(record.sequence, 0);
         assert_eq!(record.previous_record_sha256, None);
         // The expected hash is computed from the canonical format.
@@ -412,14 +404,13 @@ mod tests {
 
     #[test]
     fn second_record_binds_previous_hash() {
-        let first = JournalRecordV1::build(task_id(), 0, None, aborted_payload_fixture()).unwrap();
+        let first = JournalRecordV1::build(task_id(), 0, None, aborted_payload_fixture());
         let second = JournalRecordV1::build(
             task_id(),
             1,
             Some(first.record_sha256.clone()),
             committed_payload_fixture(),
-        )
-        .unwrap();
+        );
         assert_eq!(
             second.previous_record_sha256.as_deref(),
             Some(first.record_sha256.as_str())

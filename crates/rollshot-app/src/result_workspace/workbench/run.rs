@@ -4049,12 +4049,11 @@ mod reducer_tests {
 
     #[test]
     #[allow(clippy::permissions_set_readonly_false)]
-    fn audit_prepare_failure_prevents_model_dispatch() {
+    fn audit_create_failure_commits_no_audit_event() {
         // When create_audited fails (e.g. I/O error), the audit
-        // transaction is aborted and no committed events exist.
-        // This proves that a prepare failure prevents model dispatch:
-        // no AttemptStarted, no RunContractBound, no ArtifactPromoted
-        // audit events could have been committed.
+        // transaction is aborted and no committed event exists. The run
+        // launch path returns before dispatch on this error, so no
+        // AttemptStarted evidence can follow it.
         use super::super::task_store::TaskStore;
         use rollshot_agent::audit::AuditEventV1;
         use rollshot_agent::product_task::ProductTaskSnapshot;
@@ -5510,62 +5509,397 @@ mod reducer_tests {
 
 #[cfg(test)]
 mod dropped_display_events {
-    use rollshot_agent::runtime::{RunEvent, SourceDiffSummary};
+    //! Spec §10.5 / gate 8: with every transient `RunEvent` dropped, the
+    //! product must still repair visible state from the authoritative task
+    //! snapshot — never from audit history.
 
-    /// Proves that RunEvent variants carry no audit authority:
-    /// they contain only display-transient data (text chunks,
-    /// tool call names, source diff summaries) that is never
-    /// persisted to the audit journal.
-    #[test]
-    fn run_event_serialization_excludes_audit_fields() {
-        let events = vec![
-            RunEvent::TextChunk {
-                text: "assistant prose".to_owned(),
-            },
-            RunEvent::ToolCallStart {
-                name: "replace_source".to_owned(),
-            },
-            RunEvent::ToolCallEnd {
-                name: "replace_source".to_owned(),
-                success: true,
-            },
-            RunEvent::SourceChanged {
-                tool: "replace_source".to_owned(),
-                diff: SourceDiffSummary {
-                    old_generation: 0,
-                    new_generation: 1,
-                    old_source_bytes: 0,
-                    new_source_bytes: 10,
-                    omitted_lines: 0,
-                    lines: vec![],
-                },
-            },
-            RunEvent::TurnComplete,
-        ];
+    use super::super::task_store::TaskStore;
+    use rollshot_agent::audit::AuditEventId;
+    use rollshot_agent::continuity::{ContinuityProjectionV1, ReviewContinuityStateV1};
+    use rollshot_agent::product_task::{
+        ArtifactId, ArtifactKind, ArtifactRevision, PayloadConfigV1, PayloadDryRunV1, PayloadMode,
+        PayloadProposalV1, PayloadSourceV1, ProductArtifactMetadata, ProductTaskId,
+        ProductTaskSnapshot, ReviewReceipt, SmartRedactionReviewPayload, SourceBinding,
+        TaskAttempt, TaskAttemptId, TaskKind, TaskStatus, TaskTerminal,
+    };
+    use rollshot_agent::runtime::{NullEventSink, RunEvent, RunEventSink};
 
-        for event in &events {
-            let json = serde_json::to_string(event).unwrap();
-            // RunEvent must never carry audit-envelope fields.
-            assert!(!json.contains("event_payload_digest"));
-            assert!(!json.contains("event_id"));
-            assert!(!json.contains("AuditEnvelope"));
-            // RunEvent must never carry sensitive audit fields.
-            assert!(!json.contains("api_key"));
-            assert!(!json.contains("secret"));
-            assert!(!json.contains("proposal_payload"));
+    const BASE_MS: i64 = 1_000_000;
+
+    fn task_id(n: u64) -> ProductTaskId {
+        ProductTaskId::parse(format!("task-00000000-0000-4000-8000-{n:012x}")).unwrap()
+    }
+
+    fn run_id(n: u64) -> rollshot_agent::domain::RunId {
+        rollshot_agent::domain::RunId::parse(format!("run-00000000-0000-4000-8000-{n:012x}"))
+            .unwrap()
+    }
+
+    fn binding() -> SourceBinding {
+        SourceBinding::new([7u8; 32], [8u8; 32], 0, "preset-repair".into(), None)
+    }
+
+    fn payload() -> SmartRedactionReviewPayload {
+        SmartRedactionReviewPayload {
+            source: PayloadSourceV1 {
+                kind: "agent_run".into(),
+                validation_summary: "0 nodes".into(),
+            },
+            proposal: PayloadProposalV1 {
+                proposal_id: "proposal-repair".into(),
+                candidate_count: 2,
+            },
+            dry_run: PayloadDryRunV1 {
+                candidate_count: 2,
+                affected_area: 0.1,
+            },
+            config: PayloadConfigV1 {
+                provider: String::new(),
+                model: String::new(),
+                payload_mode: PayloadMode::Author,
+                run_kind: "smart_redaction".into(),
+                budget_dimensions: std::collections::BTreeMap::new(),
+            },
         }
     }
 
-    /// Channel drop: when the receiving end of a RunEvent channel
-    /// is dropped, the sender side does not block the workbench.
+    fn metadata(task: &ProductTaskSnapshot, n: u64, now: i64) -> ProductArtifactMetadata {
+        let attempt = task.attempts().last().unwrap();
+        ProductArtifactMetadata::new(
+            ArtifactId::parse(format!("artifact-00000000-0000-4000-8000-{n:012x}")).unwrap(),
+            ArtifactRevision::new(1),
+            ArtifactKind::SmartRedaction,
+            1,
+            "aa".repeat(32),
+            binding(),
+            task.task_id().clone(),
+            attempt.attempt_id(),
+            attempt.run_id().clone(),
+            "proposal-repair".into(),
+            "anthropic".into(),
+            "claude-sonnet-4-6".into(),
+            "bb".repeat(32),
+            2,
+            0.1,
+            now,
+        )
+    }
+
+    /// Every transient event is emitted into a sink that discards them, so
+    /// no display state can come from the event stream.
+    fn drop_all_events() {
+        let sink = NullEventSink;
+        sink.emit(RunEvent::TextChunk {
+            text: "assistant prose".into(),
+        });
+        sink.emit(RunEvent::ToolCallStart {
+            name: "replace_source".into(),
+        });
+        sink.emit(RunEvent::ToolCallEnd {
+            name: "replace_source".into(),
+            success: true,
+        });
+        sink.emit(RunEvent::TurnComplete);
+    }
+
+    /// Drive a task to `ReadyForReview` entirely through audited transitions.
+    fn ready_task(store: &TaskStore, n: u64) -> ProductTaskSnapshot {
+        let created = ProductTaskSnapshot::new(
+            task_id(n),
+            TaskKind::SmartRedactionAuthor,
+            binding(),
+            BASE_MS,
+        )
+        .unwrap();
+        store
+            .create_audited(&created, AuditEventId::new_v4(), BASE_MS)
+            .unwrap();
+        let running = created
+            .start_attempt(
+                TaskAttempt::new(TaskAttemptId::new(1), run_id(n), BASE_MS),
+                BASE_MS,
+            )
+            .unwrap();
+        store
+            .transition_audited(&created, &running, AuditEventId::new_v4(), BASE_MS)
+            .unwrap();
+        let ready = running
+            .record_ready_for_review(
+                metadata(&running, n, BASE_MS + 1),
+                payload(),
+                None,
+                BASE_MS + 1,
+            )
+            .unwrap();
+        store
+            .transition_audited(&running, &ready, AuditEventId::new_v4(), BASE_MS + 1)
+            .unwrap();
+        ready
+    }
+
     #[test]
-    fn channel_drop_does_not_block_workbench() {
-        let (tx, rx) = std::sync::mpsc::channel::<RunEvent>();
-        // Drop the receiver — simulates a dropped display event sink.
-        drop(rx);
-        // Sender returns Err — the workbench can detect this and
-        // continue without blocking audit operations.
-        let result = tx.send(RunEvent::TurnComplete);
-        assert!(result.is_err(), "dropped receiver must cause send error");
+    fn ready_for_review_artifact_restores_without_any_display_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+        let ready = ready_task(&store, 0x50);
+        drop_all_events();
+
+        // Fresh process: nothing but the authoritative snapshot survives.
+        drop(store);
+        let store2 = TaskStore::open(tmp.path()).unwrap();
+        let restored = store2
+            .reconcile_for_source(&binding(), BASE_MS + 2)
+            .unwrap()
+            .expect("ready-for-review task restores from the task store");
+
+        assert_eq!(restored.status(), TaskStatus::ReadyForReview);
+        assert_eq!(
+            restored.artifact_metadata().unwrap().artifact_revision(),
+            ready.artifact_metadata().unwrap().artifact_revision()
+        );
+        assert!(
+            restored.pending_artifact_payload().is_some(),
+            "review payload restores from the snapshot, not from audit history"
+        );
+        assert_eq!(
+            ContinuityProjectionV1::try_from(&restored)
+                .unwrap()
+                .review_state(),
+            ReviewContinuityStateV1::PendingExactRevision
+        );
+    }
+
+    #[test]
+    fn completed_rejected_stale_and_interrupted_restore_without_display_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+
+        // Completed: ReadyForReview → Applying → Completed.
+        let ready = ready_task(&store, 0x51);
+        let applying = ready.begin_apply(BASE_MS + 2).unwrap();
+        store
+            .transition_audited(&ready, &applying, AuditEventId::new_v4(), BASE_MS + 2)
+            .unwrap();
+        let receipt = ReviewReceipt {
+            artifact_id: ready.artifact_metadata().unwrap().artifact_id().clone(),
+            artifact_revision: ready.artifact_metadata().unwrap().artifact_revision(),
+            proposal_id: "proposal-repair".into(),
+            applied_candidates: vec![0, 1],
+            rejected_candidates: vec![],
+            local_delta: rollshot_agent::product_task::LocalReviewDeltaV1 {
+                moved_candidates: vec![],
+                manual_additions: vec![],
+            },
+            resulting_document_state_id: Some(4),
+            resulting_document_digest: None,
+            decided_at_unix_ms: BASE_MS + 3,
+        };
+        let completed = applying.complete_apply(receipt, BASE_MS + 3).unwrap();
+        store
+            .transition_audited(&applying, &completed, AuditEventId::new_v4(), BASE_MS + 3)
+            .unwrap();
+
+        // Rejected.
+        let ready_reject = ready_task(&store, 0x52);
+        let reject_receipt = ReviewReceipt {
+            artifact_id: ready_reject
+                .artifact_metadata()
+                .unwrap()
+                .artifact_id()
+                .clone(),
+            artifact_revision: ready_reject
+                .artifact_metadata()
+                .unwrap()
+                .artifact_revision(),
+            proposal_id: "proposal-repair".into(),
+            applied_candidates: vec![],
+            rejected_candidates: vec![0, 1],
+            local_delta: rollshot_agent::product_task::LocalReviewDeltaV1 {
+                moved_candidates: vec![],
+                manual_additions: vec![],
+            },
+            resulting_document_state_id: None,
+            resulting_document_digest: None,
+            decided_at_unix_ms: BASE_MS + 2,
+        };
+        let rejected = ready_reject.reject(reject_receipt, BASE_MS + 2).unwrap();
+        store
+            .transition_audited(
+                &ready_reject,
+                &rejected,
+                AuditEventId::new_v4(),
+                BASE_MS + 2,
+            )
+            .unwrap();
+
+        // Stale.
+        let ready_stale = ready_task(&store, 0x53);
+        let stale = ready_stale.mark_stale(BASE_MS + 2).unwrap();
+        store
+            .transition_audited(&ready_stale, &stale, AuditEventId::new_v4(), BASE_MS + 2)
+            .unwrap();
+
+        // Interrupted: a Running task abandoned by a crashed session.
+        let created = ProductTaskSnapshot::new(
+            task_id(0x54),
+            TaskKind::SmartRedactionAuthor,
+            binding(),
+            BASE_MS,
+        )
+        .unwrap();
+        store
+            .create_audited(&created, AuditEventId::new_v4(), BASE_MS)
+            .unwrap();
+        let running = created
+            .start_attempt(
+                TaskAttempt::new(TaskAttemptId::new(1), run_id(0x54), BASE_MS),
+                BASE_MS,
+            )
+            .unwrap();
+        store
+            .transition_audited(&created, &running, AuditEventId::new_v4(), BASE_MS)
+            .unwrap();
+
+        drop_all_events();
+        drop(store);
+
+        // Fresh process: reconciliation repairs the interrupted run and
+        // leaves every settled terminal untouched.
+        let store2 = TaskStore::open(tmp.path()).unwrap();
+        let restored = store2
+            .reconcile_for_source(&binding(), BASE_MS + 10)
+            .unwrap();
+        assert!(
+            restored.is_none(),
+            "no settled task may be offered for review"
+        );
+
+        assert_eq!(
+            store2.load(&task_id(0x51)).unwrap().status(),
+            TaskStatus::Completed
+        );
+        assert_eq!(
+            store2.load(&task_id(0x52)).unwrap().status(),
+            TaskStatus::Rejected
+        );
+        assert_eq!(
+            store2.load(&task_id(0x53)).unwrap().status(),
+            TaskStatus::Stale
+        );
+        assert_eq!(
+            store2.load(&task_id(0x54)).unwrap().status(),
+            TaskStatus::Interrupted
+        );
+    }
+
+    #[test]
+    fn terminal_display_state_comes_from_the_task_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+        let created = ProductTaskSnapshot::new(
+            task_id(0x55),
+            TaskKind::SmartRedactionAuthor,
+            binding(),
+            BASE_MS,
+        )
+        .unwrap();
+        store
+            .create_audited(&created, AuditEventId::new_v4(), BASE_MS)
+            .unwrap();
+        let running = created
+            .start_attempt(
+                TaskAttempt::new(TaskAttemptId::new(1), run_id(0x55), BASE_MS),
+                BASE_MS,
+            )
+            .unwrap();
+        store
+            .transition_audited(&created, &running, AuditEventId::new_v4(), BASE_MS)
+            .unwrap();
+        let failed = running
+            .record_terminal(TaskTerminal::ProviderFailure, BASE_MS + 1)
+            .unwrap();
+        store
+            .transition_audited(&running, &failed, AuditEventId::new_v4(), BASE_MS + 1)
+            .unwrap();
+
+        drop_all_events();
+        drop(store);
+
+        // The user-visible failure reason is recoverable from the snapshot
+        // alone, with no terminal RunEvent delivered.
+        let store2 = TaskStore::open(tmp.path()).unwrap();
+        match store2.load(&task_id(0x55)).unwrap().status() {
+            TaskStatus::Failed { terminal } => {
+                assert_eq!(terminal, TaskTerminal::ProviderFailure);
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn corrupt_audit_journal_blocks_transitions_and_never_becomes_product_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+        let ready = ready_task(&store, 0x56);
+
+        // Corrupt an interior journal line.
+        let journal_path = tmp
+            .path()
+            .join("agent-tasks")
+            .join("audit")
+            .join(format!("{}.jsonl", task_id(0x56).as_str()));
+        let contents = std::fs::read_to_string(&journal_path).unwrap();
+        let mut lines: Vec<&str> = contents.lines().collect();
+        lines[1] = "{\"schema_version\":1}";
+        std::fs::write(&journal_path, format!("{}\n", lines.join("\n"))).unwrap();
+
+        // Further audited transitions fail closed.
+        let stale = ready.mark_stale(BASE_MS + 4).unwrap();
+        let result = store.transition_audited(&ready, &stale, AuditEventId::new_v4(), BASE_MS + 4);
+        assert!(
+            result.is_err(),
+            "a corrupt journal must block audited mutation"
+        );
+
+        // Product state is unchanged and still comes from the snapshot.
+        let loaded = store.load(&task_id(0x56)).unwrap();
+        assert_eq!(loaded.status(), TaskStatus::ReadyForReview);
+        assert_eq!(loaded, ready);
+
+        // A corrupt sidecar must not make the store — or any other task —
+        // unavailable on reopen.
+        drop(store);
+        let store2 = TaskStore::open(tmp.path()).unwrap();
+        assert_eq!(
+            store2.load(&task_id(0x56)).unwrap().status(),
+            TaskStatus::ReadyForReview
+        );
+    }
+
+    #[test]
+    fn one_corrupt_journal_does_not_block_other_tasks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+        let _corrupt_task = ready_task(&store, 0x57);
+        let healthy = ready_task(&store, 0x58);
+
+        let journal_path = tmp
+            .path()
+            .join("agent-tasks")
+            .join("audit")
+            .join(format!("{}.jsonl", task_id(0x57).as_str()));
+        std::fs::write(&journal_path, b"not a record\n").unwrap();
+        drop(store);
+
+        let store2 = TaskStore::open(tmp.path()).unwrap();
+        // The healthy task still accepts audited transitions.
+        let stale = healthy.mark_stale(BASE_MS + 5).unwrap();
+        store2
+            .transition_audited(&healthy, &stale, AuditEventId::new_v4(), BASE_MS + 5)
+            .expect("healthy task must remain audited");
+        assert_eq!(
+            store2.load(&task_id(0x58)).unwrap().status(),
+            TaskStatus::Stale
+        );
     }
 }
