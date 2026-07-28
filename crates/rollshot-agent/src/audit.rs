@@ -200,6 +200,22 @@ pub struct AuditCorrelationV1 {
 }
 
 impl AuditCorrelationV1 {
+    /// Create a minimal correlation with only a task ID.
+    /// Other fields are populated per event variant.
+    pub fn for_task(task_id: String) -> Self {
+        Self {
+            task_id,
+            attempt_id: None,
+            run_id: None,
+            authority: None,
+            skill_use: None,
+            artifact: None,
+            proposal_id: None,
+            review_decision: None,
+            document_state: None,
+        }
+    }
+
     pub fn task_id(&self) -> &str {
         &self.task_id
     }

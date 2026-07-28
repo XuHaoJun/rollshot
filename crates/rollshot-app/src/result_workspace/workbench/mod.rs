@@ -6,6 +6,7 @@ pub mod run;
 pub mod state;
 pub mod task_store;
 pub mod view;
+pub mod audit_store;
 
 #[cfg(test)]
 pub(crate) mod eval;
