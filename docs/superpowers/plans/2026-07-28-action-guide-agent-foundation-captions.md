@@ -161,10 +161,52 @@ Run: `rtk cargo test -p rollshot-app --features action-guide caption_agent`
 Expected: PASS, including the pre-existing
 `runner_times_out_quickly_in_tests`.
 
+- [ ] **Step 5a: Pin the remaining unpinned protected string**
+
+**Added after Task 1's first review.** The Global Constraints list four
+user-visible strings that must survive the slice. Auditing them found that two
+are already pinned by pre-existing assertions in
+`crates/rollshot-app/src/timeline_workspace/update.rs` — `:4619`
+(`"Caption suggestions failed: ..."`) and `:4720`
+(`"Configure an agent provider before suggesting captions."`) — but
+`"Suggesting captions..."` at `update.rs:1262` is asserted nowhere. Task 16
+rewrites that handler, so nothing would catch a change to it.
+
+Pinning it through the handler would need a provider-config harness the existing
+tests do not have. Use the same shape as `TIMEOUT_MESSAGE` instead: extract the
+literal into a named constant beside it and assert the constant's value.
+
+In `crates/rollshot-app/src/timeline_workspace/caption_agent.rs`, next to
+`TIMEOUT_MESSAGE`:
+
+```rust
+/// User-visible copy shown while a caption run is in flight. Preserved verbatim
+/// across the RunBudget migration (plan Task 16), which rewrites the handler
+/// that sets it.
+pub(crate) const RUNNING_MESSAGE: &str = "Suggesting captions...";
+```
+
+Replace the literal at `crates/rollshot-app/src/timeline_workspace/update.rs:1262`
+with `super::caption_agent::RUNNING_MESSAGE.to_string()`.
+
+Add the assertion beside `timeout_copy_baseline`:
+
+```rust
+    #[test]
+    fn running_copy_baseline() {
+        assert_eq!(
+            super::RUNNING_MESSAGE,
+            "Suggesting captions...",
+            "user-visible in-flight copy must not change"
+        );
+    }
+```
+
 - [ ] **Step 6: Commit**
 
 ```bash
-rtk git add crates/rollshot-app/src/timeline_workspace/caption_agent.rs
+rtk git add crates/rollshot-app/src/timeline_workspace/caption_agent.rs \
+            crates/rollshot-app/src/timeline_workspace/update.rs
 rtk git commit -m "test(action): baseline caption instruction text and timeout copy"
 ```
 
