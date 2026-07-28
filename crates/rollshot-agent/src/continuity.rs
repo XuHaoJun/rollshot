@@ -48,10 +48,6 @@ pub enum ContinuityProjectionError {
     ReviewRevisionMismatch { expected: u32, got: u32 },
     #[error("run contract task ID mismatch: expected {expected}, got {got}")]
     RunContractTaskMismatch { expected: String, got: String },
-    #[error("run contract attempt ID mismatch: expected {expected}, got {got}")]
-    RunContractAttemptMismatch { expected: u32, got: u32 },
-    #[error("run contract run ID mismatch: expected {expected}, got {got}")]
-    RunContractRunMismatch { expected: String, got: String },
     #[error("string exceeds 4096-byte bound: field={field}, len={len}")]
     StringTooLong { field: &'static str, len: usize },
     #[error("canonical projection exceeds 64 KiB: {0} bytes")]
@@ -60,9 +56,7 @@ pub enum ContinuityProjectionError {
     MissingArtifact { state: &'static str },
     #[error("missing review receipt required for review state {state}")]
     MissingReview { state: &'static str },
-    #[error("missing run contract required for running task")]
-    MissingRunContract,
-    #[error("canonical serialization failed: {0}")]
+    #[error("canonical serialization failed: {0}")] 
     Canonical(String),
 }
 
@@ -368,7 +362,7 @@ impl TryFrom<&crate::product_task::ProductTaskSnapshot> for ContinuityProjection
 
         // 5. Derive review state.
         let (review_state, review_receipt_digest) =
-            derive_review_state(snapshot, task_id, artifact_revision.as_ref())?;
+            derive_review_state(snapshot)?;
 
         // Build DTO and canonicalize.
         let dto = ContinuityProjectionDto {
@@ -445,8 +439,6 @@ fn bound_string(field: &'static str, value: &str) -> Result<String, ContinuityPr
 
 fn derive_review_state(
     snapshot: &crate::product_task::ProductTaskSnapshot,
-    task_id: &ProductTaskId,
-    _artifact_revision: Option<&u32>,
 ) -> Result<(ReviewContinuityStateV1, Option<String>), ContinuityProjectionError> {
     match snapshot.status() {
         TaskStatus::ReadyForReview | TaskStatus::Applying => {
@@ -469,7 +461,7 @@ fn derive_review_state(
                 }
             })?;
             // Verify receipt matches artifact.
-            verify_review_receipt(snapshot, task_id, receipt)?;
+            verify_review_receipt(snapshot, receipt)?;
             let digest = review_receipt_digest(receipt)?;
             Ok((ReviewContinuityStateV1::AcceptedExactRevision, Some(digest)))
         }
@@ -479,14 +471,14 @@ fn derive_review_state(
                     state: "Rejected",
                 }
             })?;
-            verify_review_receipt(snapshot, task_id, receipt)?;
+            verify_review_receipt(snapshot, receipt)?;
             let digest = review_receipt_digest(receipt)?;
             Ok((ReviewContinuityStateV1::RejectedExactRevision, Some(digest)))
         }
         TaskStatus::Stale => {
             // Stale may or may not have a receipt.
             if let Some(receipt) = snapshot.review_receipt() {
-                verify_review_receipt(snapshot, task_id, receipt)?;
+                verify_review_receipt(snapshot, receipt)?;
                 let digest = review_receipt_digest(receipt)?;
                 Ok((ReviewContinuityStateV1::Stale, Some(digest)))
             } else {
@@ -500,7 +492,6 @@ fn derive_review_state(
 
 fn verify_review_receipt(
     snapshot: &crate::product_task::ProductTaskSnapshot,
-    _task_id: &ProductTaskId,
     receipt: &crate::product_task::ReviewReceipt,
 ) -> Result<(), ContinuityProjectionError> {
     // Verify receipt artifact ID matches snapshot artifact.
@@ -1016,10 +1007,10 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn unsupported_schema_zero_rejected() {
-        // We can't directly construct with schema 0 through the public API,
-        // but we can test the error variant exists by checking a V1 task
-        // with store_schema_version == 1 is accepted.
+    fn v1_schema_accepted() {
+        // Verify that a V1 task (store_schema_version = 1) is accepted.
+        // Schema 0 / >2 rejection is validated by the store_schema_version guard
+        // in TryFrom, which rejects values 0 and >2.
         let snapshot = ProductTaskSnapshot::new(
             task_id_fixture(),
             TaskKind::SmartRedactionAuthor,
@@ -1027,7 +1018,6 @@ mod tests {
             10,
         )
         .unwrap();
-        // V1 (store_schema_version = 1) is accepted.
         assert!(ContinuityProjectionV1::try_from(&snapshot).is_ok());
     }
 
@@ -1044,24 +1034,23 @@ mod tests {
     }
 
     #[test]
-    fn artifact_task_mismatch_rejected() {
-        // Build a snapshot and verify matching IDs succeed (the positive case).
-        // Malformed mismatch tests require internal mutation not available through
-        // the public reducer API.
+    fn matching_artifact_task_id_accepted() {
+        // Verify that a snapshot where artifact task ID matches the snapshot
+        // task ID is accepted. Mismatch rejection requires internal mutation
+        // not available through the public reducer API.
         let snapshot = ready_v2_snapshot();
         let proj = ContinuityProjectionV1::try_from(&snapshot);
         assert!(proj.is_ok());
     }
 
     #[test]
-    fn artifact_source_mismatch_rejected() {
-        // Create a snapshot where the artifact source binding differs from the
-        // snapshot's source binding. This can't happen through the normal reducer
-        // path since record_ready_for_review copies the source binding. We verify
-        // the positive path instead.
+    fn matching_artifact_source_binding_accepted() {
+        // Verify that a snapshot where artifact source binding matches the
+        // snapshot's source binding is accepted and the digest is present.
+        // Mismatch rejection requires internal mutation not available through
+        // the public reducer API.
         let snapshot = ready_v2_snapshot();
         let proj = ContinuityProjectionV1::try_from(&snapshot).unwrap();
-        // Source binding digest should be present.
         let json = String::from_utf8_lossy(proj.canonical_bytes());
         assert!(json.contains("source_binding_digest"));
     }
