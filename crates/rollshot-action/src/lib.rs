@@ -29,8 +29,9 @@ pub mod video_import;
 pub mod visual_annotation_proposal;
 
 pub use caption_proposal::{
-    CaptionApplyOutcome, CaptionProposal, CaptionProposalId, CaptionProposalProvenance,
-    CaptionSuggestion, CaptionSuggestionDraft, CaptionSuggestionId, CaptionSuggestionStatus,
+    CaptionApplyContext, CaptionApplyOutcome, CaptionProposal, CaptionProposalId,
+    CaptionProposalOrigin, CaptionProposalProvenance, CaptionSuggestion, CaptionSuggestionDraft,
+    CaptionSuggestionId, CaptionSuggestionStatus,
 };
 pub use detector::{CandidateMarker, Detector, DetectorConfig};
 pub use error::{DetectError, ExportError, GifError, StoryboardError, VideoError};

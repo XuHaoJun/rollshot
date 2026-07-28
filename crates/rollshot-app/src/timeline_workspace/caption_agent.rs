@@ -210,6 +210,9 @@ async fn suggest_captions_with_timeout(
     let proposal = rollshot_action::CaptionProposal::from_agent_drafts(
         rollshot_action::CaptionProposalId(run_id),
         run_id,
+        rollshot_action::CaptionProposalOrigin::EphemeralGuide {
+            guide_digest: "0".repeat(64),
+        },
         &guide,
         drafts,
     );

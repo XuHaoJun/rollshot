@@ -1082,7 +1082,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             let Some(proposal) = &mut state.caption_proposal else {
                 return Update::none();
             };
-            match proposal.apply(&mut state.guide, id) {
+            match proposal.apply(&mut state.guide, &rollshot_action::CaptionApplyContext::EphemeralGuide, id) {
                 rollshot_action::CaptionApplyOutcome::Applied => {
                     state.mark_project_dirty();
                     state.message = Some("Caption suggestion accepted.".to_string());
@@ -1107,7 +1107,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                 return Update::none();
             }
             if let Some(proposal) = &mut state.caption_proposal {
-                let outcomes = proposal.apply_all(&mut state.guide);
+                let outcomes = proposal.apply_all(&mut state.guide, &rollshot_action::CaptionApplyContext::EphemeralGuide);
                 let applied = outcomes
                     .iter()
                     .filter(|&&outcome| outcome == rollshot_action::CaptionApplyOutcome::Applied)
@@ -4480,6 +4480,9 @@ mod tests {
         rollshot_action::CaptionProposal::from_agent_drafts(
             rollshot_action::CaptionProposalId(1),
             42,
+            rollshot_action::CaptionProposalOrigin::EphemeralGuide {
+                guide_digest: "0".repeat(64),
+            },
             &state.guide,
             vec![rollshot_action::CaptionSuggestionDraft {
                 step_source: state.guide.steps()[0].source,
@@ -4616,6 +4619,9 @@ mod tests {
         let proposal = rollshot_action::CaptionProposal::from_agent_drafts(
             rollshot_action::CaptionProposalId(1),
             42,
+            rollshot_action::CaptionProposalOrigin::EphemeralGuide {
+                guide_digest: "0".repeat(64),
+            },
             &state.guide,
             vec![rollshot_action::CaptionSuggestionDraft {
                 step_source: state.guide.steps()[0].source,
@@ -4647,6 +4653,9 @@ mod tests {
         let proposal = rollshot_action::CaptionProposal::from_agent_drafts(
             rollshot_action::CaptionProposalId(1),
             42,
+            rollshot_action::CaptionProposalOrigin::EphemeralGuide {
+                guide_digest: "0".repeat(64),
+            },
             &state.guide,
             vec![rollshot_action::CaptionSuggestionDraft {
                 step_source: state.guide.steps()[0].source,

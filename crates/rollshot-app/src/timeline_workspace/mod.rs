@@ -2395,6 +2395,9 @@ mod tests {
             rollshot_action::CaptionProposal::from_agent_drafts(
                 rollshot_action::CaptionProposalId(1),
                 42,
+                rollshot_action::CaptionProposalOrigin::EphemeralGuide {
+                    guide_digest: "0".repeat(64),
+                },
                 &state.guide,
                 vec![rollshot_action::CaptionSuggestionDraft {
                     step_source: state.guide.steps()[0].source,
