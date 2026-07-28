@@ -4,7 +4,8 @@
 //! `TaskStore`. Material task mutations use a write-ahead prepare → task
 //! snapshot commit → audit commit protocol.
 
-mod record;
+pub(crate) mod record;
+pub(crate) mod reconcile;
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -140,6 +141,9 @@ pub(crate) enum AuditStoreError {
 
     #[error("directory sync failed")]
     DirectorySyncFailed,
+
+    #[error("reconciliation required: task={task_id}, reason={reason}")]
+    ReconciliationRequired { task_id: String, reason: String },
 }
 
 impl AuditStoreError {
@@ -164,6 +168,7 @@ impl AuditStoreError {
             }
             Self::PreCommit { .. } => AuditFailureCategory::AppendPreCommitFailure,
             Self::FileSyncFailed | Self::DirectorySyncFailed => AuditFailureCategory::Unavailable,
+            Self::ReconciliationRequired { .. } => AuditFailureCategory::ReconciliationRequired,
         }
     }
 }
@@ -625,7 +630,7 @@ impl AuditJournal {
     // ==================================================================
 
     /// Derive the journal file path for a task.
-    fn journal_path(&self, task_id: &ProductTaskId) -> PathBuf {
+    pub(crate) fn journal_path(&self, task_id: &ProductTaskId) -> PathBuf {
         let filename = format!(
             "{}{}{}",
             JOURNAL_FILE_PREFIX,

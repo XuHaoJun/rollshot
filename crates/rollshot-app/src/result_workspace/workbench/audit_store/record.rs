@@ -49,6 +49,7 @@ pub(crate) enum AuditAbortCategory {
     StateMismatch,
     ValidationFailed,
     CallerCancelled,
+    StateNotCommitted,
 }
 
 // ============================================================================
@@ -98,6 +99,9 @@ pub(crate) struct PreparedTransactionV1 {
     pub(crate) transaction_id: AuditTransactionId,
     pub(crate) event_id: AuditEventId,
     pub(crate) envelope: AuditEnvelopeV1,
+    pub(crate) expected_revision: u32,
+    pub(crate) replacement_revision: u32,
+    pub(crate) replacement_receipt: AuditTaskStateReceiptV1,
 }
 
 // ============================================================================
