@@ -205,18 +205,14 @@ impl CaptionProposal {
                     projection_digest: origin_digest,
                 } => {
                     if *origin_rev != *revision || origin_digest != projection_digest {
-                        if let Some(suggestion) =
-                            self.suggestions.iter_mut().find(|s| s.id == id)
-                        {
+                        if let Some(suggestion) = self.suggestions.iter_mut().find(|s| s.id == id) {
                             suggestion.status = CaptionSuggestionStatus::Stale;
                         }
                         return CaptionApplyOutcome::Stale;
                     }
                 }
                 CaptionProposalOrigin::EphemeralGuide { .. } => {
-                    if let Some(suggestion) =
-                        self.suggestions.iter_mut().find(|s| s.id == id)
-                    {
+                    if let Some(suggestion) = self.suggestions.iter_mut().find(|s| s.id == id) {
                         suggestion.status = CaptionSuggestionStatus::Stale;
                     }
                     return CaptionApplyOutcome::Stale;
@@ -573,7 +569,11 @@ mod tests {
         guide.set_title_and_caption(1, "Changed elsewhere".to_string(), "Elsewhere".to_string());
 
         assert_eq!(
-            proposal.apply(&mut guide, &CaptionApplyContext::EphemeralGuide, CaptionSuggestionId(1)),
+            proposal.apply(
+                &mut guide,
+                &CaptionApplyContext::EphemeralGuide,
+                CaptionSuggestionId(1)
+            ),
             CaptionApplyOutcome::Stale
         );
     }

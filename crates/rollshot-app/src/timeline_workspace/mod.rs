@@ -698,14 +698,10 @@ impl TimelineWorkspace {
             Some(project::ProjectSession::Saved { base_revision, .. }),
             ProjectSaveState::Clean,
             rollshot_action::CaptionProposalOrigin::DurableProject {
-                projection_digest,
-                ..
+                projection_digest, ..
             },
-        ) = (
-            &self.project_session,
-            self.save_state,
-            proposal.origin(),
-        ) {
+        ) = (&self.project_session, self.save_state, proposal.origin())
+        {
             rollshot_action::CaptionApplyContext::DurableProject {
                 revision: *base_revision,
                 projection_digest: projection_digest.clone(),

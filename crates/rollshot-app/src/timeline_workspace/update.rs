@@ -1162,7 +1162,11 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             // ephemeral otherwise.
             let request = match (&state.project_session, state.save_state) {
                 (
-                    Some(super::project::ProjectSession::Saved { root, base_revision, .. }),
+                    Some(super::project::ProjectSession::Saved {
+                        root,
+                        base_revision,
+                        ..
+                    }),
                     super::ProjectSaveState::Clean,
                 ) => super::caption_agent::CaptionContextRequest::Durable {
                     root: root.clone(),
@@ -4702,10 +4706,13 @@ mod tests {
             guide: state.guide.clone(),
             guide_digest: "0".repeat(64),
         };
-        let _ = update(&mut state, Message::CaptionContextPrepared {
-            run_id: 1,
-            result: Ok(context),
-        });
+        let _ = update(
+            &mut state,
+            Message::CaptionContextPrepared {
+                run_id: 1,
+                result: Ok(context),
+            },
+        );
 
         assert!(!state.caption_suggestions_running);
         assert_eq!(

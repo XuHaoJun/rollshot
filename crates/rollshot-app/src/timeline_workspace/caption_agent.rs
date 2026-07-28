@@ -44,10 +44,12 @@ impl PreparedCaptionContext {
 
     pub(super) fn origin(&self) -> rollshot_action::CaptionProposalOrigin {
         match self {
-            Self::Durable { projection, .. } => rollshot_action::CaptionProposalOrigin::DurableProject {
-                revision: projection.revision(),
-                projection_digest: projection.digest().to_string(),
-            },
+            Self::Durable { projection, .. } => {
+                rollshot_action::CaptionProposalOrigin::DurableProject {
+                    revision: projection.revision(),
+                    projection_digest: projection.digest().to_string(),
+                }
+            }
             Self::Ephemeral { guide_digest, .. } => {
                 rollshot_action::CaptionProposalOrigin::EphemeralGuide {
                     guide_digest: guide_digest.clone(),
@@ -142,13 +144,15 @@ pub(crate) async fn prepare_caption_context_task(
     request: CaptionContextRequest,
 ) -> Result<PreparedCaptionContext, String> {
     match request {
-        CaptionContextRequest::Durable { root, expected_revision } => {
-            let loaded = tokio::task::spawn_blocking(move || {
-                rollshot_action::project::load_project(&root)
-            })
-            .await
-            .map_err(|_| "Project load task panicked.".to_string())?
-            .map_err(|e| e.to_string())?;
+        CaptionContextRequest::Durable {
+            root,
+            expected_revision,
+        } => {
+            let loaded =
+                tokio::task::spawn_blocking(move || rollshot_action::project::load_project(&root))
+                    .await
+                    .map_err(|_| "Project load task panicked.".to_string())?
+                    .map_err(|e| e.to_string())?;
 
             if loaded.manifest.revision != expected_revision {
                 return Err(format!(
@@ -157,9 +161,14 @@ pub(crate) async fn prepare_caption_context_task(
                 ));
             }
 
-            let projection = rollshot_action::project::ActionGuideContextProjectionV1::from_loaded_project(&loaded)
+            let projection =
+                rollshot_action::project::ActionGuideContextProjectionV1::from_loaded_project(
+                    &loaded,
+                )
                 .map_err(|e| format!("Caption context projection failed: {e}"))?;
-            let guide = projection.to_guide().map_err(|e| format!("Guide from projection failed: {e}"))?;
+            let guide = projection
+                .to_guide()
+                .map_err(|e| format!("Guide from projection failed: {e}"))?;
 
             tracing::info!(
                 target: "rollshot::action::caption_agent",
@@ -173,7 +182,10 @@ pub(crate) async fn prepare_caption_context_task(
         }
         CaptionContextRequest::Ephemeral { guide } => {
             let guide_digest = compute_guide_digest(&guide);
-            Ok(PreparedCaptionContext::Ephemeral { guide, guide_digest })
+            Ok(PreparedCaptionContext::Ephemeral {
+                guide,
+                guide_digest,
+            })
         }
     }
 }

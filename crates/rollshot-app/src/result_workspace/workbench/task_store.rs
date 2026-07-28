@@ -832,8 +832,16 @@ impl rollshot_agent::continuity::ContinuitySnapshotSource for TaskStoreContinuit
     fn load(
         self: std::sync::Arc<Self>,
         task_id: ProductTaskId,
-    ) -> std::pin::Pin<Box<dyn Future<Output = Result<ProductTaskSnapshot, rollshot_agent::continuity::ContextRecoveryError>> + Send>>
-    {
+    ) -> std::pin::Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        ProductTaskSnapshot,
+                        rollshot_agent::continuity::ContextRecoveryError,
+                    >,
+                > + Send,
+        >,
+    > {
         let store = self.store.clone();
         Box::pin(async move {
             let result = tokio::task::spawn_blocking(move || store.load(&task_id)).await;
@@ -1826,7 +1834,10 @@ mod tests {
             std::sync::Arc::new(source);
         let unknown = ProductTaskId::parse("task-00000000-0000-4000-8000-999999999999").unwrap();
         let err = source.load(unknown).await.unwrap_err();
-        assert_eq!(err, rollshot_agent::continuity::ContextRecoveryError::MissingTask);
+        assert_eq!(
+            err,
+            rollshot_agent::continuity::ContextRecoveryError::MissingTask
+        );
     }
 
     #[tokio::test]
@@ -1843,7 +1854,10 @@ mod tests {
         let source: std::sync::Arc<dyn rollshot_agent::continuity::ContinuitySnapshotSource> =
             std::sync::Arc::new(source);
         let err = source.load(task_id).await.unwrap_err();
-        assert_eq!(err, rollshot_agent::continuity::ContextRecoveryError::CorruptTask);
+        assert_eq!(
+            err,
+            rollshot_agent::continuity::ContextRecoveryError::CorruptTask
+        );
         // No path leakage.
         assert!(!format!("{err:?}").contains("agent-tasks"));
     }
