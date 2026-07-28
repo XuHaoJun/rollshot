@@ -897,7 +897,7 @@ serializer output shape:
 {
   "store_schema_version": 1,
   "snapshot_revision": 0,
-  "task_id": "00000000-0000-4000-8000-000000000001",
+  "task_id": "task-00000000-0000-4000-8000-000000000001",
   "kind": "smart_redaction_author",
   "source_binding": {
     "base_image_sha256": [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
