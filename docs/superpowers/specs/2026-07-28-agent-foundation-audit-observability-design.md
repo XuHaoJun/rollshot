@@ -1,9 +1,9 @@
 # Agent Foundation Slice 6: Durable Audit Observability Design
 
-**Date:** 2026-07-28  
-**Status:** Approved in brainstorming auto mode  
+**Date:** 2026-07-28
+**Status:** Approved in brainstorming auto mode
 **Parent:**
-[`2026-07-26-agent-foundation-umbrella-design.md`](2026-07-26-agent-foundation-umbrella-design.md)  
+[`2026-07-26-agent-foundation-umbrella-design.md`](2026-07-26-agent-foundation-umbrella-design.md)
 **Slice:** 6 of 6 — Durable Audit Observability
 
 ## 1. Decision summary
