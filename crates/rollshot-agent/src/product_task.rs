@@ -442,7 +442,21 @@ impl TaskAttempt {
 // Artifact metadata
 // ========================================================================
 
+/// Kind-specific artifact summary. Replaces the flat Smart Redaction dry-run
+/// counters that previously lived on `ProductArtifactMetadata`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ArtifactSummary {
+    SmartRedaction {
+        dry_run_candidate_count: u32,
+        dry_run_affected_area: f32,
+    },
+    ActionGuideCaptions {
+        suggestion_count: u32,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProductArtifactMetadata {
     artifact_id: ArtifactId,
     artifact_revision: ArtifactRevision,
@@ -457,15 +471,87 @@ pub struct ProductArtifactMetadata {
     provider_id: String,
     model_id: String,
     run_config_digest: String,
-    dry_run_candidate_count: u32,
-    dry_run_affected_area: f32,
+    summary: ArtifactSummary,
     created_at_unix_ms: i64,
     /// V2 provenance. `None` for V1 artifacts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     run_contract: Option<RunContractReceiptV1>,
 }
 
+/// Deserialization shim accepting both `summary` and the pre-migration flat
+/// dry-run counter pair. A file can carry one or the other, never neither.
+impl<'de> Deserialize<'de> for ProductArtifactMetadata {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Repr {
+            artifact_id: ArtifactId,
+            artifact_revision: ArtifactRevision,
+            kind: ArtifactKind,
+            schema_version: u32,
+            canonical_payload_sha256: String,
+            source_binding: SourceBinding,
+            task_id: ProductTaskId,
+            attempt_id: TaskAttemptId,
+            run_id: RunId,
+            proposal_id: String,
+            provider_id: String,
+            model_id: String,
+            run_config_digest: String,
+            #[serde(default)]
+            summary: Option<ArtifactSummary>,
+            #[serde(default)]
+            dry_run_candidate_count: Option<u32>,
+            #[serde(default)]
+            dry_run_affected_area: Option<f32>,
+            created_at_unix_ms: i64,
+            #[serde(default)]
+            run_contract: Option<RunContractReceiptV1>,
+        }
+
+        let r = Repr::deserialize(deserializer)?;
+        let summary = match (
+            r.summary,
+            r.dry_run_candidate_count,
+            r.dry_run_affected_area,
+        ) {
+            (Some(summary), _, _) => summary,
+            (None, Some(dry_run_candidate_count), Some(dry_run_affected_area)) => {
+                ArtifactSummary::SmartRedaction {
+                    dry_run_candidate_count,
+                    dry_run_affected_area,
+                }
+            }
+            (None, _, _) => {
+                return Err(serde::de::Error::missing_field("summary"));
+            }
+        };
+        Ok(Self {
+            artifact_id: r.artifact_id,
+            artifact_revision: r.artifact_revision,
+            kind: r.kind,
+            schema_version: r.schema_version,
+            canonical_payload_sha256: r.canonical_payload_sha256,
+            source_binding: r.source_binding,
+            task_id: r.task_id,
+            attempt_id: r.attempt_id,
+            run_id: r.run_id,
+            proposal_id: r.proposal_id,
+            provider_id: r.provider_id,
+            model_id: r.model_id,
+            run_config_digest: r.run_config_digest,
+            summary,
+            created_at_unix_ms: r.created_at_unix_ms,
+            run_contract: r.run_contract,
+        })
+    }
+}
+
 impl ProductArtifactMetadata {
+    /// V1 compatibility wrapper. Wraps the flat dry-run counters into
+    /// `ArtifactSummary::SmartRedaction`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         artifact_id: ArtifactId,
@@ -485,7 +571,7 @@ impl ProductArtifactMetadata {
         dry_run_affected_area: f32,
         created_at_unix_ms: i64,
     ) -> Self {
-        Self {
+        Self::new_v3(
             artifact_id,
             artifact_revision,
             kind,
@@ -499,14 +585,16 @@ impl ProductArtifactMetadata {
             provider_id,
             model_id,
             run_config_digest,
-            dry_run_candidate_count,
-            dry_run_affected_area,
+            ArtifactSummary::SmartRedaction {
+                dry_run_candidate_count,
+                dry_run_affected_area,
+            },
             created_at_unix_ms,
-            run_contract: None,
-        }
+        )
     }
 
-    /// V2 constructor: includes run-contract provenance.
+    /// V2 compatibility wrapper. Wraps the flat dry-run counters into
+    /// `ArtifactSummary::SmartRedaction`.
     #[allow(clippy::too_many_arguments)]
     pub fn new_v2(
         artifact_id: ArtifactId,
@@ -527,6 +615,50 @@ impl ProductArtifactMetadata {
         created_at_unix_ms: i64,
         run_contract: RunContractReceiptV1,
     ) -> Self {
+        let mut meta = Self::new_v3(
+            artifact_id,
+            artifact_revision,
+            kind,
+            schema_version,
+            canonical_payload_sha256,
+            source_binding,
+            task_id,
+            attempt_id,
+            run_id,
+            proposal_id,
+            provider_id,
+            model_id,
+            run_config_digest,
+            ArtifactSummary::SmartRedaction {
+                dry_run_candidate_count,
+                dry_run_affected_area,
+            },
+            created_at_unix_ms,
+        );
+        meta.run_contract = Some(run_contract);
+        meta
+    }
+
+    /// V3 constructor: kind-specific artifact summary. No run-contract
+    /// provenance; use `new_v2` (via wrapping) when a contract is available.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_v3(
+        artifact_id: ArtifactId,
+        artifact_revision: ArtifactRevision,
+        kind: ArtifactKind,
+        schema_version: u32,
+        canonical_payload_sha256: String,
+        source_binding: SourceBinding,
+        task_id: ProductTaskId,
+        attempt_id: TaskAttemptId,
+        run_id: RunId,
+        proposal_id: String,
+        provider_id: String,
+        model_id: String,
+        run_config_digest: String,
+        summary: ArtifactSummary,
+        created_at_unix_ms: i64,
+    ) -> Self {
         Self {
             artifact_id,
             artifact_revision,
@@ -541,11 +673,14 @@ impl ProductArtifactMetadata {
             provider_id,
             model_id,
             run_config_digest,
-            dry_run_candidate_count,
-            dry_run_affected_area,
+            summary,
             created_at_unix_ms,
-            run_contract: Some(run_contract),
+            run_contract: None,
         }
+    }
+
+    pub fn summary(&self) -> &ArtifactSummary {
+        &self.summary
     }
 
     pub fn artifact_id(&self) -> &ArtifactId {
@@ -1702,6 +1837,28 @@ mod tests {
 
     fn source_binding_fixture() -> SourceBinding {
         SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None)
+    }
+
+    fn artifact_metadata_fixture_v3(summary: ArtifactSummary) -> ProductArtifactMetadata {
+        // `kind` stays SmartRedaction: ArtifactKind::ActionGuideCaptions does
+        // not exist until Task 10. This test only constrains `summary`.
+        ProductArtifactMetadata::new_v3(
+            artifact_id_fixture(),
+            ArtifactRevision::new(1),
+            ArtifactKind::SmartRedaction,
+            1,
+            "aa".repeat(32),
+            source_binding_fixture(),
+            task_id_fixture(),
+            TaskAttemptId::new(1),
+            run_id_fixture(),
+            "proposal-1".to_owned(),
+            "provider".to_owned(),
+            "model".to_owned(),
+            "cfg".to_owned(),
+            summary,
+            1_000,
+        )
     }
 
     fn attempt_fixture() -> TaskAttempt {
@@ -3027,5 +3184,25 @@ mod tests {
 
         assert!(a.identity_matches(&b));
         assert!(a.freshness_matches(&b));
+    }
+
+    #[test]
+    fn artifact_summary_is_kind_specific() {
+        let meta = artifact_metadata_fixture_v3(ArtifactSummary::ActionGuideCaptions {
+            suggestion_count: 3,
+        });
+
+        assert_eq!(
+            meta.summary(),
+            &ArtifactSummary::ActionGuideCaptions {
+                suggestion_count: 3
+            }
+        );
+
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(
+            !json.contains("dry_run_affected_area"),
+            "caption artifacts must not carry Smart Redaction dry-run fields: {json}"
+        );
     }
 }

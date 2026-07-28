@@ -1487,10 +1487,10 @@ mod tests {
     use rollshot_agent::domain::RunId;
     use rollshot_agent::product_task::{
         canonical_config_v2_digest, canonical_payload_bytes, ArtifactId, ArtifactKind,
-        ArtifactRevision, PayloadConfigV1, PayloadDryRunV1, PayloadMode, PayloadProposalV1,
-        PayloadSourceV1, ProductArtifactMetadata, RunConfigFingerprintV1, RunConfigFingerprintV2,
-        RunContractReceiptV1, SmartRedactionReviewPayload, TaskAttempt, TaskAttemptId, TaskKind,
-        TaskTerminal,
+        ArtifactRevision, ArtifactSummary, PayloadConfigV1, PayloadDryRunV1, PayloadMode,
+        PayloadProposalV1, PayloadSourceV1, ProductArtifactMetadata, RunConfigFingerprintV1,
+        RunConfigFingerprintV2, RunContractReceiptV1, SmartRedactionReviewPayload, TaskAttempt,
+        TaskAttemptId, TaskKind, TaskTerminal,
     };
     use rollshot_agent::skills::{SkillInvocationKind, SkillUseReceiptV1};
     use sha2::{Digest, Sha256};
@@ -2389,6 +2389,24 @@ mod tests {
                 SourceBinding::SmartRedaction { .. }
             ));
         }
+    }
+
+    #[test]
+    fn legacy_flat_dry_run_counters_become_a_smart_redaction_summary() {
+        let raw = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/agent_tasks/task-schema-v2-ready.json"),
+        )
+        .unwrap();
+        let snapshot: ProductTaskSnapshot = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(
+            snapshot.artifact_metadata().unwrap().summary(),
+            &ArtifactSummary::SmartRedaction {
+                dry_run_candidate_count: 3,
+                dry_run_affected_area: 0.42,
+            }
+        );
     }
 
     #[test]
