@@ -256,11 +256,17 @@ pub enum RunTerminalState {
     ReadyForReview(Box<ReadyForReview>),
     NeedsUserInput(NeedsUserInput),
     Cancelled,
-    BudgetExhausted { dimension: BudgetDimension },
+    BudgetExhausted {
+        dimension: BudgetDimension,
+    },
     SourceValidationFailure,
     RuntimeFailure,
-    AgentProtocolFailure { message: String },
-    ProviderFailure { message: String },
+    AgentProtocolFailure {
+        message: String,
+    },
+    ProviderFailure {
+        message: String,
+    },
     /// Context overflow after the one retry was exhausted.
     ContextOverflow,
     /// Context recovery failed (stale reference, manifest build failure, etc.).
@@ -327,7 +333,9 @@ fn map_model_error(error: crate::model::ModelError) -> DriverError {
 }
 
 /// Map a `ContextRecoveryError` to a privacy-safe `ContextRecoveryFailureCategory`.
-fn map_recovery_error(err: &crate::continuity::ContextRecoveryError) -> crate::continuity::ContextRecoveryFailureCategory {
+fn map_recovery_error(
+    err: &crate::continuity::ContextRecoveryError,
+) -> crate::continuity::ContextRecoveryFailureCategory {
     use crate::continuity::{ContextRecoveryError, ContextRecoveryFailureCategory};
     match err {
         ContextRecoveryError::StaleTask { .. }
@@ -336,15 +344,21 @@ fn map_recovery_error(err: &crate::continuity::ContextRecoveryError) -> crate::c
         | ContextRecoveryError::StaleSource
         | ContextRecoveryError::AuthorityMismatch { .. }
         | ContextRecoveryError::SkillMismatch { .. }
-        | ContextRecoveryError::StaleEvidence { .. } => ContextRecoveryFailureCategory::StaleReference,
+        | ContextRecoveryError::StaleEvidence { .. } => {
+            ContextRecoveryFailureCategory::StaleReference
+        }
         ContextRecoveryError::Cancelled
         | ContextRecoveryError::NonFiniteCost
         | ContextRecoveryError::Oversized(_)
-        | ContextRecoveryError::BuildFailed(_) => ContextRecoveryFailureCategory::ManifestBuildFailed,
+        | ContextRecoveryError::BuildFailed(_) => {
+            ContextRecoveryFailureCategory::ManifestBuildFailed
+        }
         ContextRecoveryError::MissingTask
         | ContextRecoveryError::CorruptTask
         | ContextRecoveryError::UnsupportedSchema
-        | ContextRecoveryError::SourceUnavailable => ContextRecoveryFailureCategory::ManifestBuildFailed,
+        | ContextRecoveryError::SourceUnavailable => {
+            ContextRecoveryFailureCategory::ManifestBuildFailed
+        }
     }
 }
 
@@ -701,7 +715,7 @@ impl AgentRunner {
                                     );
                                     return RunTerminalState::ContextRecoveryFailure {
                                         category:
-                                            crate::continuity::ContextRecoveryFailureCategory::StaleReference,
+                                            crate::continuity::ContextRecoveryFailureCategory::ManifestBuildFailed,
                                     };
                                 }
                             };
@@ -709,18 +723,14 @@ impl AgentRunner {
                             // Check max-turns limit across both Rig instances.
                             if model_turns_started >= self.config.max_turns {
                                 return RunTerminalState::AgentProtocolFailure {
-                                    message: "max turns exceeded during overflow recovery"
-                                        .into(),
+                                    message: "max turns exceeded during overflow recovery".into(),
                                 };
                             }
 
                             // Check model-call budget can fund another dispatch.
-                            if let Err(BudgetError::Exceeded(dim)) =
-                                tracker.charge_model_dispatch()
+                            if let Err(BudgetError::Exceeded(dim)) = tracker.charge_model_dispatch()
                             {
-                                return RunTerminalState::BudgetExhausted {
-                                    dimension: dim,
-                                };
+                                return RunTerminalState::BudgetExhausted { dimension: dim };
                             }
 
                             // Check cancellation before async load.
@@ -760,54 +770,51 @@ impl AgentRunner {
                             };
 
                             // Build and validate ContinuityProjectionV1 from loaded snapshot.
-                            let projection = match crate::continuity::ContinuityProjectionV1::try_from(
-                                &snapshot,
-                            ) {
-                                Ok(p) => p,
-                                Err(proj_err) => {
-                                    tracing::warn!(
-                                        target: "rollshot::agent::driver",
-                                        error = ?proj_err,
-                                        "projection build failed during overflow recovery"
-                                    );
-                                    return RunTerminalState::ContextRecoveryFailure {
+                            let projection =
+                                match crate::continuity::ContinuityProjectionV1::try_from(&snapshot)
+                                {
+                                    Ok(p) => p,
+                                    Err(proj_err) => {
+                                        tracing::warn!(
+                                            target: "rollshot::agent::driver",
+                                            error = ?proj_err,
+                                            "projection build failed during overflow recovery"
+                                        );
+                                        return RunTerminalState::ContextRecoveryFailure {
                                         category:
                                             crate::continuity::ContextRecoveryFailureCategory::ManifestBuildFailed,
                                     };
-                                }
-                            };
-
-                            // Build RunContinuityManifestV1.
-                            let manifest_inputs =
-                                crate::continuity::RunContinuityManifestInputs {
-                                    projection: &projection,
-                                    tool_ctx,
-                                    budget_tracker: &tracker,
-                                    authority,
-                                    skill_use,
-                                    expected_task_id: expected.task_id(),
-                                    expected_attempt_id: expected.attempt_id(),
-                                    expected_run_id: expected.run_id(),
-                                    expected_source_binding_digest: expected
-                                        .source_binding_digest(),
-                                    cancelled: cancellation.is_cancelled(),
-                                };
-                            let manifest =
-                                match crate::continuity::RunContinuityManifestV1::build(
-                                    &manifest_inputs,
-                                ) {
-                                    Ok(m) => m,
-                                    Err(recovery_err) => {
-                                        tracing::warn!(
-                                            target: "rollshot::agent::driver",
-                                            error = ?recovery_err,
-                                            "manifest build failed during overflow recovery"
-                                        );
-                                        return RunTerminalState::ContextRecoveryFailure {
-                                            category: map_recovery_error(&recovery_err),
-                                        };
                                     }
                                 };
+
+                            // Build RunContinuityManifestV1.
+                            let manifest_inputs = crate::continuity::RunContinuityManifestInputs {
+                                projection: &projection,
+                                tool_ctx,
+                                budget_tracker: &tracker,
+                                authority,
+                                skill_use,
+                                expected_task_id: expected.task_id(),
+                                expected_attempt_id: expected.attempt_id(),
+                                expected_run_id: expected.run_id(),
+                                expected_source_binding_digest: expected.source_binding_digest(),
+                                cancelled: cancellation.is_cancelled(),
+                            };
+                            let manifest = match crate::continuity::RunContinuityManifestV1::build(
+                                &manifest_inputs,
+                            ) {
+                                Ok(m) => m,
+                                Err(recovery_err) => {
+                                    tracing::warn!(
+                                        target: "rollshot::agent::driver",
+                                        error = ?recovery_err,
+                                        "manifest build failed during overflow recovery"
+                                    );
+                                    return RunTerminalState::ContextRecoveryFailure {
+                                        category: map_recovery_error(&recovery_err),
+                                    };
+                                }
+                            };
 
                             tracing::info!(
                                 target: "rollshot::agent::driver",
@@ -821,10 +828,7 @@ impl AgentRunner {
                             rig_run = rig_core::agent::run::AgentRun::new(
                                 rig_core::message::Message::user(&restart_msg),
                             )
-                            .max_turns(
-                                self.config.max_turns
-                                    .saturating_sub(model_turns_started),
-                            );
+                            .max_turns(self.config.max_turns.saturating_sub(model_turns_started));
 
                             overflow_retry_used = true;
                             last_assistant_text.clear();
@@ -5852,15 +5856,8 @@ main = "SKILL.md"
             // Use the same task_id/run_id as the test context.
             let task_id =
                 ProductTaskId::parse("task-00000000-0000-4000-8000-00000000002a").unwrap();
-            let run_id =
-                RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap();
-            let source = SourceBinding::new(
-                [1u8; 32],
-                [2u8; 32],
-                0,
-                "preset-001".to_owned(),
-                None,
-            );
+            let run_id = RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap();
+            let source = SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None);
 
             // Build the authority to get its digest.
             let ctx = test_ctx("src");
@@ -5910,12 +5907,10 @@ main = "SKILL.md"
         fn durable_source_from(
             snapshot: &crate::product_task::ProductTaskSnapshot,
         ) -> RunContinuitySource {
-            let projection =
-                crate::continuity::ContinuityProjectionV1::try_from(snapshot).unwrap();
-            let source =
-                std::sync::Arc::new(InMemoryContinuitySource::new(snapshot.clone()));
+            let projection = crate::continuity::ContinuityProjectionV1::try_from(snapshot).unwrap();
+            let source = std::sync::Arc::new(InMemoryContinuitySource::new(snapshot.clone()));
             RunContinuitySource::Durable {
-                expected: projection,
+                expected: Box::new(projection),
                 source,
             }
         }
@@ -5931,11 +5926,9 @@ main = "SKILL.md"
                 requests: Mutex::new(Vec::new()),
                 scripts: Mutex::new(VecDeque::from(vec![
                     // First call: context overflow at stream establishment.
-                    ProviderScript::EstablishmentError(
-                        crate::model::ModelError::ContextOverflow(
-                            "context_length_exceeded".into(),
-                        ),
-                    ),
+                    ProviderScript::EstablishmentError(crate::model::ModelError::ContextOverflow(
+                        "context_length_exceeded".into(),
+                    )),
                     // Second call (after restart): text-only completion.
                     // The restart creates a fresh rig_run, so the model just returns text.
                     ProviderScript::Stream(vec![
@@ -6015,17 +6008,13 @@ main = "SKILL.md"
                 requests: Mutex::new(Vec::new()),
                 scripts: Mutex::new(VecDeque::from(vec![
                     // First call: context overflow.
-                    ProviderScript::EstablishmentError(
-                        crate::model::ModelError::ContextOverflow(
-                            "context_length_exceeded".into(),
-                        ),
-                    ),
+                    ProviderScript::EstablishmentError(crate::model::ModelError::ContextOverflow(
+                        "context_length_exceeded".into(),
+                    )),
                     // Second call (after restart): another context overflow.
-                    ProviderScript::EstablishmentError(
-                        crate::model::ModelError::ContextOverflow(
-                            "context_length_exceeded".into(),
-                        ),
-                    ),
+                    ProviderScript::EstablishmentError(crate::model::ModelError::ContextOverflow(
+                        "context_length_exceeded".into(),
+                    )),
                 ])),
             };
 
@@ -6075,13 +6064,9 @@ main = "SKILL.md"
 
             let provider = ScriptedProvider {
                 requests: Mutex::new(Vec::new()),
-                scripts: Mutex::new(VecDeque::from(vec![
-                    ProviderScript::EstablishmentError(
-                        crate::model::ModelError::ContextOverflow(
-                            "context_length_exceeded".into(),
-                        ),
-                    ),
-                ])),
+                scripts: Mutex::new(VecDeque::from(vec![ProviderScript::EstablishmentError(
+                    crate::model::ModelError::ContextOverflow("context_length_exceeded".into()),
+                )])),
             };
 
             let runner = AgentRunner::new(AgentConfig {
@@ -6119,7 +6104,7 @@ main = "SKILL.md"
             assert_eq!(
                 terminal,
                 RunTerminalState::ContextRecoveryFailure {
-                    category: ContextRecoveryFailureCategory::StaleReference,
+                    category: ContextRecoveryFailureCategory::ManifestBuildFailed,
                 }
             );
         }
@@ -6135,11 +6120,9 @@ main = "SKILL.md"
                 requests: Mutex::new(Vec::new()),
                 scripts: Mutex::new(VecDeque::from(vec![
                     // First call: ordinary provider failure (not overflow).
-                    ProviderScript::EstablishmentError(
-                        crate::model::ModelError::ProviderFailure(
-                            "rate limited".into(),
-                        ),
-                    ),
+                    ProviderScript::EstablishmentError(crate::model::ModelError::ProviderFailure(
+                        "rate limited".into(),
+                    )),
                 ])),
             };
 
