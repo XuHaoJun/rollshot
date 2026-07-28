@@ -1134,7 +1134,7 @@ Stop after the gate decision. Do not begin Slice 6.
 
 ### Auto decisions
 
-**Auto decision D1 — Keep the full gate scope.**  
+**Auto decision D1 — Keep the full gate scope.**
 Context: The plan has 10 ordered tasks but only three new files and no new crate
 or distributable. ELI10: Removing projection, provider, retry, restore, or gate
 work would make the proof claim stronger than the implementation. The task count
@@ -1146,7 +1146,7 @@ Pros / cons: A) Keep (recommended) — ✅ complete gate, ❌ larger review surf
 B) Defer a component — ✅ smaller diff, ❌ invalidates the approved gate.
 Net: retain the minimum complete proof, not a smaller incomplete feature.
 
-**Auto decision D2 — Minimize the public projection API.**  
+**Auto decision D2 — Minimize the public projection API.**
 Context: Task 1 originally exposed four nested reference DTOs used only through
 one projection. ELI10: Public types become promises future code must support;
 private DTOs can change without breaking callers. Stakes if wrong: an internal
@@ -1157,7 +1157,7 @@ Completeness: both options 10/10. Pros / cons: A) Minimal API (recommended) —
 DTOs — ✅ mirrors JSON, ❌ unnecessary long-term API. Net: explicit and boring
 beats a public type family with one consumer.
 
-**Auto decision D3 — Keep the snapshot-source trait.**  
+**Auto decision D3 — Keep the snapshot-source trait.**
 Context: `rollshot-agent` cannot depend on the app-owned TaskStore. ELI10: The
 trait is the narrow plug socket that lets the core ask the product for a fresh
 snapshot without importing product storage. Stakes if wrong: dependency
@@ -1168,7 +1168,7 @@ Note: options differ in kind, not coverage. Pros / cons: A) Trait (recommended)
 — ✅ fewer named types, ❌ closure-heavy signatures and weaker diagnostics.
 Net: the trait spends little complexity at a real crate boundary.
 
-**Auto decision D4 — Count started model turns across Rig replacement.**  
+**Auto decision D4 — Count started model turns across Rig replacement.**
 Context: Rig 0.40 increments `current_turn` when `next_step` emits `CallModel`,
 including a request that later overflows. ELI10: A failed oversized request still
 used one allowed attempt; restarting must not hand it back. Stakes if wrong:
@@ -1179,7 +1179,7 @@ separate model-call budget exhaustion. Completeness: started-turn accounting =
 ✅ matches pinned Rig, ❌ explicit counter. B) Completed turns — ✅ simpler,
 ❌ resets a consumed turn. Net: mirror the dependency's exact state machine.
 
-**Auto decision D5 — Keep every intermediate commit buildable.**  
+**Auto decision D5 — Keep every intermediate commit buildable.**
 Context: Task 7 changes a required public method argument used by product code.
 ELI10: A commit that compiles only after the next commit cannot be safely
 reviewed, bisected, or reverted. Stakes if wrong: `git bisect` lands on a broken
@@ -1190,7 +1190,7 @@ A) Same-commit cutover (recommended) — ✅ atomic, ❌ touches app callsites.
 B) Fix later — ✅ smaller first diff, ❌ broken branch boundary. Net: atomic API
 cutover is required for maintainability.
 
-**Auto decision D6 — Split active-run wiring from restore validation.**  
+**Auto decision D6 — Split active-run wiring from restore validation.**
 Context: The original Task 8 mixed async source integration and review restore
 semantics across the result workspace. ELI10: These fail differently and should
 be reviewable/revertible separately. Stakes if wrong: a storage bridge regression
@@ -1200,7 +1200,7 @@ Pros / cons: A) Split (recommended) — ✅ focused tests/rollback, ❌ one extr
 task. B) Combined — ✅ fewer commits, ❌ oversized integration boundary.
 Net: separate two coherent state transitions.
 
-**Auto decision D7 — Cache canonical bytes and use existing hex formatting.**  
+**Auto decision D7 — Cache canonical bytes and use existing hex formatting.**
 Context: projections are compared and rendered more than once, and the original
 digest snippet allocated one `String` per hash byte. ELI10: Canonical data should
 be created once; recalculating it can waste memory and risks accidental drift.
@@ -1211,7 +1211,7 @@ Recommendation: cache bounded bytes/digest in immutable projections and use
 64/256 KiB. B) Recompute — ✅ smaller struct, ❌ repeated work. Net: bounded
 cached truth is safer and cheaper.
 
-**Auto decision D8 — Add an active-path caption smoke test.**  
+**Auto decision D8 — Add an active-path caption smoke test.**
 Context: helper tests can pass while iced update/message wiring is broken.
 ELI10: The proof must press the real logical button path, not test only pieces
 on a bench. Stakes if wrong: durable caption continuity ships disconnected.
@@ -1222,7 +1222,7 @@ active path = 10/10, helpers only = 7/10. Pros / cons: A) Active-path test
 ✅ faster setup, ❌ misses integration. Net: one deterministic smoke test closes
 the highest product-path gap.
 
-**Auto decision D9 — Document the retry state machine beside the code.**  
+**Auto decision D9 — Document the retry state machine beside the code.**
 Context: whole-history replacement has cancellation, budget, stale, terminal,
 and second-overflow precedence. ELI10: A small diagram lets a maintainer see
 which exits win without reconstructing a long loop. Stakes if wrong: later edits
