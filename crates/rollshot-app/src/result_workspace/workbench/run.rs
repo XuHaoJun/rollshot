@@ -4049,6 +4049,7 @@ mod reducer_tests {
     // -- Task 4: audit failure-path tests -----------------------------------
 
     #[test]
+    #[allow(clippy::permissions_set_readonly_false)]
     fn audit_prepare_failure_prevents_model_dispatch() {
         // When create_audited fails (e.g. I/O error), the audit
         // transaction is aborted and no committed events exist.

@@ -453,16 +453,14 @@ impl AuditEnvelopeV1 {
         }
 
         // Validate event-level strings.
-        match &event {
-            AuditEventV1::AuthorityDenied {
-                tool_name,
-                required_operation,
-                ..
-            } => {
-                validate_string_bound(tool_name, "tool_name")?;
-                validate_string_bound(required_operation, "required_operation")?;
-            }
-            _ => {}
+        if let AuditEventV1::AuthorityDenied {
+            tool_name,
+            required_operation,
+            ..
+        } = &event
+        {
+            validate_string_bound(tool_name, "tool_name")?;
+            validate_string_bound(required_operation, "required_operation")?;
         }
 
         let event_payload_digest = Self::compute_digest(
@@ -1201,6 +1199,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     fn authority_receipt_fixture() -> AuthoritySnapshotReceiptV1 {
         authority_snapshot_fixture().receipt(10)
     }
@@ -1947,9 +1946,6 @@ mod tests {
             // Created → ReadyForReview hits RevisionMismatch (0+1 != 2)
             // because the reducer path requires Running as an intermediate.
             // Test with same-revision but wrong status pair:
-            let cancelled = running
-                .record_terminal(TaskTerminal::Cancelled, 30)
-                .unwrap();
             // Created (rev 0) → Cancelled (rev 2) is unsupported AND revision mismatch
             // Use running (rev 1) → Completed which is unsupported
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
@@ -2213,7 +2209,7 @@ mod tests {
                 SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None),
                 10,
             ).unwrap();
-            let receipt = task.audit_transition_receipt();
+            let _receipt = task.audit_transition_receipt();
             let correlation = AuditCorrelationV1::for_task(
                 task_id_fixture().as_str().to_owned(),
             );

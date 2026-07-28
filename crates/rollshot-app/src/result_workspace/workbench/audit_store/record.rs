@@ -270,10 +270,7 @@ pub(crate) fn hex_valid(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rollshot_agent::audit::{
-        AuditEnvelopeV1, AuditEventId, AuditEventV1, AuditCorrelationV1,
-        AuditTaskStateReceiptV1, AuditTaskStatusV1,
-    };
+    use rollshot_agent::audit::{AuditEventId};
     use rollshot_agent::product_task::ProductTaskId;
 
     // ------------------------------------------------------------------

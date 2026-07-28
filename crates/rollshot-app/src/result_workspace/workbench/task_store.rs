@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{info, warn};
 
 use rollshot_agent::audit::{
-    AuditAppendReceiptV1, AuditEnvelopeV1, AuditEventId, AuditTaskStateReceiptV1,
+    AuditAppendReceiptV1, AuditEnvelopeV1, AuditEventId,
     derive_material_transition,
 };
 use rollshot_agent::product_task::{ProductTaskId, ProductTaskSnapshot, SourceBinding, TaskStatus};
@@ -1173,21 +1173,16 @@ impl TaskStore {
                     if snapshot.source_binding().annotation_state_sha256()
                         != binding.annotation_state_sha256()
                     {
-                        // CAS mark stale.
+                        // Audited mark stale.
                         if let Ok(stale) = snapshot.mark_stale(now) {
-                            let lock_file = match fs::File::open(&self.lock_path) {
-                                Ok(f) => f,
-                                Err(_) => continue,
-                            };
-                            if lock_file.lock().is_err() {
-                                continue;
-                            }
-                            if let Ok(current) = self.read_snapshot(&task_id) {
-                                if current == snapshot {
-                                    if let Err(e) = self.atomic_write(&path, &stale, None) {
-                                        warn!(error = %e, task_id = task_id.as_str(), "mark stale: atomic_write failed");
-                                    }
-                                }
+                            let event_id = AuditEventId::new_v4();
+                            if let Err(e) = self.transition_audited(
+                                &snapshot,
+                                &stale,
+                                event_id,
+                                now,
+                            ) {
+                                warn!(error = %e, task_id = task_id.as_str(), "mark stale: transition_audited failed");
                             }
                         }
                         continue;

@@ -16,13 +16,13 @@ use tracing::{info, trace, warn, error};
 
 use rollshot_agent::audit::{
     AuditAppendError, AuditAppendSink, AuditEventId, AuditFailureCategory,
-    AuditAppendReceiptV1, AuditEnvelopeV1, AuditTaskStateReceiptV1,
+    AuditAppendReceiptV1, AuditEnvelopeV1,
 };
 use rollshot_agent::product_task::ProductTaskId;
 
 use record::{
-    AuditAbortCategory, AuditTransactionId, JournalPayloadV1, JournalRecordV1,
-    PreparedTransactionV1, hex_encode, hex_valid, MAX_JOURNAL_BYTES, MAX_RECORD_BYTES,
+    AuditTransactionId, JournalPayloadV1, JournalRecordV1,
+    MAX_JOURNAL_BYTES, MAX_RECORD_BYTES,
 };
 
 // ============================================================================
@@ -506,7 +506,7 @@ impl AuditJournal {
         if self.failpoint == Some(AuditFailpoint::RecordWrite) {
             return Err(AuditStoreError::Io {
                 category: "failpoint_record_write".to_owned(),
-                source: io::Error::new(io::ErrorKind::Other, "injected RecordWrite failpoint"),
+                source: io::Error::other("injected RecordWrite failpoint"),
             });
         }
 
@@ -600,7 +600,7 @@ impl AuditJournal {
             })?;
             // Check if the bytes we wrote are visible.
             if buf.len() < record_bytes.len()
-                || &buf[buf.len() - record_bytes.len()..] != &record_bytes[..]
+                || buf[buf.len() - record_bytes.len()..] != record_bytes[..]
             {
                 return Err(AuditStoreError::AppendVisibleDurabilityUncertain);
             }
@@ -829,10 +829,9 @@ pub(crate) mod tests {
     use super::*;
     use rollshot_agent::audit::{
         AuditEnvelopeV1, AuditEventId, AuditEventV1, AuditCorrelationV1,
-        AuditTaskStateReceiptV1, AuditTaskStatusV1,
     };
     use rollshot_agent::product_task::ProductTaskId;
-    use record::{AuditAbortCategory, AuditTransactionId, JournalPayloadV1, PreparedTransactionV1};
+    use record::{AuditAbortCategory, AuditTransactionId, JournalPayloadV1};
 
     // ------------------------------------------------------------------
     // Fixtures
@@ -882,7 +881,7 @@ pub(crate) mod tests {
             10,
         )
         .unwrap();
-        let receipt = task.audit_transition_receipt();
+        let _receipt = task.audit_transition_receipt();
         // Build a TaskCreated envelope for testing.
         let correlation = AuditCorrelationV1::for_task(task_id().as_str().to_owned());
         AuditEnvelopeV1::new(
