@@ -830,6 +830,14 @@ pub enum ContextRecoveryError {
     Oversized(usize),
     #[error("manifest build failed: {0}")]
     BuildFailed(String),
+    #[error("task not found in store")]
+    MissingTask,
+    #[error("corrupt task snapshot")]
+    CorruptTask,
+    #[error("unsupported store schema")]
+    UnsupportedSchema,
+    #[error("continuity source unavailable")]
+    SourceUnavailable,
 }
 
 impl RunContinuityManifestV1 {

@@ -13,6 +13,7 @@
 
 use std::fmt;
 use std::fs;
+use std::future::Future;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -806,6 +807,68 @@ fn truncate_error(s: &str) -> String {
         s.to_owned()
     } else {
         format!("{}…", &s[..max])
+    }
+}
+
+// ============================================================================
+// Continuity snapshot source (Task 8)
+// ============================================================================
+
+/// Async bridge from `TaskStore` to `ContinuitySnapshotSource`.
+///
+/// Wraps a shared `TaskStore` behind `Arc` and uses `spawn_blocking`
+/// to avoid blocking the async runtime on filesystem I/O.
+pub struct TaskStoreContinuitySource {
+    store: std::sync::Arc<TaskStore>,
+}
+
+impl TaskStoreContinuitySource {
+    pub fn new(store: std::sync::Arc<TaskStore>) -> Self {
+        Self { store }
+    }
+}
+
+impl rollshot_agent::continuity::ContinuitySnapshotSource for TaskStoreContinuitySource {
+    fn load(
+        self: std::sync::Arc<Self>,
+        task_id: ProductTaskId,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<ProductTaskSnapshot, rollshot_agent::continuity::ContextRecoveryError>> + Send>>
+    {
+        let store = self.store.clone();
+        Box::pin(async move {
+            let result = tokio::task::spawn_blocking(move || store.load(&task_id)).await;
+            match result {
+                Ok(Ok(snapshot)) => Ok(snapshot),
+                Ok(Err(e)) => Err(map_store_error(e)),
+                Err(_) => Err(rollshot_agent::continuity::ContextRecoveryError::SourceUnavailable),
+            }
+        })
+    }
+}
+
+/// Map `TaskStoreError` into privacy-safe `ContextRecoveryError` variants.
+///
+/// No path or original error string enters the public error type.
+fn map_store_error(e: TaskStoreError) -> rollshot_agent::continuity::ContextRecoveryError {
+    use rollshot_agent::continuity::ContextRecoveryError;
+    match e {
+        TaskStoreError::NotFound { .. } => ContextRecoveryError::MissingTask,
+        TaskStoreError::UnsupportedSchema { .. } => ContextRecoveryError::UnsupportedSchema,
+        TaskStoreError::Corrupt { .. }
+        | TaskStoreError::TaskIdMismatch { .. }
+        | TaskStoreError::SnapshotTooLarge { .. }
+        | TaskStoreError::UnsafePath { .. }
+        | TaskStoreError::Symlink { .. }
+        | TaskStoreError::NotRegularFile { .. } => ContextRecoveryError::CorruptTask,
+        TaskStoreError::Io { .. }
+        | TaskStoreError::LockContended
+        | TaskStoreError::PreCommit { .. }
+        | TaskStoreError::CommitVisibleDurabilityUncertain { .. }
+        | TaskStoreError::IntegrityFailure { .. }
+        | TaskStoreError::AlreadyExists { .. }
+        | TaskStoreError::Conflict
+        | TaskStoreError::RevisionMismatch { .. }
+        | TaskStoreError::CasTaskIdMismatch { .. } => ContextRecoveryError::SourceUnavailable,
     }
 }
 
@@ -1737,5 +1800,65 @@ mod tests {
         let loaded = store.load(ready.task_id()).unwrap();
         assert_eq!(loaded.status(), TaskStatus::ReadyForReview);
         assert_eq!(loaded.store_schema_version(), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // Continuity snapshot source tests (Task 8)
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn continuity_source_loads_exact_bound_running_snapshot() {
+        let (store, _dir) = store();
+        let bound = running_with_contract_fixture();
+        store.create(&bound).unwrap();
+
+        let source: std::sync::Arc<dyn rollshot_agent::continuity::ContinuitySnapshotSource> =
+            std::sync::Arc::new(TaskStoreContinuitySource::new(std::sync::Arc::new(store)));
+        let loaded = source.load(bound.task_id().clone()).await.unwrap();
+        assert_eq!(loaded.snapshot_revision(), bound.snapshot_revision());
+    }
+
+    #[tokio::test]
+    async fn continuity_source_returns_missing_task_for_unknown_id() {
+        let (store, _dir) = store();
+        let source = TaskStoreContinuitySource::new(std::sync::Arc::new(store));
+        let source: std::sync::Arc<dyn rollshot_agent::continuity::ContinuitySnapshotSource> =
+            std::sync::Arc::new(source);
+        let unknown = ProductTaskId::parse("task-00000000-0000-4000-8000-999999999999").unwrap();
+        let err = source.load(unknown).await.unwrap_err();
+        assert_eq!(err, rollshot_agent::continuity::ContextRecoveryError::MissingTask);
+    }
+
+    #[tokio::test]
+    async fn continuity_source_returns_corrupt_for_malformed_file() {
+        let (store, dir) = store();
+        let task_id = task_id_fixture();
+        // Write malformed JSON directly.
+        let tasks_dir = dir.path().join("agent-tasks").join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let path = tasks_dir.join(format!("{}.json", task_id.as_str()));
+        std::fs::write(&path, "{not valid json}").unwrap();
+
+        let source = TaskStoreContinuitySource::new(std::sync::Arc::new(store));
+        let source: std::sync::Arc<dyn rollshot_agent::continuity::ContinuitySnapshotSource> =
+            std::sync::Arc::new(source);
+        let err = source.load(task_id).await.unwrap_err();
+        assert_eq!(err, rollshot_agent::continuity::ContextRecoveryError::CorruptTask);
+        // No path leakage.
+        assert!(!format!("{err:?}").contains("agent-tasks"));
+    }
+
+    #[tokio::test]
+    async fn continuity_source_error_debug_omits_paths() {
+        let (store, _dir) = store();
+        let source = TaskStoreContinuitySource::new(std::sync::Arc::new(store));
+        let source: std::sync::Arc<dyn rollshot_agent::continuity::ContinuitySnapshotSource> =
+            std::sync::Arc::new(source);
+        let unknown = ProductTaskId::parse("task-00000000-0000-4000-8000-999999999999").unwrap();
+        let err = source.load(unknown).await.unwrap_err();
+        let debug = format!("{err:?}");
+        assert!(!debug.contains("config"));
+        assert!(!debug.contains("agent-tasks"));
+        assert!(!debug.contains("task-00000000"));
     }
 }

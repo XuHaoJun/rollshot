@@ -341,6 +341,10 @@ fn map_recovery_error(err: &crate::continuity::ContextRecoveryError) -> crate::c
         | ContextRecoveryError::NonFiniteCost
         | ContextRecoveryError::Oversized(_)
         | ContextRecoveryError::BuildFailed(_) => ContextRecoveryFailureCategory::ManifestBuildFailed,
+        ContextRecoveryError::MissingTask
+        | ContextRecoveryError::CorruptTask
+        | ContextRecoveryError::UnsupportedSchema
+        | ContextRecoveryError::SourceUnavailable => ContextRecoveryFailureCategory::ManifestBuildFailed,
     }
 }
 

@@ -1242,6 +1242,84 @@ pub fn start_agent_run(
             }
         }
 
+        // ── Build continuity context after run-contract CAS ─────────────
+        // Load the exact bound snapshot and build ContinuityProjectionV1.
+        // Build RunContinuitySource::Durable if store exists and projection succeeds.
+        // If projection fails while store exists, persist terminal and abort.
+        let continuity_source: rollshot_agent::continuity::RunContinuitySource =
+            if let Some(ref store) = task_store {
+                let store_clone = store.clone();
+                let task_id_clone = task_id.clone();
+                let load_result = tokio::task::spawn_blocking(move || {
+                    store_clone.load(&task_id_clone)
+                })
+                .await;
+                match load_result {
+                    Ok(Ok(snapshot)) => {
+                        match rollshot_agent::continuity::ContinuityProjectionV1::try_from(&snapshot) {
+                            Ok(projection) => {
+                                rollshot_agent::continuity::RunContinuitySource::Durable {
+                                    expected: projection,
+                                    source: std::sync::Arc::new(
+                                        super::task_store::TaskStoreContinuitySource::new(store.clone()),
+                                    ),
+                                }
+                            }
+                            Err(e) => {
+                                let err = WorkbenchError::StorePersist {
+                                    message: format!("build continuity projection: {e}"),
+                                };
+                                persist_terminal_if_possible(
+                                    task_store.clone(), &task_id, &run_id, &err,
+                                ).await;
+                                yield crate::result_workspace::Message::Workbench(
+                                    super::WorkbenchMessage::RunFailed {
+                                        task_id: task_id.clone(),
+                                        run_id: run_id.clone(),
+                                        error: err,
+                                    },
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        let err = WorkbenchError::StorePersist {
+                            message: format!("post-bind load: {e}"),
+                        };
+                        persist_terminal_if_possible(
+                            task_store.clone(), &task_id, &run_id, &err,
+                        ).await;
+                        yield crate::result_workspace::Message::Workbench(
+                            super::WorkbenchMessage::RunFailed {
+                                task_id: task_id.clone(),
+                                run_id: run_id.clone(),
+                                error: err,
+                            },
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        let err = WorkbenchError::StorePersist {
+                            message: format!("spawn_blocking: {e}"),
+                        };
+                        persist_terminal_if_possible(
+                            task_store.clone(), &task_id, &run_id, &err,
+                        ).await;
+                        yield crate::result_workspace::Message::Workbench(
+                            super::WorkbenchMessage::RunFailed {
+                                task_id: task_id.clone(),
+                                run_id: run_id.clone(),
+                                error: err,
+                            },
+                        );
+                        return;
+                    }
+                }
+            } else {
+                rollshot_agent::continuity::RunContinuitySource::Unavailable
+            };
+
         let validation_limits = rollshot_automation::ValidationLimits::default();
         let policy = rollshot_automation::ExecutionPolicy::smart_redaction_default(
             std::time::Duration::from_secs(25), 80_000_000, 8_000_000,
@@ -1356,7 +1434,7 @@ pub fn start_agent_run(
                 model_input, &mut session, &registry, budget,
                 &cancellation_for_task, &sink, &tool_ctx, adapter.as_ref(),
                 &authority, &skill_use,
-                &rollshot_agent::continuity::RunContinuitySource::Unavailable,
+                &continuity_source,
             ).await
         });
 
@@ -4613,5 +4691,127 @@ mod reducer_tests {
             bound.snapshot_revision(),
             "store revision must be ahead of stale snapshot"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Continuity source binding tests (Task 8)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn continuity_source_loads_exact_snapshot_after_cas_bind() {
+        use super::super::task_store::{TaskStore, TaskStoreContinuitySource};
+        use rollshot_agent::product_task::{ProductTaskSnapshot, TaskAttempt, TaskAttemptId};
+
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let run_id = rollshot_agent::domain::RunId::parse(
+            "run-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+
+        let snapshot = ProductTaskSnapshot::new(
+            task_id.clone(),
+            Tk::SmartRedactionAuthor,
+            Sb::new([1u8; 32], [2u8; 32], 0, "preset".into(), None),
+            10,
+        )
+        .unwrap();
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), 10);
+        let running = snapshot.start_attempt(attempt, 20).unwrap();
+        store.create(&running).unwrap();
+
+        // Bind contract via CAS.
+        let contract = run_contract_for_provenance(
+            authority_receipt_for_provenance(),
+            skill_use_receipt_for_provenance(),
+        );
+        let loaded = store.load(&task_id).unwrap();
+        let bound = loaded.bind_run_contract(contract, 25).unwrap();
+        store.compare_and_swap(&loaded, &bound).unwrap();
+
+        // Build continuity source.
+        let source = TaskStoreContinuitySource::new(std::sync::Arc::new(store));
+        let source: std::sync::Arc<dyn rollshot_agent::continuity::ContinuitySnapshotSource> =
+            std::sync::Arc::new(source);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let loaded = rt.block_on(source.load(task_id.clone())).unwrap();
+
+        // Verify: snapshot revision matches.
+        assert_eq!(loaded.snapshot_revision(), bound.snapshot_revision());
+        // Verify: has run contract after CAS.
+        assert!(loaded.active_run_contract().is_some());
+    }
+
+    #[test]
+    fn continuity_source_reload_reflects_store_changes() {
+        use super::super::task_store::{TaskStore, TaskStoreContinuitySource};
+        use rollshot_agent::product_task::{ProductTaskSnapshot, TaskAttempt, TaskAttemptId};
+
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let run_id = rollshot_agent::domain::RunId::parse(
+            "run-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+
+        let snapshot = ProductTaskSnapshot::new(
+            task_id.clone(),
+            Tk::SmartRedactionAuthor,
+            Sb::new([1u8; 32], [2u8; 32], 0, "preset".into(), None),
+            10,
+        )
+        .unwrap();
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), 10);
+        let running = snapshot.start_attempt(attempt, 20).unwrap();
+        store.create(&running).unwrap();
+
+        let source = TaskStoreContinuitySource::new(std::sync::Arc::new(store));
+        let source: std::sync::Arc<dyn rollshot_agent::continuity::ContinuitySnapshotSource> =
+            std::sync::Arc::new(source);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // First load: running snapshot.
+        let first = rt.block_on(source.clone().load(task_id.clone())).unwrap();
+        assert_eq!(first.status(), Ts::Running);
+
+        // Advance store to terminal.
+        let store2 = TaskStore::open(tmp.path()).unwrap();
+        let loaded = store2.load(&task_id).unwrap();
+        let terminal = loaded
+            .record_terminal(rollshot_agent::product_task::TaskTerminal::RuntimeFailure, 30)
+            .unwrap();
+        store2.compare_and_swap(&loaded, &terminal).unwrap();
+
+        // Second load: terminal snapshot (revision changed).
+        let second = rt.block_on(source.load(task_id.clone())).unwrap();
+        assert!(matches!(second.status(), Ts::Failed { .. }));
+        assert!(second.snapshot_revision() > first.snapshot_revision());
+    }
+
+    #[test]
+    fn continuity_source_returns_missing_for_empty_store() {
+        use super::super::task_store::{TaskStore, TaskStoreContinuitySource};
+
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+
+        let source = TaskStoreContinuitySource::new(std::sync::Arc::new(store));
+        let source: std::sync::Arc<dyn rollshot_agent::continuity::ContinuitySnapshotSource> =
+            std::sync::Arc::new(source);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let err = rt.block_on(source.load(task_id)).unwrap_err();
+        assert_eq!(err, rollshot_agent::continuity::ContextRecoveryError::MissingTask);
     }
 }
