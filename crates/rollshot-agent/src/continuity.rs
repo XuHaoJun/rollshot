@@ -148,6 +148,7 @@ pub struct ContinuityProjectionV1 {
     snapshot_revision: u32,
     kind: TaskKind,
     status: TaskStatus,
+    source_binding_digest: String,
     attempt_id: Option<TaskAttemptId>,
     run_id: Option<RunId>,
     artifact_id: Option<ArtifactId>,
@@ -209,6 +210,10 @@ impl ContinuityProjectionV1 {
     /// SHA-256 hex digest of the canonical projection with domain separator.
     pub fn digest(&self) -> &str {
         &self.digest
+    }
+
+    pub fn source_binding_digest(&self) -> &str {
+        &self.source_binding_digest
     }
 }
 
@@ -411,6 +416,7 @@ impl TryFrom<&crate::product_task::ProductTaskSnapshot> for ContinuityProjection
             snapshot_revision,
             kind,
             status,
+            source_binding_digest: dto.source_binding_digest.clone(),
             attempt_id,
             run_id,
             artifact_id: snapshot
@@ -611,6 +617,14 @@ impl EvidenceContinuityV1 {
 
     pub(crate) fn source_generation(&self) -> u64 {
         self.source_generation
+    }
+
+    pub(crate) fn kind_str(&self) -> &'static str {
+        match self.kind {
+            crate::runtime::EvidenceKind::Validation => "validation",
+            crate::runtime::EvidenceKind::Policy => "policy",
+            crate::runtime::EvidenceKind::DryRun => "dry_run",
+        }
     }
 }
 
@@ -1018,6 +1032,85 @@ impl RunContinuityManifestV1 {
 
     pub(crate) fn projection(&self) -> &ContinuityProjectionV1 {
         &self.projection
+    }
+
+    /// Derive a deterministic restart user message from the manifest.
+    /// Privacy-safe: contains only stage, digest prefix, and bounded evidence summary.
+    pub(crate) fn restart_user_message(&self) -> String {
+        let stage = stage_str(self.stage);
+        let evidence_kinds: Vec<&str> = self
+            .evidence
+            .iter()
+            .map(|e| e.kind_str())
+            .collect();
+        let evidence_summary = if evidence_kinds.is_empty() {
+            "none".to_owned()
+        } else {
+            evidence_kinds.join(", ")
+        };
+        // Truncate digest to 16 hex chars for the restart message.
+        let digest_prefix = if self.digest.len() >= 16 {
+            &self.digest[..16]
+        } else {
+            &self.digest
+        };
+        format!(
+            "[context-overflow-restart] stage={stage} manifest_digest={digest_prefix} \
+             evidence=[{evidence_summary}] pending_review={pending} \
+             projection_digest={proj_digest}",
+            stage = stage,
+            digest_prefix = digest_prefix,
+            evidence_summary = evidence_summary,
+            pending = self.pending_review,
+            proj_digest = &self.projection.digest()[..16.min(self.projection.digest().len())],
+        )
+    }
+}
+
+// ========================================================================
+// Continuity snapshot source (Task 7)
+// ========================================================================
+
+/// Async, object-safe source that loads a `ProductTaskSnapshot` by task ID.
+/// Used by the driver to rebuild the continuity manifest on overflow.
+pub trait ContinuitySnapshotSource: Send + Sync {
+    fn load(
+        self: std::sync::Arc<Self>,
+        task_id: ProductTaskId,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<crate::product_task::ProductTaskSnapshot, ContextRecoveryError>>
+                + Send,
+        >,
+    >;
+}
+
+/// How the driver obtains a continuity snapshot for overflow recovery.
+pub enum RunContinuitySource {
+    /// Durable source backed by a `ContinuitySnapshotSource` and an expected projection.
+    Durable {
+        expected: ContinuityProjectionV1,
+        source: std::sync::Arc<dyn ContinuitySnapshotSource>,
+    },
+    /// No continuity source available; overflow is terminal.
+    Unavailable,
+}
+
+/// Privacy-safe category for context recovery failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ContextRecoveryFailureCategory {
+    /// Task, artifact, skill, authority, source, or evidence reference changed.
+    StaleReference,
+    /// Manifest construction failed (oversized, build error, etc.).
+    ManifestBuildFailed,
+}
+
+impl std::fmt::Display for ContextRecoveryFailureCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StaleReference => write!(f, "stale reference"),
+            Self::ManifestBuildFailed => write!(f, "manifest build failed"),
+        }
     }
 }
 

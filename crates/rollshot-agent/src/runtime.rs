@@ -109,6 +109,16 @@ pub enum EvidenceKind {
     DryRun,
 }
 
+impl EvidenceKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Validation => "validation",
+            Self::Policy => "policy",
+            Self::DryRun => "dry_run",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvidenceRecord {
     pub kind: EvidenceKind,

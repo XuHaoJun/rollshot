@@ -390,6 +390,7 @@ pub(crate) async fn record_cassette(
             &adapter,
             &authority,
             &skill_use,
+            &rollshot_agent::continuity::RunContinuitySource::Unavailable,
         )
         .await;
 

@@ -908,6 +908,12 @@ async fn persist_terminal_outcome(
                 RunTerminalState::RuntimeFailure => TaskTerminal::RuntimeFailure,
                 RunTerminalState::AgentProtocolFailure { .. } => TaskTerminal::AgentProtocolFailure,
                 RunTerminalState::ProviderFailure { .. } => TaskTerminal::ProviderFailure,
+                RunTerminalState::ContextOverflow => TaskTerminal::ContextOverflow,
+                RunTerminalState::ContextRecoveryFailure { category } => {
+                    TaskTerminal::ContextRecoveryFailure {
+                        category: category.to_string(),
+                    }
+                }
                 RunTerminalState::ReadyForReview(_) => unreachable!(),
             };
             match current.record_terminal(task_terminal, now) {
@@ -1350,6 +1356,7 @@ pub fn start_agent_run(
                 model_input, &mut session, &registry, budget,
                 &cancellation_for_task, &sink, &tool_ctx, adapter.as_ref(),
                 &authority, &skill_use,
+                &rollshot_agent::continuity::RunContinuitySource::Unavailable,
             ).await
         });
 

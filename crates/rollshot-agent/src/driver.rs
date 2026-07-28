@@ -261,6 +261,12 @@ pub enum RunTerminalState {
     RuntimeFailure,
     AgentProtocolFailure { message: String },
     ProviderFailure { message: String },
+    /// Context overflow after the one retry was exhausted.
+    ContextOverflow,
+    /// Context recovery failed (stale reference, manifest build failure, etc.).
+    ContextRecoveryFailure {
+        category: crate::continuity::ContextRecoveryFailureCategory,
+    },
 }
 
 // ---------- Errors ----------
@@ -271,6 +277,8 @@ pub enum DriverError {
     Cancelled,
     ProviderFailure(String),
     AgentProtocolFailure(String),
+    /// Provider classified this as a context overflow.
+    ContextOverflow,
 }
 
 impl From<BudgetError> for DriverError {
@@ -308,6 +316,33 @@ where
 }
 
 // ---------- Tool failure tracking ----------
+
+/// Map a `ModelError` to the appropriate `DriverError`.
+/// `ContextOverflow` gets its own category; everything else is `ProviderFailure`.
+fn map_model_error(error: crate::model::ModelError) -> DriverError {
+    match error {
+        crate::model::ModelError::ContextOverflow(_) => DriverError::ContextOverflow,
+        other => DriverError::ProviderFailure(other.to_string()),
+    }
+}
+
+/// Map a `ContextRecoveryError` to a privacy-safe `ContextRecoveryFailureCategory`.
+fn map_recovery_error(err: &crate::continuity::ContextRecoveryError) -> crate::continuity::ContextRecoveryFailureCategory {
+    use crate::continuity::{ContextRecoveryError, ContextRecoveryFailureCategory};
+    match err {
+        ContextRecoveryError::StaleTask { .. }
+        | ContextRecoveryError::StaleAttempt { .. }
+        | ContextRecoveryError::StaleRun { .. }
+        | ContextRecoveryError::StaleSource
+        | ContextRecoveryError::AuthorityMismatch { .. }
+        | ContextRecoveryError::SkillMismatch { .. }
+        | ContextRecoveryError::StaleEvidence { .. } => ContextRecoveryFailureCategory::StaleReference,
+        ContextRecoveryError::Cancelled
+        | ContextRecoveryError::NonFiniteCost
+        | ContextRecoveryError::Oversized(_)
+        | ContextRecoveryError::BuildFailed(_) => ContextRecoveryFailureCategory::ManifestBuildFailed,
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 enum ToolFailureKind {
@@ -461,6 +496,9 @@ impl AgentRunner {
                         Err(DriverError::AgentProtocolFailure(msg)) => {
                             return RunTerminalState::AgentProtocolFailure { message: msg };
                         }
+                        Err(DriverError::ContextOverflow) => {
+                            return RunTerminalState::ContextOverflow;
+                        }
                     }
                 }
                 rig_core::agent::run::AgentRunStep::CallTools { calls } => {
@@ -496,6 +534,9 @@ impl AgentRunner {
                         }
                         Err(DriverError::AgentProtocolFailure(msg)) => {
                             return RunTerminalState::AgentProtocolFailure { message: msg };
+                        }
+                        Err(DriverError::ContextOverflow) => {
+                            return RunTerminalState::ContextOverflow;
                         }
                     }
                 }
@@ -544,6 +585,7 @@ impl AgentRunner {
         provider: &dyn ProviderAdapter,
         authority: &crate::authority::AuthoritySnapshot,
         skill_use: &crate::skills::SkillUse,
+        continuity_source: &crate::continuity::RunContinuitySource,
     ) -> RunTerminalState {
         session.push_user(input.user_message.clone());
 
@@ -564,6 +606,10 @@ impl AgentRunner {
             .map(String::from)
             .collect();
         let tool_definitions = tool_registry.tool_definitions();
+
+        // ---- Overflow retry state ----
+        let mut overflow_retry_used = false;
+        let mut model_turns_started: usize = 0;
 
         tracing::debug!(
             target: "rollshot::agent::driver",
@@ -597,6 +643,8 @@ impl AgentRunner {
                 rig_core::agent::run::AgentRunStep::CallModel {
                     prompt, history, ..
                 } => {
+                    model_turns_started += 1;
+
                     match self
                         .run_model_turn_with_provider(
                             &mut rig_run,
@@ -626,6 +674,159 @@ impl AgentRunner {
                         }
                         Err(DriverError::AgentProtocolFailure(msg)) => {
                             return RunTerminalState::AgentProtocolFailure { message: msg };
+                        }
+                        Err(DriverError::ContextOverflow) => {
+                            if overflow_retry_used {
+                                tracing::warn!(
+                                    target: "rollshot::agent::driver",
+                                    "second context overflow; terminal"
+                                );
+                                return RunTerminalState::ContextOverflow;
+                            }
+
+                            // Check if source is available.
+                            let (expected, source) = match continuity_source {
+                                crate::continuity::RunContinuitySource::Durable {
+                                    expected,
+                                    source,
+                                } => (expected, source),
+                                crate::continuity::RunContinuitySource::Unavailable => {
+                                    tracing::warn!(
+                                        target: "rollshot::agent::driver",
+                                        "context overflow with no continuity source"
+                                    );
+                                    return RunTerminalState::ContextRecoveryFailure {
+                                        category:
+                                            crate::continuity::ContextRecoveryFailureCategory::StaleReference,
+                                    };
+                                }
+                            };
+
+                            // Check max-turns limit across both Rig instances.
+                            if model_turns_started >= self.config.max_turns {
+                                return RunTerminalState::AgentProtocolFailure {
+                                    message: "max turns exceeded during overflow recovery"
+                                        .into(),
+                                };
+                            }
+
+                            // Check model-call budget can fund another dispatch.
+                            if let Err(BudgetError::Exceeded(dim)) =
+                                tracker.charge_model_dispatch()
+                            {
+                                return RunTerminalState::BudgetExhausted {
+                                    dimension: dim,
+                                };
+                            }
+
+                            // Check cancellation before async load.
+                            if cancellation.is_cancelled() {
+                                return RunTerminalState::Cancelled;
+                            }
+
+                            // Load task snapshot through the continuity source.
+                            let load_future = source.clone().load(expected.task_id().clone());
+                            let snapshot = match tokio::time::timeout(
+                                std::time::Duration::from_secs(30),
+                                load_future,
+                            )
+                            .await
+                            {
+                                Ok(Ok(s)) => s,
+                                Ok(Err(recovery_err)) => {
+                                    tracing::warn!(
+                                        target: "rollshot::agent::driver",
+                                        error = ?recovery_err,
+                                        "continuity source load failed"
+                                    );
+                                    return RunTerminalState::ContextRecoveryFailure {
+                                        category: map_recovery_error(&recovery_err),
+                                    };
+                                }
+                                Err(_timeout) => {
+                                    tracing::warn!(
+                                        target: "rollshot::agent::driver",
+                                        "continuity source load timed out"
+                                    );
+                                    return RunTerminalState::ContextRecoveryFailure {
+                                        category:
+                                            crate::continuity::ContextRecoveryFailureCategory::ManifestBuildFailed,
+                                    };
+                                }
+                            };
+
+                            // Build and validate ContinuityProjectionV1 from loaded snapshot.
+                            let projection = match crate::continuity::ContinuityProjectionV1::try_from(
+                                &snapshot,
+                            ) {
+                                Ok(p) => p,
+                                Err(proj_err) => {
+                                    tracing::warn!(
+                                        target: "rollshot::agent::driver",
+                                        error = ?proj_err,
+                                        "projection build failed during overflow recovery"
+                                    );
+                                    return RunTerminalState::ContextRecoveryFailure {
+                                        category:
+                                            crate::continuity::ContextRecoveryFailureCategory::ManifestBuildFailed,
+                                    };
+                                }
+                            };
+
+                            // Build RunContinuityManifestV1.
+                            let manifest_inputs =
+                                crate::continuity::RunContinuityManifestInputs {
+                                    projection: &projection,
+                                    tool_ctx,
+                                    budget_tracker: &tracker,
+                                    authority,
+                                    skill_use,
+                                    expected_task_id: expected.task_id(),
+                                    expected_attempt_id: expected.attempt_id(),
+                                    expected_run_id: expected.run_id(),
+                                    expected_source_binding_digest: expected
+                                        .source_binding_digest(),
+                                    cancelled: cancellation.is_cancelled(),
+                                };
+                            let manifest =
+                                match crate::continuity::RunContinuityManifestV1::build(
+                                    &manifest_inputs,
+                                ) {
+                                    Ok(m) => m,
+                                    Err(recovery_err) => {
+                                        tracing::warn!(
+                                            target: "rollshot::agent::driver",
+                                            error = ?recovery_err,
+                                            "manifest build failed during overflow recovery"
+                                        );
+                                        return RunTerminalState::ContextRecoveryFailure {
+                                            category: map_recovery_error(&recovery_err),
+                                        };
+                                    }
+                                };
+
+                            tracing::info!(
+                                target: "rollshot::agent::driver",
+                                manifest_digest = %manifest.digest(),
+                                stage = ?manifest.stage(),
+                                "context overflow recovery: replacing Rig state"
+                            );
+
+                            // Derive restart user message and replace Rig state.
+                            let restart_msg = manifest.restart_user_message();
+                            rig_run = rig_core::agent::run::AgentRun::new(
+                                rig_core::message::Message::user(&restart_msg),
+                            )
+                            .max_turns(
+                                self.config.max_turns
+                                    .saturating_sub(model_turns_started),
+                            );
+
+                            overflow_retry_used = true;
+                            last_assistant_text.clear();
+
+                            // Continue the loop — the next iteration will call
+                            // next_step() on the fresh AgentRun.
                         }
                     }
                 }
@@ -662,6 +863,9 @@ impl AgentRunner {
                         }
                         Err(DriverError::AgentProtocolFailure(msg)) => {
                             return RunTerminalState::AgentProtocolFailure { message: msg };
+                        }
+                        Err(DriverError::ContextOverflow) => {
+                            return RunTerminalState::ContextOverflow;
                         }
                     }
                 }
@@ -1011,7 +1215,7 @@ impl AgentRunner {
         let mut stream =
             await_provider_progress(cancellation, deadline, provider.stream(request, bounds))
                 .await?
-                .map_err(|error| DriverError::ProviderFailure(error.to_string()))?;
+                .map_err(map_model_error)?;
 
         let asm = StreamedTurnAssembler::new(tool_names.clone(), tool_names.clone());
         // The model's streamed prose for this turn.
@@ -1039,7 +1243,7 @@ impl AgentRunner {
                 return Err(DriverError::BudgetExhausted(dim));
             }
 
-            let event = event_result.map_err(|e| DriverError::ProviderFailure(e.to_string()))?;
+            let event = event_result.map_err(map_model_error)?;
 
             match event {
                 ModelStreamEvent::TextDelta(text) => {
@@ -1095,7 +1299,7 @@ impl AgentRunner {
                     break c.usage;
                 }
                 ModelStreamEvent::Error(e) => {
-                    return Err(DriverError::ProviderFailure(e.to_string()));
+                    return Err(map_model_error(e));
                 }
             }
         };
@@ -1542,6 +1746,13 @@ impl AgentRunner {
                                 "visual annotation model turn produced a protocol error"
                             );
                             return VisualAnnotationRunTerminal::ProtocolFailure;
+                        }
+                        Err(DriverError::ContextOverflow) => {
+                            tracing::debug!(
+                                target: "rollshot::agent::visual_annotation",
+                                "visual annotation context overflow"
+                            );
+                            return VisualAnnotationRunTerminal::ProviderFailure;
                         }
                     }
 
@@ -3932,6 +4143,7 @@ pub(crate) mod tests {
                     &provider,
                     &test_authority(&ctx),
                     &test_skill_use(),
+                    &crate::continuity::RunContinuitySource::Unavailable,
                 )
                 .await;
 
@@ -5492,5 +5704,574 @@ main = "SKILL.md"
             reject_result.is_err(),
             "authorization boundary enforced by code, not by body text"
         );
+    }
+
+    // ---- Context overflow retry tests (Task 7) ----
+
+    mod context_overflow {
+        use super::*;
+        use crate::continuity::{ContextRecoveryFailureCategory, RunContinuitySource};
+        use crate::model::{ModelRequest, ModelStreamEvent, StopReason};
+        use crate::provider::{ProviderAdapter, StreamBounds};
+        use std::collections::VecDeque;
+        use std::pin::Pin;
+
+        /// Provider that can return establishment errors or scripted stream events.
+        enum ProviderScript {
+            /// Return an establishment-level `ModelError`.
+            EstablishmentError(crate::model::ModelError),
+            /// Return a stream of `ModelStreamEvent`s.
+            Stream(Vec<ModelStreamEvent>),
+        }
+
+        struct ScriptedProvider {
+            requests: Mutex<Vec<ModelRequest>>,
+            scripts: Mutex<VecDeque<ProviderScript>>,
+        }
+
+        impl ProviderAdapter for ScriptedProvider {
+            fn stream(
+                &self,
+                request: ModelRequest,
+                _bounds: StreamBounds,
+            ) -> Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<
+                                Pin<
+                                    Box<
+                                        dyn futures_util::Stream<
+                                                Item = Result<
+                                                    ModelStreamEvent,
+                                                    crate::model::ModelError,
+                                                >,
+                                            > + Send,
+                                    >,
+                                >,
+                                crate::model::ModelError,
+                            >,
+                        > + Send
+                        + '_,
+                >,
+            > {
+                self.requests.lock().unwrap().push(request);
+                let script = self.scripts.lock().unwrap().pop_front();
+                Box::pin(async move {
+                    match script {
+                        Some(ProviderScript::EstablishmentError(e)) => Err(e),
+                        Some(ProviderScript::Stream(events)) => {
+                            let s = futures_util::stream::iter(events.into_iter().map(Ok));
+                            Ok(Box::pin(s)
+                                as Pin<
+                                    Box<
+                                        dyn futures_util::Stream<
+                                                Item = Result<
+                                                    ModelStreamEvent,
+                                                    crate::model::ModelError,
+                                                >,
+                                            > + Send,
+                                    >,
+                                >)
+                        }
+                        None => {
+                            // Empty stream (EOF without completion).
+                            let s = futures_util::stream::iter(std::iter::empty());
+                            Ok(Box::pin(s)
+                                as Pin<
+                                    Box<
+                                        dyn futures_util::Stream<
+                                                Item = Result<
+                                                    ModelStreamEvent,
+                                                    crate::model::ModelError,
+                                                >,
+                                            > + Send,
+                                    >,
+                                >)
+                        }
+                    }
+                })
+            }
+        }
+
+        fn completion(stop: StopReason) -> ModelStreamEvent {
+            ModelStreamEvent::Completed(crate::model::ModelCompletion {
+                usage: crate::model::ModelUsage {
+                    input_tokens: 5,
+                    output_tokens: 3,
+                    total_tokens: 8,
+                },
+                stop_reason: stop,
+            })
+        }
+
+        /// In-memory `ContinuitySnapshotSource` for tests.
+        struct InMemoryContinuitySource {
+            snapshot: std::sync::Mutex<Option<crate::product_task::ProductTaskSnapshot>>,
+        }
+
+        impl InMemoryContinuitySource {
+            fn new(snapshot: crate::product_task::ProductTaskSnapshot) -> Self {
+                Self {
+                    snapshot: std::sync::Mutex::new(Some(snapshot)),
+                }
+            }
+        }
+
+        impl crate::continuity::ContinuitySnapshotSource for InMemoryContinuitySource {
+            fn load(
+                self: std::sync::Arc<Self>,
+                _task_id: crate::product_task::ProductTaskId,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<
+                                crate::product_task::ProductTaskSnapshot,
+                                crate::continuity::ContextRecoveryError,
+                            >,
+                        > + Send,
+                >,
+            > {
+                let snapshot = self.snapshot.lock().unwrap().clone();
+                Box::pin(async move {
+                    snapshot.ok_or(crate::continuity::ContextRecoveryError::BuildFailed(
+                        "no snapshot".into(),
+                    ))
+                })
+            }
+        }
+
+        /// Build a running V2 snapshot whose receipt digests match `test_authority` and
+        /// `test_skill_use` so the manifest build can pass the authority/skill checks.
+        fn overflow_test_snapshot() -> crate::product_task::ProductTaskSnapshot {
+            use crate::product_task::*;
+
+            // Use the same task_id/run_id as the test context.
+            let task_id =
+                ProductTaskId::parse("task-00000000-0000-4000-8000-00000000002a").unwrap();
+            let run_id =
+                RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap();
+            let source = SourceBinding::new(
+                [1u8; 32],
+                [2u8; 32],
+                0,
+                "preset-001".to_owned(),
+                None,
+            );
+
+            // Build the authority to get its digest.
+            let ctx = test_ctx("src");
+            let authority = test_authority(&ctx);
+            let auth_digest = authority.digest().to_owned();
+            let skill = test_skill_use();
+            let skill_digest = skill.digest().to_owned();
+
+            let contract = RunContractReceiptV1 {
+                authority: crate::authority::AuthoritySnapshotReceiptV1 {
+                    schema_version: 1,
+                    task_id: task_id.as_str().to_owned(),
+                    attempt_id: 1,
+                    run_id: run_id.as_str().to_owned(),
+                    policy_revision: "policy-rev-1".to_owned(),
+                    disclosure_ceiling: crate::authority::DisclosureCeiling::OcrLayoutOnly,
+                    existing_product_capture: false,
+                    document_binding_digest: "doc-bind-digest".to_owned(),
+                    prepared_capabilities: vec![],
+                    granted_operations: vec![],
+                    snapshot_digest: auth_digest,
+                    created_at_unix_ms: 15,
+                },
+                skill_use: crate::skills::SkillUseReceiptV1 {
+                    schema_version: 1,
+                    source_authority: "authority-001".to_owned(),
+                    package_id: "pkg-smart-redaction".to_owned(),
+                    main_resource_id: "resource-main".to_owned(),
+                    package_digest: skill_digest,
+                    declared_version: Some("1.0.0".to_owned()),
+                    invocation_kind: crate::skills::SkillInvocationKind::HostExplicit,
+                    resolved_at_unix_ms: 15,
+                },
+                bound_at_unix_ms: 15,
+            };
+            let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id, 10);
+
+            ProductTaskSnapshot::new_v2(task_id, TaskKind::SmartRedactionAuthor, source, 10)
+                .unwrap()
+                .start_attempt(attempt, 20)
+                .unwrap()
+                .bind_run_contract(contract, 25)
+                .unwrap()
+        }
+
+        /// Build a `RunContinuitySource::Durable` from a snapshot.
+        fn durable_source_from(
+            snapshot: &crate::product_task::ProductTaskSnapshot,
+        ) -> RunContinuitySource {
+            let projection =
+                crate::continuity::ContinuityProjectionV1::try_from(snapshot).unwrap();
+            let source =
+                std::sync::Arc::new(InMemoryContinuitySource::new(snapshot.clone()));
+            RunContinuitySource::Durable {
+                expected: projection,
+                source,
+            }
+        }
+
+        #[tokio::test]
+        async fn first_overflow_restarts_with_durable_source() {
+            let ctx = test_ctx("src");
+
+            let snapshot = overflow_test_snapshot();
+            let source = durable_source_from(&snapshot);
+
+            let provider = ScriptedProvider {
+                requests: Mutex::new(Vec::new()),
+                scripts: Mutex::new(VecDeque::from(vec![
+                    // First call: context overflow at stream establishment.
+                    ProviderScript::EstablishmentError(
+                        crate::model::ModelError::ContextOverflow(
+                            "context_length_exceeded".into(),
+                        ),
+                    ),
+                    // Second call (after restart): text-only completion.
+                    // The restart creates a fresh rig_run, so the model just returns text.
+                    ProviderScript::Stream(vec![
+                        ModelStreamEvent::TextDelta("recovered after overflow".into()),
+                        completion(StopReason::EndTurn),
+                    ]),
+                ])),
+            };
+
+            let runner = AgentRunner::new(AgentConfig {
+                max_turns: 5,
+                ..AgentConfig::default()
+            });
+            let mut session = AgentSession::new(
+                SessionId::new(10),
+                RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap(),
+            );
+
+            let terminal = runner
+                .run_with_provider(
+                    AuthorizedModelInput::new(
+                        "anthropic".into(),
+                        "claude-sonnet-4-6".into(),
+                        "test".into(),
+                        vec![],
+                        vec![],
+                    )
+                    .unwrap(),
+                    &mut session,
+                    &ToolRegistry::new(ToolRegistryLimits::permissive()),
+                    RunBudget::unlimited(),
+                    &RunCancellation::new(),
+                    &NullEventSink,
+                    &ctx,
+                    &provider,
+                    &test_authority(&ctx),
+                    &test_skill_use(),
+                    &source,
+                )
+                .await;
+
+            // After overflow restart, the model returns text only (no submit).
+            // The rig_run reaches Done without submission → AgentProtocolFailure.
+            // The key assertion: it did NOT return ContextOverflow or ContextRecoveryFailure.
+            assert!(
+                !matches!(terminal, RunTerminalState::ContextOverflow),
+                "should not be ContextOverflow after successful restart"
+            );
+            assert!(
+                !matches!(terminal, RunTerminalState::ContextRecoveryFailure { .. }),
+                "should not be ContextRecoveryFailure after successful restart"
+            );
+
+            // Verify exactly 2 model requests were made (overflow + retry).
+            let requests = provider.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2, "expected exactly 2 model requests");
+
+            // Verify the second request contains the restart message.
+            assert!(
+                requests[1].history.iter().any(|msg| matches!(
+                    msg,
+                    crate::model::ModelMessage::User { content }
+                        if content.contains("context-overflow-restart")
+                )),
+                "second request should contain restart message"
+            );
+        }
+
+        #[tokio::test]
+        async fn second_overflow_is_terminal() {
+            let ctx = test_ctx("src");
+
+            let snapshot = overflow_test_snapshot();
+            let source = durable_source_from(&snapshot);
+
+            let provider = ScriptedProvider {
+                requests: Mutex::new(Vec::new()),
+                scripts: Mutex::new(VecDeque::from(vec![
+                    // First call: context overflow.
+                    ProviderScript::EstablishmentError(
+                        crate::model::ModelError::ContextOverflow(
+                            "context_length_exceeded".into(),
+                        ),
+                    ),
+                    // Second call (after restart): another context overflow.
+                    ProviderScript::EstablishmentError(
+                        crate::model::ModelError::ContextOverflow(
+                            "context_length_exceeded".into(),
+                        ),
+                    ),
+                ])),
+            };
+
+            let runner = AgentRunner::new(AgentConfig {
+                max_turns: 5,
+                ..AgentConfig::default()
+            });
+            let mut session = AgentSession::new(
+                SessionId::new(11),
+                RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap(),
+            );
+
+            let terminal = runner
+                .run_with_provider(
+                    AuthorizedModelInput::new(
+                        "anthropic".into(),
+                        "claude-sonnet-4-6".into(),
+                        "test".into(),
+                        vec![],
+                        vec![],
+                    )
+                    .unwrap(),
+                    &mut session,
+                    &ToolRegistry::new(ToolRegistryLimits::permissive()),
+                    RunBudget::unlimited(),
+                    &RunCancellation::new(),
+                    &NullEventSink,
+                    &ctx,
+                    &provider,
+                    &test_authority(&ctx),
+                    &test_skill_use(),
+                    &source,
+                )
+                .await;
+
+            // Second overflow should be terminal.
+            assert_eq!(terminal, RunTerminalState::ContextOverflow);
+
+            // Exactly 2 requests: overflow + retry overflow.
+            let requests = provider.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+        }
+
+        #[tokio::test]
+        async fn overflow_with_unavailable_source_returns_recovery_failure() {
+            let ctx = test_ctx("src");
+
+            let provider = ScriptedProvider {
+                requests: Mutex::new(Vec::new()),
+                scripts: Mutex::new(VecDeque::from(vec![
+                    ProviderScript::EstablishmentError(
+                        crate::model::ModelError::ContextOverflow(
+                            "context_length_exceeded".into(),
+                        ),
+                    ),
+                ])),
+            };
+
+            let runner = AgentRunner::new(AgentConfig {
+                max_turns: 5,
+                ..AgentConfig::default()
+            });
+            let mut session = AgentSession::new(
+                SessionId::new(12),
+                RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap(),
+            );
+
+            let terminal = runner
+                .run_with_provider(
+                    AuthorizedModelInput::new(
+                        "anthropic".into(),
+                        "claude-sonnet-4-6".into(),
+                        "test".into(),
+                        vec![],
+                        vec![],
+                    )
+                    .unwrap(),
+                    &mut session,
+                    &ToolRegistry::new(ToolRegistryLimits::permissive()),
+                    RunBudget::unlimited(),
+                    &RunCancellation::new(),
+                    &NullEventSink,
+                    &ctx,
+                    &provider,
+                    &test_authority(&ctx),
+                    &test_skill_use(),
+                    &RunContinuitySource::Unavailable,
+                )
+                .await;
+
+            assert_eq!(
+                terminal,
+                RunTerminalState::ContextRecoveryFailure {
+                    category: ContextRecoveryFailureCategory::StaleReference,
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn ordinary_provider_failure_gets_zero_retries() {
+            let ctx = test_ctx("src");
+
+            let snapshot = overflow_test_snapshot();
+            let source = durable_source_from(&snapshot);
+
+            let provider = ScriptedProvider {
+                requests: Mutex::new(Vec::new()),
+                scripts: Mutex::new(VecDeque::from(vec![
+                    // First call: ordinary provider failure (not overflow).
+                    ProviderScript::EstablishmentError(
+                        crate::model::ModelError::ProviderFailure(
+                            "rate limited".into(),
+                        ),
+                    ),
+                ])),
+            };
+
+            let runner = AgentRunner::new(AgentConfig {
+                max_turns: 5,
+                ..AgentConfig::default()
+            });
+            let mut session = AgentSession::new(
+                SessionId::new(13),
+                RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap(),
+            );
+
+            let terminal = runner
+                .run_with_provider(
+                    AuthorizedModelInput::new(
+                        "anthropic".into(),
+                        "claude-sonnet-4-6".into(),
+                        "test".into(),
+                        vec![],
+                        vec![],
+                    )
+                    .unwrap(),
+                    &mut session,
+                    &ToolRegistry::new(ToolRegistryLimits::permissive()),
+                    RunBudget::unlimited(),
+                    &RunCancellation::new(),
+                    &NullEventSink,
+                    &ctx,
+                    &provider,
+                    &test_authority(&ctx),
+                    &test_skill_use(),
+                    &source,
+                )
+                .await;
+
+            // Ordinary provider failure should NOT trigger retry.
+            assert!(
+                matches!(terminal, RunTerminalState::ProviderFailure { .. }),
+                "expected ProviderFailure, got: {terminal:?}"
+            );
+
+            // Only 1 request was made (no retry).
+            let requests = provider.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn normal_run_with_durable_source_completes_without_overflow() {
+            let ctx = test_ctx("src");
+            let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+            register_all_tools(&mut reg, &ctx);
+
+            let snapshot = overflow_test_snapshot();
+            let source = durable_source_from(&snapshot);
+
+            let provider = ScriptedProvider {
+                requests: Mutex::new(Vec::new()),
+                scripts: Mutex::new(VecDeque::from(vec![
+                    // Turn 1: text-only (no tool call, so the run reaches Done).
+                    ProviderScript::Stream(vec![
+                        ModelStreamEvent::TextDelta("analysis complete".into()),
+                        completion(StopReason::EndTurn),
+                    ]),
+                ])),
+            };
+
+            let runner = AgentRunner::new(AgentConfig {
+                max_turns: 5,
+                ..AgentConfig::default()
+            });
+            let mut session = AgentSession::new(
+                SessionId::new(14),
+                RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap(),
+            );
+
+            let terminal = runner
+                .run_with_provider(
+                    AuthorizedModelInput::new(
+                        "anthropic".into(),
+                        "claude-sonnet-4-6".into(),
+                        "test".into(),
+                        vec![],
+                        vec![],
+                    )
+                    .unwrap(),
+                    &mut session,
+                    &reg,
+                    RunBudget::unlimited(),
+                    &RunCancellation::new(),
+                    &NullEventSink,
+                    &ctx,
+                    &provider,
+                    &test_authority(&ctx),
+                    &test_skill_use(),
+                    &source,
+                )
+                .await;
+
+            // Text-only completion → model didn't submit → AgentProtocolFailure.
+            // The key: it did NOT trigger any overflow or recovery.
+            assert!(
+                matches!(terminal, RunTerminalState::AgentProtocolFailure { .. }),
+                "expected AgentProtocolFailure, got: {terminal:?}"
+            );
+
+            let requests = provider.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1, "expected 1 model request");
+        }
+
+        #[test]
+        fn context_recovery_failure_category_display() {
+            assert_eq!(
+                ContextRecoveryFailureCategory::StaleReference.to_string(),
+                "stale reference"
+            );
+            assert_eq!(
+                ContextRecoveryFailureCategory::ManifestBuildFailed.to_string(),
+                "manifest build failed"
+            );
+        }
+
+        #[test]
+        fn terminal_state_has_overflow_variants() {
+            let overflow = RunTerminalState::ContextOverflow;
+            assert_eq!(format!("{overflow:?}"), "ContextOverflow");
+
+            let recovery = RunTerminalState::ContextRecoveryFailure {
+                category: ContextRecoveryFailureCategory::StaleReference,
+            };
+            assert!(format!("{recovery:?}").contains("StaleReference"));
+        }
+
+        #[test]
+        fn driver_error_has_context_overflow() {
+            let err = DriverError::ContextOverflow;
+            assert_eq!(format!("{err:?}"), "ContextOverflow");
+        }
     }
 }

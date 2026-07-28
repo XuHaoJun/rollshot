@@ -159,6 +159,8 @@ pub enum TaskTerminal {
     ProviderFailure,
     Interrupted,
     Stale,
+    ContextOverflow,
+    ContextRecoveryFailure { category: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
