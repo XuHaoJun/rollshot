@@ -30,6 +30,12 @@ pub enum AuthoritySchemaVersion {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DisclosureCeiling {
+    /// No image-derived data at all. Guide metadata text only.
+    ///
+    /// Declared first so ordering comparisons place it below every other
+    /// ceiling. Audited on 2026-07-28: no ordering comparison exists in the
+    /// codebase today, so this position matters only for future code.
+    TextMetadataOnly,
     OcrLayoutOnly,
     FullScreenshot,
 }
@@ -194,12 +200,13 @@ impl AuthoritySnapshot {
 
     /// Validate that model input respects the disclosure ceiling.
     ///
-    /// `OcrLayoutOnly` rejects any attachments. `FullScreenshot` accepts
-    /// any attachment count (including zero — it is a ceiling, not a requirement).
+    /// `TextMetadataOnly` and `OcrLayoutOnly` reject any attachments.
+    /// `FullScreenshot` accepts any attachment count (including zero — it is a ceiling,
+    /// not a requirement).
     pub fn validate_model_input(&self, input: &AuthorizedModelInput) -> Result<(), AuthorityError> {
         let attachment_count = input.attachments().len();
         match self.disclosure {
-            DisclosureCeiling::OcrLayoutOnly => {
+            DisclosureCeiling::TextMetadataOnly | DisclosureCeiling::OcrLayoutOnly => {
                 if attachment_count > 0 {
                     return Err(AuthorityError::DisclosureExceeded {
                         ceiling: self.disclosure,
@@ -587,6 +594,28 @@ mod tests {
     // ------------------------------------------------------------------
     // Disclosure ceiling
     // ------------------------------------------------------------------
+
+    #[test]
+    fn text_metadata_only_orders_below_ocr_layout() {
+        assert!(DisclosureCeiling::TextMetadataOnly < DisclosureCeiling::OcrLayoutOnly);
+        assert!(DisclosureCeiling::OcrLayoutOnly < DisclosureCeiling::FullScreenshot);
+    }
+
+    #[test]
+    fn text_metadata_only_rejects_any_attachment() {
+        let snapshot = snapshot_with_disclosure(DisclosureCeiling::TextMetadataOnly);
+
+        assert_eq!(
+            snapshot.validate_model_input(&png_input(vec![1, 2, 3, 4])),
+            Err(AuthorityError::DisclosureExceeded {
+                ceiling: DisclosureCeiling::TextMetadataOnly,
+                attachment_count: 1,
+            })
+        );
+        assert!(snapshot
+            .validate_model_input(&input_without_attachments())
+            .is_ok());
+    }
 
     #[test]
     fn ocr_only_rejects_any_model_attachment() {
