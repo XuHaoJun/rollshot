@@ -1553,6 +1553,10 @@ mod tests {
         }
     }
 
+    fn payload_bytes_fixture() -> Vec<u8> {
+        serde_json::to_vec(&payload_fixture()).expect("fixture payload serializes")
+    }
+
     fn metadata_fixture(run_id: RunId, attempt_id: TaskAttemptId) -> ProductArtifactMetadata {
         let payload = payload_fixture();
         let payload_bytes =
@@ -1615,7 +1619,7 @@ mod tests {
         let running = running_task_fixture();
         let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
         running
-            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
             .unwrap()
     }
 
@@ -1760,7 +1764,7 @@ mod tests {
         let contract = bound.active_run_contract().unwrap().clone();
         let meta = v2_metadata_with_contract(&contract);
         bound
-            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
             .unwrap()
     }
 
@@ -2270,7 +2274,7 @@ mod tests {
             let running = created.start_attempt(attempt, 20).unwrap();
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             running
-                .record_ready_for_review(meta, payload_fixture(), None, 30)
+                .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
                 .unwrap()
         };
         store.create_without_failpoint(&ready1).unwrap();
@@ -2296,7 +2300,7 @@ mod tests {
                 TaskAttemptId::new(1),
             );
             running
-                .record_ready_for_review(meta, payload_fixture(), None, 120)
+                .record_ready_for_review(meta, payload_bytes_fixture(), None, 120)
                 .unwrap()
         };
         store.create_without_failpoint(&ready2).unwrap();
@@ -2430,7 +2434,7 @@ mod tests {
         let contract = bound.active_run_contract().unwrap().clone();
         let meta = v2_metadata_with_contract(&contract);
         let ready = bound
-            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
             .unwrap();
 
         assert_eq!(
@@ -2889,7 +2893,7 @@ mod tests {
         let contract = bound.active_run_contract().unwrap().clone();
         let meta = v2_metadata_with_contract(&contract);
         let ready = bound
-            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
             .unwrap();
         store
             .transition_audited(&bound, &ready, AuditEventId::new_v4(), 30)

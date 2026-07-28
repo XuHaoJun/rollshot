@@ -1279,6 +1279,10 @@ mod tests {
         }
     }
 
+    fn payload_bytes_fixture() -> Vec<u8> {
+        serde_json::to_vec(&payload_fixture()).expect("fixture payload serializes")
+    }
+
     fn metadata_fixture(run_id: RunId, attempt_id: TaskAttemptId) -> ProductArtifactMetadata {
         let payload = payload_fixture();
         let payload_bytes = canonical_payload_bytes(&payload).unwrap();
@@ -1423,7 +1427,7 @@ mod tests {
         let running = running_v2_snapshot();
         let meta = metadata_v2_fixture(run_id_fixture(), TaskAttemptId::new(1), contract);
         running
-            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
             .unwrap()
     }
 
@@ -1433,7 +1437,7 @@ mod tests {
         let running = running_v2_snapshot();
         let meta = metadata_v2_fixture(run_id_fixture(), TaskAttemptId::new(1), contract);
         running
-            .record_ready_for_review(meta, payload_fixture(), Some(bytes), 30)
+            .record_ready_for_review(meta, payload_bytes_fixture(), Some(bytes), 30)
             .unwrap()
     }
 
@@ -1760,7 +1764,7 @@ mod tests {
         .unwrap();
         let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
         let snapshot = snapshot
-            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
             .unwrap();
         let proj = ContinuityProjectionV1::try_from(&snapshot).unwrap();
         assert_eq!(

@@ -1074,7 +1074,12 @@ mod tests {
         };
         let proposal_bytes = serde_json::to_vec(&workbench_proposal_with_candidate()).unwrap();
         let corrupt_ready = running
-            .record_ready_for_review(metadata, payload, Some(proposal_bytes), 30)
+            .record_ready_for_review(
+                metadata,
+                serde_json::to_vec(&payload).unwrap(),
+                Some(proposal_bytes),
+                30,
+            )
             .unwrap();
 
         // Confirm projection fails.
@@ -1183,7 +1188,12 @@ mod tests {
         };
         let proposal_bytes = serde_json::to_vec(&workbench_proposal_with_candidate()).unwrap();
         running
-            .record_ready_for_review(metadata, payload, Some(proposal_bytes), 30)
+            .record_ready_for_review(
+                metadata,
+                serde_json::to_vec(&payload).unwrap(),
+                Some(proposal_bytes),
+                30,
+            )
             .unwrap()
     }
 

@@ -1264,7 +1264,7 @@ impl ProductTaskSnapshot {
     pub fn record_ready_for_review(
         &self,
         metadata: ProductArtifactMetadata,
-        payload: SmartRedactionReviewPayload,
+        payload_bytes: Vec<u8>,
         proposal_payload: Option<Vec<u8>>,
         now: i64,
     ) -> Result<Self, TaskContractError> {
@@ -1299,8 +1299,9 @@ impl ProductTaskSnapshot {
         if self.store_schema_version >= 2 && last_attempt.run_contract.is_none() {
             return Err(TaskContractError::MissingRunContract);
         }
-        let payload_bytes =
-            serde_json::to_vec(&payload).map_err(|_e| TaskContractError::MissingPayload)?;
+        if payload_bytes.is_empty() {
+            return Err(TaskContractError::MissingPayload);
+        }
         let mut next = self.clone();
         next.status = TaskStatus::ReadyForReview;
         next.artifact_metadata = Some(metadata);
@@ -1906,6 +1907,10 @@ mod tests {
         }
     }
 
+    fn payload_bytes_fixture() -> Vec<u8> {
+        serde_json::to_vec(&payload_fixture()).expect("fixture payload serializes")
+    }
+
     fn metadata_fixture(run_id: RunId, attempt_id: TaskAttemptId) -> ProductArtifactMetadata {
         let payload = payload_fixture();
         let payload_bytes = canonical_payload_bytes(&payload).unwrap();
@@ -2001,7 +2006,7 @@ mod tests {
         let running = running_task_fixture();
         let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
         running
-            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
             .unwrap()
     }
 
@@ -2135,7 +2140,7 @@ mod tests {
         let wrong_run = RunId::parse("run-99999999-9999-4999-8999-999999999999").unwrap();
         let meta = metadata_fixture(wrong_run, TaskAttemptId::new(1));
         assert!(matches!(
-            running.record_ready_for_review(meta, payload_fixture(), None, 30),
+            running.record_ready_for_review(meta, payload_bytes_fixture(), None, 30),
             Err(TaskContractError::RunMismatch { .. })
         ));
     }
@@ -2212,7 +2217,7 @@ mod tests {
         let ready = running
             .record_ready_for_review(
                 meta,
-                payload_fixture(),
+                payload_bytes_fixture(),
                 Some(b"proposal-bytes".to_vec()),
                 30,
             )
@@ -2467,7 +2472,7 @@ mod tests {
         let created = created_task_fixture();
         let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
         assert!(matches!(
-            created.record_ready_for_review(meta, payload_fixture(), None, 20),
+            created.record_ready_for_review(meta, payload_bytes_fixture(), None, 20),
             Err(TaskContractError::IllegalTransition { .. })
         ));
     }
@@ -2530,7 +2535,7 @@ mod tests {
         // running_task_fixture uses attempt_id=1; pass metadata with attempt_id=99
         let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(99));
         assert!(matches!(
-            running.record_ready_for_review(meta, payload_fixture(), None, 30),
+            running.record_ready_for_review(meta, payload_bytes_fixture(), None, 30),
             Err(TaskContractError::ConflictingAttempt {
                 expected: _,
                 got: _
@@ -2728,12 +2733,50 @@ mod tests {
         let contract = bound.active_run_contract().unwrap().clone();
         let metadata = v2_metadata_with_contract(&contract);
         let ready = bound
-            .record_ready_for_review(metadata, payload_fixture(), None, 30)
+            .record_ready_for_review(metadata, payload_bytes_fixture(), None, 30)
             .unwrap();
         assert_eq!(
             ready.artifact_metadata().unwrap().run_contract(),
             bound.active_run_contract()
         );
+    }
+
+    #[test]
+    fn promotion_accepts_caller_serialized_bytes() {
+        let task = running_with_contract_fixture();
+        let contract = task.active_run_contract().unwrap().clone();
+        let payload = br#"{"suggestions":[]}"#.to_vec();
+
+        let promoted = task
+            .record_ready_for_review(
+                v2_metadata_with_contract(&contract),
+                payload.clone(),
+                None,
+                30,
+            )
+            .unwrap();
+
+        assert_eq!(promoted.status(), TaskStatus::ReadyForReview);
+        assert_eq!(
+            promoted.pending_artifact_payload(),
+            Some(payload.as_slice())
+        );
+    }
+
+    #[test]
+    fn promotion_rejects_an_empty_payload() {
+        let task = running_with_contract_fixture();
+        let contract = task.active_run_contract().unwrap().clone();
+
+        assert!(matches!(
+            task.record_ready_for_review(
+                v2_metadata_with_contract(&contract),
+                Vec::new(),
+                None,
+                30,
+            ),
+            Err(TaskContractError::MissingPayload)
+        ));
     }
 
     #[test]
@@ -2750,7 +2793,7 @@ mod tests {
         // No bind_run_contract → MissingRunContract
         let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
         assert!(matches!(
-            running_v2.record_ready_for_review(meta, payload_fixture(), None, 30),
+            running_v2.record_ready_for_review(meta, payload_bytes_fixture(), None, 30),
             Err(TaskContractError::MissingRunContract)
         ));
     }
@@ -2760,7 +2803,7 @@ mod tests {
         let running = running_task_fixture(); // schema 1
         let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
         let ready = running
-            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
             .unwrap();
         assert_eq!(ready.status(), TaskStatus::ReadyForReview);
     }
@@ -2863,7 +2906,7 @@ mod tests {
         let running = running_task_fixture();
         let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
         let ready = running
-            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
             .unwrap();
         let json = serde_json::to_string(&ready).unwrap();
 
@@ -3017,7 +3060,7 @@ mod tests {
         let bound = running.bind_run_contract(receipt.clone(), 25).unwrap();
         let meta = v2_metadata_with_contract(&receipt);
         let ready = bound
-            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
             .unwrap();
         let applying = ready.begin_apply(35).unwrap();
         let completed = applying

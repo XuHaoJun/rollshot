@@ -906,7 +906,11 @@ async fn persist_terminal_outcome(
                 Ok(b) => Some(b),
                 Err(e) => return Some(e),
             };
-            match current.record_ready_for_review(metadata, payload, proposal_payload, now) {
+            let payload_bytes = match serde_json::to_vec(&payload) {
+                Ok(b) => b,
+                Err(e) => return Some(format!("serialize review payload: {e}")),
+            };
+            match current.record_ready_for_review(metadata, payload_bytes, proposal_payload, now) {
                 Ok(s) => s,
                 Err(e) => return Some(format!("record ready: {e}")),
             }
@@ -3536,7 +3540,7 @@ mod reducer_tests {
             },
         };
         let ready = running
-            .record_ready_for_review(metadata, payload, None, now2)
+            .record_ready_for_review(metadata, serde_json::to_vec(&payload).unwrap(), None, now2)
             .unwrap();
         store.compare_and_swap(&running, &ready).unwrap();
 
@@ -3870,7 +3874,12 @@ mod reducer_tests {
 
         let proposal_bytes = serde_json::to_vec(&proposal).unwrap();
         running
-            .record_ready_for_review(metadata, payload, Some(proposal_bytes), now + 2)
+            .record_ready_for_review(
+                metadata,
+                serde_json::to_vec(&payload).unwrap(),
+                Some(proposal_bytes),
+                now + 2,
+            )
             .unwrap()
     }
 
@@ -4533,7 +4542,7 @@ mod reducer_tests {
             },
         };
         bound
-            .record_ready_for_review(meta, payload, None, 30)
+            .record_ready_for_review(meta, serde_json::to_vec(&payload).unwrap(), None, 30)
             .unwrap()
     }
 
@@ -4722,7 +4731,8 @@ mod reducer_tests {
                 budget_dimensions: std::collections::BTreeMap::new(),
             },
         };
-        let result = running.record_ready_for_review(meta, payload, None, 30);
+        let result =
+            running.record_ready_for_review(meta, serde_json::to_vec(&payload).unwrap(), None, 30);
         assert!(
             matches!(
                 result,
@@ -4783,7 +4793,7 @@ mod reducer_tests {
             },
         };
         let ready = stored_after
-            .record_ready_for_review(v2_meta, v2_payload, None, 30)
+            .record_ready_for_review(v2_meta, serde_json::to_vec(&v2_payload).unwrap(), None, 30)
             .unwrap();
         assert_eq!(ready.status(), Ts::ReadyForReview);
     }
@@ -4885,7 +4895,8 @@ mod reducer_tests {
                 budget_dimensions: std::collections::BTreeMap::new(),
             },
         };
-        let promo_result = loaded.record_ready_for_review(meta, payload, None, 30);
+        let promo_result =
+            loaded.record_ready_for_review(meta, serde_json::to_vec(&payload).unwrap(), None, 30);
         assert!(
             matches!(
                 promo_result,
@@ -4973,7 +4984,8 @@ mod reducer_tests {
                 budget_dimensions: std::collections::BTreeMap::new(),
             },
         };
-        let result = bound.record_ready_for_review(meta, payload, None, 30);
+        let result =
+            bound.record_ready_for_review(meta, serde_json::to_vec(&payload).unwrap(), None, 30);
         assert!(
             matches!(
                 result,
@@ -5328,7 +5340,12 @@ mod reducer_tests {
             )
             .unwrap();
             running
-                .record_ready_for_review(metadata, payload, Some(proposal_bytes), 30)
+                .record_ready_for_review(
+                    metadata,
+                    serde_json::to_vec(&payload).unwrap(),
+                    Some(proposal_bytes),
+                    30,
+                )
                 .unwrap()
         };
 
@@ -5479,7 +5496,12 @@ mod reducer_tests {
         )
         .unwrap();
         let ready = running
-            .record_ready_for_review(metadata, payload, Some(proposal_bytes), 30)
+            .record_ready_for_review(
+                metadata,
+                serde_json::to_vec(&payload).unwrap(),
+                Some(proposal_bytes),
+                30,
+            )
             .unwrap();
 
         // Projection must fail due to task ID mismatch.
@@ -5579,6 +5601,10 @@ mod dropped_display_events {
         }
     }
 
+    fn payload_bytes() -> Vec<u8> {
+        serde_json::to_vec(&payload()).expect("fixture payload serializes")
+    }
+
     fn metadata(task: &ProductTaskSnapshot, n: u64, now: i64) -> ProductArtifactMetadata {
         let attempt = task.attempts().last().unwrap();
         ProductArtifactMetadata::new(
@@ -5642,7 +5668,7 @@ mod dropped_display_events {
         let ready = running
             .record_ready_for_review(
                 metadata(&running, n, BASE_MS + 1),
-                payload(),
+                payload_bytes(),
                 None,
                 BASE_MS + 1,
             )

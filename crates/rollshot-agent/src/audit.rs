@@ -1299,6 +1299,10 @@ mod tests {
         }
     }
 
+    fn payload_bytes_fixture() -> Vec<u8> {
+        serde_json::to_vec(&payload_fixture()).expect("fixture payload serializes")
+    }
+
     fn metadata_fixture(run_id: RunId, attempt_id: TaskAttemptId) -> ProductArtifactMetadata {
         let payload = payload_fixture();
         let payload_bytes = canonical_payload_bytes(&payload).unwrap();
@@ -1658,7 +1662,7 @@ mod tests {
                 .unwrap();
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             let ready = running
-                .record_ready_for_review(meta, payload_fixture(), None, 30)
+                .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
                 .unwrap();
             let receipt = ready.audit_transition_receipt().unwrap();
             assert_eq!(receipt.status, AuditTaskStatusV1::ReadyForReview);
@@ -1815,7 +1819,7 @@ mod tests {
                 .unwrap();
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             let ready = running
-                .record_ready_for_review(meta, payload_fixture(), None, 30)
+                .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
                 .unwrap();
             let envelope =
                 derive_material_transition(Some(&running), &ready, audit_id(4), 30).unwrap();
@@ -1840,7 +1844,7 @@ mod tests {
                 .unwrap();
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             let ready = running
-                .record_ready_for_review(meta, payload_fixture(), None, 30)
+                .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
                 .unwrap();
             let applying = ready.begin_apply(35).unwrap();
             let envelope =
@@ -1860,7 +1864,7 @@ mod tests {
                 .unwrap();
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             let ready = running
-                .record_ready_for_review(meta, payload_fixture(), None, 30)
+                .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
                 .unwrap();
             let applying = ready.begin_apply(35).unwrap();
             let completed = applying
@@ -1893,7 +1897,7 @@ mod tests {
                 .unwrap();
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             let ready = running
-                .record_ready_for_review(meta, payload_fixture(), None, 30)
+                .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
                 .unwrap();
             let rejected = ready
                 .reject(
@@ -1942,7 +1946,7 @@ mod tests {
                 .unwrap();
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             let ready = running
-                .record_ready_for_review(meta, payload_fixture(), None, 30)
+                .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
                 .unwrap();
             let stale = ready.mark_stale(40).unwrap();
             let envelope =
@@ -2105,7 +2109,7 @@ mod tests {
             // Use running (rev 1) → Completed which is unsupported
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             let ready = running
-                .record_ready_for_review(meta, payload_fixture(), None, 30)
+                .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
                 .unwrap();
             let applying = ready.begin_apply(35).unwrap();
             let completed = applying
@@ -2346,7 +2350,7 @@ mod tests {
                 .unwrap();
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             let ready = running
-                .record_ready_for_review(meta, payload_fixture(), None, 30)
+                .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
                 .unwrap();
             let applying = ready.begin_apply(35).unwrap();
             let mut receipt = apply_receipt_fixture();
