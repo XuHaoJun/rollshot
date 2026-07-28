@@ -465,6 +465,29 @@ async fn anthropic_provider_500() {
 }
 
 #[tokio::test]
+async fn anthropic_provider_context_overflow() {
+    let fixture = get_fixture("anthropic_context_overflow");
+    let server = setup_sse_mock(&fixture).await;
+    let adapter = AnthropicAdapter::new("test-key", &server.uri()).expect("new");
+
+    let request = test_request(vec![]);
+    let result = adapter.stream(request, test_bounds()).await;
+
+    if let Ok(mut stream) = result {
+        let (events, error) = collect_events(&mut stream).await;
+        assert!(
+            matches!(error, Some(ModelError::ContextOverflow(_)))
+                || events
+                    .iter()
+                    .any(|e| matches!(e, ModelStreamEvent::Error(ModelError::ContextOverflow(_)))),
+            "context overflow should produce ContextOverflow error, got events: {:?}, error: {:?}",
+            events,
+            error
+        );
+    }
+}
+
+#[tokio::test]
 async fn anthropic_api_key_not_in_debug() {
     let adapter =
         AnthropicAdapter::new("super-secret-key-12345", "http://localhost:1").expect("new");
@@ -960,6 +983,29 @@ async fn openai_provider_500() {
                     .iter()
                     .any(|e| matches!(e, ModelStreamEvent::Error(_))),
             "500 should produce an error, got events: {:?}, error: {:?}",
+            events,
+            error
+        );
+    }
+}
+
+#[tokio::test]
+async fn openai_provider_context_overflow() {
+    let fixture = get_fixture("openai_context_overflow");
+    let server = setup_sse_mock(&fixture).await;
+    let adapter = OpenAIAdapter::new("test-key", &server.uri()).expect("new");
+
+    let request = test_request(vec![]);
+    let result = adapter.stream(request, test_bounds()).await;
+
+    if let Ok(mut stream) = result {
+        let (events, error) = collect_events(&mut stream).await;
+        assert!(
+            matches!(error, Some(ModelError::ContextOverflow(_)))
+                || events
+                    .iter()
+                    .any(|e| matches!(e, ModelStreamEvent::Error(ModelError::ContextOverflow(_)))),
+            "context overflow should produce ContextOverflow error, got events: {:?}, error: {:?}",
             events,
             error
         );

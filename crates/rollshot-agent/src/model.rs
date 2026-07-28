@@ -145,6 +145,8 @@ pub enum ModelError {
     ProtocolFailure(String),
     #[error("stream incomplete: {0}")]
     StreamIncomplete(String),
+    #[error("context overflow: {0}")]
+    ContextOverflow(String),
 }
 
 // ---------- Private Rig conversions ----------

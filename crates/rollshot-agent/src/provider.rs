@@ -176,23 +176,54 @@ fn model_message_to_rig(msg: &ModelMessage) -> Message {
     }
 }
 
+/// Detect Anthropic context-overflow signals in a provider error message.
+/// Anthropic returns `context_length_exceeded` in the error type field.
+fn is_anthropic_context_overflow(msg: &str) -> bool {
+    msg.contains("context_length_exceeded") || msg.contains("prompt is too long")
+}
+
+/// Detect OpenAI context-overflow signals in a provider error message.
+/// OpenAI returns `context_length_exceeded` in the error code and
+/// "maximum context length" in the message body.
+fn is_openai_context_overflow(msg: &str) -> bool {
+    msg.contains("context_length_exceeded")
+        || msg.contains("maximum context length")
+        || msg.contains("reduce the length of the messages")
+}
+
+/// Classify whether a provider error string indicates context overflow
+/// from either Anthropic or OpenAI.
+fn classify_context_overflow(msg: &str) -> bool {
+    is_anthropic_context_overflow(msg) || is_openai_context_overflow(msg)
+}
+
 fn rig_to_model_error(err: rig_core::completion::CompletionError) -> ModelError {
     let msg = err.to_string();
     match &err {
         rig_core::completion::CompletionError::HttpError(_) => {
-            ModelError::ProviderFailure(sanitize_error(&msg))
+            if classify_context_overflow(&msg) {
+                ModelError::ContextOverflow(sanitize_error(&msg))
+            } else {
+                ModelError::ProviderFailure(sanitize_error(&msg))
+            }
         }
         rig_core::completion::CompletionError::ResponseError(inner) => {
             if inner.contains("authentication") || inner.contains("Invalid API key") {
                 ModelError::ProviderFailure(sanitize_error(inner))
             } else if inner.contains("rate_limit") || inner.contains("Rate limit") {
                 ModelError::StreamIncomplete(sanitize_error(inner))
+            } else if classify_context_overflow(inner) {
+                ModelError::ContextOverflow(sanitize_error(inner))
             } else {
                 ModelError::ProtocolFailure(sanitize_error(inner))
             }
         }
         rig_core::completion::CompletionError::ProviderError(_) => {
-            ModelError::ProviderFailure(sanitize_error(&msg))
+            if classify_context_overflow(&msg) {
+                ModelError::ContextOverflow(sanitize_error(&msg))
+            } else {
+                ModelError::ProviderFailure(sanitize_error(&msg))
+            }
         }
         rig_core::completion::CompletionError::JsonError(_) => {
             ModelError::ProtocolFailure(sanitize_error(&msg))
