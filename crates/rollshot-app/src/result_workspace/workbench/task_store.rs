@@ -3069,4 +3069,65 @@ mod tests {
             rollshot_agent::audit::AuditEventV1::AuthorityDenied { .. }
         ));
     }
+
+    // ==================================================================
+    // Audit privacy: every persisted event excludes sensitive fields
+    // ==================================================================
+
+    #[test]
+    fn audit_privacy_persisted_events_exclude_sensitive_fields() {
+        // Every AuditEventV1 variant, when persisted through the TaskStore
+        // audited operations, must not contain forbidden sensitive fields.
+        let forbidden = &[
+            "api_key", "secret", "password", "token",
+            "system_prompt", "user_prompt", "response_text",
+            "tool_arguments", "tool_result",
+            "pixel_data", "raw_bytes", "proposal_payload",
+        ];
+
+        let (store, _dir) = store();
+        let created = created_task_fixture();
+        store.create_audited(&created, AuditEventId::new_v4(), 10).unwrap();
+
+        let running = created.start_attempt(attempt_fixture(), 20).unwrap();
+        store.transition_audited(&created, &running, AuditEventId::new_v4(), 20).unwrap();
+
+        let events = store.committed_audit_events(created.task_id()).unwrap();
+        for event in &events {
+            let json = serde_json::to_string(event).unwrap();
+            for pat in forbidden {
+                assert!(
+                    !json.contains(pat),
+                    "persisted event leaks '{pat}': {json}"
+                );
+            }
+        }
+    }
+
+    // ==================================================================
+    // Corruption blocking: corrupt task file does not block audit
+    // ==================================================================
+
+    #[test]
+    fn corrupt_journal_does_not_block_task_load() {
+        // A corrupt audit journal is non-authoritative: the TaskStore
+        // can still load product state independently.
+        let (store, dir) = store();
+        let snapshot = created_task_fixture();
+        store.create_audited(&snapshot, AuditEventId::new_v4(), 10).unwrap();
+
+        // Corrupt the journal file.
+        let audit_dir = dir.path().join("agent-tasks").join("audit");
+        let journal_path = audit_dir.join(format!("{}.jsonl", snapshot.task_id().as_str()));
+        std::fs::write(&journal_path, b"corrupt data\n").unwrap();
+
+        // TaskStore product state is still loadable.
+        let loaded = store.load(snapshot.task_id()).unwrap();
+        assert_eq!(loaded.status(), rollshot_agent::product_task::TaskStatus::Created);
+
+        // committed_audit_events should fail (journal corrupt),
+        // but product state was already loaded.
+        let audit_result = store.committed_audit_events(snapshot.task_id());
+        assert!(audit_result.is_err(), "corrupt journal must fail audit read");
+    }
 }

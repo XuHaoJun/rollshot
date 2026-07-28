@@ -1283,4 +1283,77 @@ pub(crate) mod tests {
         let receipt = sink.append(envelope).await.unwrap();
         assert_eq!(receipt.sequence, 0);
     }
+
+    // ==================================================================
+    // Corruption blocking: corrupt journal is non-authoritative
+    // ==================================================================
+
+    #[test]
+    fn corrupt_journal_blocks_scan_not_task_store() {
+        // When the journal file is corrupted, scan returns
+        // CorruptJournal error but the TaskStore (product state)
+        // remains loadable independently.
+        let dir = tempfile::tempdir().unwrap();
+        let store = super::super::task_store::TaskStore::open(dir.path()).unwrap();
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        ).unwrap();
+
+        // Create a task snapshot.
+        let snapshot = rollshot_agent::product_task::ProductTaskSnapshot::new(
+            task_id.clone(),
+            rollshot_agent::product_task::TaskKind::SmartRedactionAuthor,
+            rollshot_agent::product_task::SourceBinding::new(
+                [1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None,
+            ),
+            10,
+        ).unwrap();
+        store.create(&snapshot).unwrap();
+
+        // Write a corrupted journal file.
+        let audit_dir = dir.path().join("agent-tasks").join("audit");
+        std::fs::create_dir_all(&audit_dir).unwrap();
+        let journal_path = audit_dir.join(format!("{}.jsonl", task_id.as_str()));
+        std::fs::write(&journal_path, b"not valid jsonl\n").unwrap();
+
+        // Journal scan should fail with CorruptJournal.
+        let journal = AuditJournal::open(dir.path()).unwrap();
+        let scan_result = journal.scan(&task_id);
+        assert!(matches!(
+            scan_result,
+            Err(AuditStoreError::CorruptJournal { .. })
+        ));
+
+        // TaskStore product state is independent — still loadable.
+        let loaded = store.load(&task_id).unwrap();
+        assert_eq!(loaded.status(), rollshot_agent::product_task::TaskStatus::Created);
+    }
+
+    #[test]
+    fn corrupt_interior_line_is_corrupt_journal_error() {
+        // A complete interior line that is not valid JSON triggers
+        // CorruptJournal, not a panic or silent corruption.
+        let (journal, dir) = store();
+        let task_id = task_id();
+        journal.append(&task_id, aborted_payload()).unwrap();
+
+        // Write a malformed interior line.
+        let path = journal.journal_path(&task_id);
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            f.write_all(b"not json at all\n").unwrap();
+            f.sync_all().unwrap();
+        }
+
+        // Reopen and scan — should fail closed.
+        let journal2 = AuditJournal::open(dir.path()).unwrap();
+        assert!(matches!(
+            journal2.scan(&task_id),
+            Err(AuditStoreError::CorruptJournal { .. })
+        ));
+    }
 }

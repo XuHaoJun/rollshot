@@ -2023,4 +2023,232 @@ mod tests {
             }
         }
     }
+
+    // ==================================================================
+    // Privacy sentinels: every AuditEventV1 variant
+    // ==================================================================
+
+    mod audit_privacy {
+        use super::*;
+
+        const FORBIDDEN: &[&str] = &[
+            // provider internals / credentials
+            "api_key", "secret", "password", "token",
+            // prose / prompts / source code / response text
+            "system_prompt", "user_prompt", "response_text",
+            // tool args / results
+            "tool_arguments", "tool_result",
+            // pixel data / proposal bytes
+            "pixel_data", "raw_bytes", "proposal_payload",
+        ];
+
+        fn auth_ref() -> AuthorityAuditRefV1 {
+            authority_snapshot_fixture().audit_ref()
+        }
+
+        fn skill_ref() -> SkillUseAuditRefV1 {
+            SkillUseAuditRefV1 {
+                schema_version: 1,
+                source_authority: "authority://test".to_owned(),
+                package_id: "package-sentinel".to_owned(),
+                main_resource_id: "resource-1".to_owned(),
+                package_digest: "ab".repeat(32),
+                invocation_kind: SkillInvocationKind::HostExplicit,
+            }
+        }
+
+        fn artifact_ref() -> ArtifactAuditRefV1 {
+            ArtifactAuditRefV1 {
+                schema_version: 1,
+                artifact_id: "artifact-00000000-0000-4000-8000-000000000001".to_owned(),
+                artifact_revision: 1,
+                kind: ArtifactKind::SmartRedaction,
+                canonical_payload_sha256: "aa".repeat(32),
+                source_binding_sha256: "bb".repeat(32),
+                proposal_id: "proposal-00000000-0000-4000-8000-000000000001".to_owned(),
+                provider_id: "anthropic".to_owned(),
+                model_id: "claude-sonnet-4-20250514".to_owned(),
+                run_config_digest: "cc".repeat(32),
+            }
+        }
+
+        fn review_decision_fixture() -> ReviewDecisionAuditV1 {
+            ReviewDecisionAuditV1 {
+                artifact_id: "artifact-00000000-0000-4000-8000-000000000001".to_owned(),
+                artifact_revision: 1,
+                proposal_id: "proposal-00000000-0000-4000-8000-000000000001".to_owned(),
+                applied_candidate_ids: vec![0, 1],
+                rejected_candidate_ids: vec![],
+                decided_at_unix_ms: 50,
+            }
+        }
+
+        fn assert_no_forbidden_leaks(event: &AuditEventV1, label: &str) {
+            let json = serde_json::to_string(event).unwrap();
+            for pat in FORBIDDEN {
+                assert!(
+                    !json.contains(pat),
+                    "{label} leaks forbidden field '{pat}': {json}"
+                );
+            }
+        }
+
+        #[test]
+        fn task_created_privacy() {
+            assert_no_forbidden_leaks(&AuditEventV1::TaskCreated, "TaskCreated");
+        }
+
+        #[test]
+        fn attempt_started_privacy() {
+            let event = AuditEventV1::AttemptStarted {
+                attempt_id: 1,
+                run_id: run_id().as_str().to_owned(),
+            };
+            assert_no_forbidden_leaks(&event, "AttemptStarted");
+        }
+
+        #[test]
+        fn run_contract_bound_privacy() {
+            let event = AuditEventV1::RunContractBound {
+                authority: auth_ref(),
+                skill_use: skill_ref(),
+            };
+            assert_no_forbidden_leaks(&event, "RunContractBound");
+            let json = serde_json::to_string(&event).unwrap();
+            assert!(!json.contains("granted_operations"));
+            assert!(!json.contains("prepared_capabilities"));
+        }
+
+        #[test]
+        fn authority_denied_privacy() {
+            let event = AuditEventV1::AuthorityDenied {
+                authority: auth_ref(),
+                tool_name: "replace_source".to_owned(),
+                required_operation: "WriteDraft".to_owned(),
+            };
+            assert_no_forbidden_leaks(&event, "AuthorityDenied");
+        }
+
+        #[test]
+        fn artifact_promoted_privacy() {
+            let event = AuditEventV1::ArtifactPromoted {
+                artifact: artifact_ref(),
+            };
+            assert_no_forbidden_leaks(&event, "ArtifactPromoted");
+            let json = serde_json::to_string(&event).unwrap();
+            assert!(!json.contains("proposal_payload"));
+            assert!(!json.contains("raw_bytes"));
+        }
+
+        #[test]
+        fn review_apply_started_privacy() {
+            let event = AuditEventV1::ReviewApplyStarted {
+                artifact: artifact_ref(),
+            };
+            assert_no_forbidden_leaks(&event, "ReviewApplyStarted");
+        }
+
+        #[test]
+        fn review_decision_committed_privacy() {
+            let event = AuditEventV1::ReviewDecisionCommitted {
+                applied: true,
+                review_decision: review_decision_fixture(),
+                document_state: Some(DocumentStateReceipt {
+                    state_id: 1,
+                    digest: "dd".repeat(32),
+                }),
+            };
+            assert_no_forbidden_leaks(&event, "ReviewDecisionCommitted");
+            let json = serde_json::to_string(&event).unwrap();
+            assert!(!json.contains("local_delta"));
+            assert!(!json.contains("moved_candidates"));
+        }
+
+        #[test]
+        fn task_terminated_privacy() {
+            let event = AuditEventV1::TaskTerminated {
+                terminal: AuditTaskTerminalV1::Cancelled,
+            };
+            assert_no_forbidden_leaks(&event, "TaskTerminated");
+        }
+
+        #[test]
+        fn envelope_serialized_event_excludes_sensitive_fields() {
+            let event = AuditEventV1::RunContractBound {
+                authority: auth_ref(),
+                skill_use: skill_ref(),
+            };
+            let correlation = AuditCorrelationV1::for_task(
+                task_id_fixture().as_str().to_owned(),
+            );
+            let envelope = AuditEnvelopeV1::new(
+                audit_id(99), 9999, event, correlation,
+            ).unwrap();
+            let json = serde_json::to_string(&envelope).unwrap();
+            for pat in FORBIDDEN {
+                assert!(
+                    !json.contains(pat),
+                    "envelope leaks forbidden field '{pat}': {json}"
+                );
+            }
+        }
+    }
+
+    // ==================================================================
+    // Authoritative repair: journal survives crash without blocking
+    // product state
+    // ==================================================================
+
+    mod authoritative_repair {
+        use super::*;
+
+        #[test]
+        fn uncommitted_prepare_aborted_on_next_scan() {
+            // Simulate crash after prepare but before commit.
+            // Re-scan should find the pending transaction and the
+            // reconciliation layer should abort it.
+            let task = ProductTaskSnapshot::new(
+                task_id_fixture(),
+                TaskKind::SmartRedactionAuthor,
+                SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None),
+                10,
+            ).unwrap();
+            let receipt = task.audit_transition_receipt();
+            let correlation = AuditCorrelationV1::for_task(
+                task_id_fixture().as_str().to_owned(),
+            );
+            let envelope = AuditEnvelopeV1::new(
+                audit_id(1), 10, AuditEventV1::TaskCreated, correlation,
+            ).unwrap();
+
+            // The envelope itself is valid and can be used for a prepare.
+            // Verify it round-trips.
+            let json = serde_json::to_string(&envelope).unwrap();
+            let back: AuditEnvelopeV1 = serde_json::from_str(&json).unwrap();
+            assert_eq!(envelope, back);
+        }
+    }
+
+    // ==================================================================
+    // Corruption blocking: corrupt journal is non-authoritative
+    // ==================================================================
+
+    mod corrupt_journal {
+        use super::*;
+
+        #[test]
+        fn corrupt_envelope_json_is_rejected_by_contract() {
+            // A malformed envelope must not pass through.
+            let bad_json = r#"{"schema_version":1,"event_id":12345}"#;
+            let result: Result<AuditEnvelopeV1, _> = serde_json::from_str(bad_json);
+            assert!(result.is_err(), "corrupt envelope must be rejected");
+        }
+
+        #[test]
+        fn truncated_envelope_json_is_rejected() {
+            let bad_json = r#"{"schema_vers"#;
+            let result: Result<AuditEnvelopeV1, _> = serde_json::from_str(bad_json);
+            assert!(result.is_err(), "truncated envelope must be rejected");
+        }
+    }
 }

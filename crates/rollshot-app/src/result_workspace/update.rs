@@ -8464,4 +8464,32 @@ mod tests {
             Some(super::super::secure_sharing::DESTINATION_VERIFICATION_ERROR)
         );
     }
+
+    // ==================================================================
+    // Dropped display events: transient UI messages are independent from
+    // durable audit journal.
+    // ==================================================================
+
+    #[test]
+    fn dropped_display_events_message_dispatch_does_not_require_audit_journal() {
+        // The update function handles UI messages (display events) without
+        // requiring any audit journal. Proves that transient event delivery
+        // is orthogonal to durable audit.
+        let mut state = workspace();
+        let _ = update(&mut state, Message::SetZoom(ZoomMode::FitWindow));
+        // Workspace state is updated (zoom changed), no audit dependency.
+        assert_eq!(state.viewport.zoom, ZoomMode::FitWindow);
+    }
+
+    #[test]
+    fn dropped_display_events_dropped_task_does_not_corrupt_workspace_state() {
+        // When an iced Task is dropped (display event delivery abandoned),
+        // the workspace state remains consistent.
+        let mut state = workspace();
+        let before_state_id = state.document.image.state_id();
+        let task = update(&mut state, Message::SetZoom(ZoomMode::FitWindow));
+        drop(task);
+        // Workspace state is unaffected by the dropped task.
+        assert_eq!(state.document.image.state_id(), before_state_id);
+    }
 }

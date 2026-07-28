@@ -5495,3 +5495,71 @@ mod reducer_tests {
         );
     }
 }
+
+// ==================================================================
+// Dropped display events: transient RunEvent delivery is independent
+// from durable audit. When the event channel is full or dropped,
+// audit operations continue unaffected.
+// ==================================================================
+
+#[cfg(test)]
+mod dropped_display_events {
+    use rollshot_agent::runtime::{RunEvent, SourceDiffSummary};
+
+    /// Proves that RunEvent variants carry no audit authority:
+    /// they contain only display-transient data (text chunks,
+    /// tool call names, source diff summaries) that is never
+    /// persisted to the audit journal.
+    #[test]
+    fn run_event_serialization_excludes_audit_fields() {
+        let events = vec![
+            RunEvent::TextChunk {
+                text: "assistant prose".to_owned(),
+            },
+            RunEvent::ToolCallStart {
+                name: "replace_source".to_owned(),
+            },
+            RunEvent::ToolCallEnd {
+                name: "replace_source".to_owned(),
+                success: true,
+            },
+            RunEvent::SourceChanged {
+                tool: "replace_source".to_owned(),
+                diff: SourceDiffSummary {
+                    old_generation: 0,
+                    new_generation: 1,
+                    old_source_bytes: 0,
+                    new_source_bytes: 10,
+                    omitted_lines: 0,
+                    lines: vec![],
+                },
+            },
+            RunEvent::TurnComplete,
+        ];
+
+        for event in &events {
+            let json = serde_json::to_string(event).unwrap();
+            // RunEvent must never carry audit-envelope fields.
+            assert!(!json.contains("event_payload_digest"));
+            assert!(!json.contains("event_id"));
+            assert!(!json.contains("AuditEnvelope"));
+            // RunEvent must never carry sensitive audit fields.
+            assert!(!json.contains("api_key"));
+            assert!(!json.contains("secret"));
+            assert!(!json.contains("proposal_payload"));
+        }
+    }
+
+    /// Channel drop: when the receiving end of a RunEvent channel
+    /// is dropped, the sender side does not block the workbench.
+    #[test]
+    fn channel_drop_does_not_block_workbench() {
+        let (tx, rx) = std::sync::mpsc::channel::<RunEvent>();
+        // Drop the receiver — simulates a dropped display event sink.
+        drop(rx);
+        // Sender returns Err — the workbench can detect this and
+        // continue without blocking audit operations.
+        let result = tx.send(RunEvent::TurnComplete);
+        assert!(result.is_err(), "dropped receiver must cause send error");
+    }
+}

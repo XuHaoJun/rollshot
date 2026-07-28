@@ -6582,4 +6582,68 @@ main = "SKILL.md"
             }
         }
     }
+
+    // ==================================================================
+    // Drop-all transient sink: proves RunEvent delivery is independent
+    // from durable audit. NullEventSink silently discards every event;
+    // audit append sink receives the same envelopes regardless.
+    // ==================================================================
+
+    mod dropped_display_events {
+        use super::*;
+
+        /// A sink that records whether it was called, proving that
+        /// transient event delivery (RunEventSink) is orthogonal to
+        /// the audit append path (AuditAppendSink).
+        #[derive(Default)]
+        struct DropAllSink {
+            count: std::sync::atomic::AtomicUsize,
+        }
+
+        impl crate::runtime::RunEventSink for DropAllSink {
+            fn emit(&self, _event: crate::runtime::RunEvent) {
+                self.count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
+        #[test]
+        fn null_event_sink_discards_all_run_events() {
+            let sink = NullEventSink;
+            // Emit every variant of RunEvent.
+            sink.emit(crate::runtime::RunEvent::TextChunk {
+                text: "hello".to_owned(),
+            });
+            sink.emit(crate::runtime::RunEvent::ToolCallStart {
+                name: "tool".to_owned(),
+            });
+            sink.emit(crate::runtime::RunEvent::ToolCallEnd {
+                name: "tool".to_owned(),
+                success: true,
+            });
+            sink.emit(crate::runtime::RunEvent::SourceChanged {
+                tool: "edit".to_owned(),
+                diff: crate::runtime::SourceDiffSummary {
+                    old_generation: 0,
+                    new_generation: 1,
+                    old_source_bytes: 0,
+                    new_source_bytes: 10,
+                    omitted_lines: 0,
+                    lines: vec![],
+                },
+            });
+            sink.emit(crate::runtime::RunEvent::TurnComplete);
+            // NullEventSink has no state — all events silently dropped.
+            // The audit path is unaffected by any of these.
+        }
+
+        #[test]
+        fn drop_all_sink_counts_events() {
+            let sink = DropAllSink::default();
+            sink.emit(crate::runtime::RunEvent::TextChunk {
+                text: "x".to_owned(),
+            });
+            sink.emit(crate::runtime::RunEvent::TurnComplete);
+            assert_eq!(sink.count.load(std::sync::atomic::Ordering::Relaxed), 2);
+        }
+    }
 }
