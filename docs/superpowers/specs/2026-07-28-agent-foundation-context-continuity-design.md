@@ -274,6 +274,10 @@ references:
 - a digest of the exact review receipt when one exists; and
 - a canonical projection digest over all fields.
 
+The canonical serialized projection is capped at 64 KiB. Every retained string
+is subject to the existing Product Task 4,096-byte field bound before
+serialization.
+
 The projection excludes proposal bytes, screenshot pixels, source text, user
 messages, complete skill content, authority grants, credentials, paths, and
 provider/model conversation state.
@@ -333,9 +337,10 @@ It contains:
 
 It contains no root path, image pixels, annotations, raw semantic input,
 provider/model name, credentials, or prior conversation. Construction enforces
-existing project validation plus the existing maximum generated-step bound and
-explicit aggregate text/serialized-byte bounds. Oversize projects receive a
-typed projection-limit failure before a provider request.
+existing project validation plus these V1 bounds: at most 200 ordered steps,
+at most 4,096 UTF-8 bytes in the guide title or any projected step title/caption, and at
+most 256 KiB for the canonical serialized projection. Oversize projects receive
+a typed projection-limit failure before a provider request.
 
 ### 9.2 Product-path selection
 
@@ -412,7 +417,7 @@ The manifest contains:
 - exact task ID, task snapshot revision, attempt ID, and run ID;
 - source-binding digest and current draft generation;
 - current run stage as a closed enum: `Drafting`, `NeedsValidation`,
-  `NeedsDryRun`, `ReadyToSubmit`, or `AwaitingUserInput`;
+  `NeedsDryRun`, or `ReadyToSubmit`;
 - generation-bound validation and dry-run receipt digests, when present;
 - current artifact reference and review state from `ContinuityProjectionV1`,
   when present;
