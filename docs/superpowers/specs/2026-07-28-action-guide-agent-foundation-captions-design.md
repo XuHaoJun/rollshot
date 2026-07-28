@@ -276,7 +276,6 @@ existing `AgentTaskProfile` enum (`driver.rs:177`, today a single
 ```rust
 pub enum SingleSubmitTerminal {
     Submitted { arguments: serde_json::Value },
-    Declined { reason: Option<String> },
     Cancelled,
     BudgetExhausted { dimension: BudgetDimension },
     ProviderFailure,
@@ -290,6 +289,12 @@ decoding stays with the caller, reusing today's `parse_caption_tool_args`. This
 follows from the decoupling rule: caption draft types live in `rollshot-action`,
 which `rollshot-agent` must not depend on. The profile enforces transport bounds
 only — argument bytes, tool-call count, turn count.
+
+There is deliberately no `Declined` variant. A model declining to suggest is
+recognized today inside `decode_visual_annotation_terminal`
+(`visual_annotation.rs:236`) by inspecting the submitted payload's schema, which
+a schema-agnostic profile cannot do. Declining is therefore a decode outcome the
+caller reports, not a profile terminal.
 
 The profile does four things `run_visual_annotation_with_provider` does not,
 and those four are the point of this slice:
