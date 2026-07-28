@@ -311,6 +311,7 @@ pub enum AuditTaskTerminalV1 {
     Stale,
     ContextOverflow,
     ContextRecoveryFailure,
+    AuditFailure,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -725,6 +726,7 @@ fn map_terminal(terminal: &TaskTerminal) -> AuditTaskTerminalV1 {
         TaskTerminal::Stale => AuditTaskTerminalV1::Stale,
         TaskTerminal::ContextOverflow => AuditTaskTerminalV1::ContextOverflow,
         TaskTerminal::ContextRecoveryFailure { .. } => AuditTaskTerminalV1::ContextRecoveryFailure,
+        TaskTerminal::AuditFailure { .. } => AuditTaskTerminalV1::AuditFailure,
     }
 }
 

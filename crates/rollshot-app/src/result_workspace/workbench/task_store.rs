@@ -3009,4 +3009,64 @@ mod tests {
             }
         }
     }
+
+    // ------------------------------------------------------------------
+    // Authority denial audit persistence
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn authority_denial_audit_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(dir.path()).unwrap();
+
+        // Create a task snapshot.
+        let snapshot = ProductTaskSnapshot::new(
+            task_id_fixture(),
+            TaskKind::SmartRedactionAuthor,
+            source_binding_fixture(),
+            1000,
+        )
+        .unwrap();
+        store.create(&snapshot).unwrap();
+
+        // Append an AuthorityDenied audit event.
+        let event = rollshot_agent::audit::AuditEventV1::AuthorityDenied {
+            authority: rollshot_agent::audit::AuthorityAuditRefV1 {
+                schema_version: 1,
+                task_id: task_id_fixture().as_str().to_owned(),
+                attempt_id: 1,
+                run_id: "run-00000000-0000-4000-8000-000000000001".into(),
+                policy_revision: "rollshot-v1".into(),
+                disclosure_ceiling: rollshot_agent::authority::DisclosureCeiling::FullScreenshot,
+                existing_product_capture: true,
+                snapshot_digest: "a".repeat(64),
+            },
+            tool_name: "replace_source".into(),
+            required_operation: "WriteDraft".into(),
+        };
+        let correlation = rollshot_agent::audit::AuditCorrelationV1::for_task(
+            task_id_fixture().as_str().to_owned(),
+        );
+        let envelope = rollshot_agent::audit::AuditEnvelopeV1::new(
+            AuditEventId::new_v4(),
+            2000,
+            event,
+            correlation,
+        )
+        .unwrap();
+        let receipt = store.append_standalone_audit(envelope).unwrap();
+        assert_eq!(receipt.sequence, 0);
+
+        // Reopen the store.
+        drop(store);
+        let store2 = TaskStore::open(dir.path()).unwrap();
+
+        // Verify the audit events are present after reopen.
+        let events = store2.committed_audit_events(&task_id_fixture()).unwrap();
+        assert_eq!(events.len(), 1, "authority denial must survive reopen");
+        assert!(matches!(
+            events[0].event(),
+            rollshot_agent::audit::AuditEventV1::AuthorityDenied { .. }
+        ));
+    }
 }

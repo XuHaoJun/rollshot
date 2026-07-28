@@ -161,6 +161,7 @@ pub enum TaskTerminal {
     Stale,
     ContextOverflow,
     ContextRecoveryFailure { category: String },
+    AuditFailure { category: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

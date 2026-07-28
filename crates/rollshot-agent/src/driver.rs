@@ -273,6 +273,10 @@ pub enum RunTerminalState {
     ContextRecoveryFailure {
         category: crate::continuity::ContextRecoveryFailureCategory,
     },
+    /// Authority denial was durably recorded but the run must fail closed.
+    AuditFailure {
+        category: crate::audit::AuditFailureCategory,
+    },
 }
 
 // ---------- Errors ----------
@@ -285,6 +289,8 @@ pub enum DriverError {
     AgentProtocolFailure(String),
     /// Provider classified this as a context overflow.
     ContextOverflow,
+    /// Authority denial was durably recorded; run must fail closed.
+    AuditFailure(crate::audit::AuditFailureCategory),
 }
 
 impl From<BudgetError> for DriverError {
@@ -459,6 +465,8 @@ impl AgentRunner {
             "run started"
         );
 
+        let audit_sink: Option<&dyn crate::audit::AuditAppendSink> = None;
+
         loop {
             if cancellation.is_cancelled() {
                 tracing::debug!(
@@ -517,6 +525,9 @@ impl AgentRunner {
                         Err(DriverError::ContextOverflow) => {
                             return RunTerminalState::ContextOverflow;
                         }
+                        Err(DriverError::AuditFailure(category)) => {
+                            return RunTerminalState::AuditFailure { category };
+                        }
                     }
                 }
                 rig_core::agent::run::AgentRunStep::CallTools { calls } => {
@@ -532,6 +543,7 @@ impl AgentRunner {
                             &last_assistant_text,
                             &mut last_failure_kind,
                             None,
+                            audit_sink,
                         )
                         .await
                     {
@@ -555,6 +567,9 @@ impl AgentRunner {
                         }
                         Err(DriverError::ContextOverflow) => {
                             return RunTerminalState::ContextOverflow;
+                        }
+                        Err(DriverError::AuditFailure(category)) => {
+                            return RunTerminalState::AuditFailure { category };
                         }
                     }
                 }
@@ -604,6 +619,7 @@ impl AgentRunner {
         authority: &crate::authority::AuthoritySnapshot,
         skill_use: &crate::skills::SkillUse,
         continuity_source: &crate::continuity::RunContinuitySource,
+        audit_sink: Option<&dyn crate::audit::AuditAppendSink>,
     ) -> RunTerminalState {
         session.push_user(input.user_message.clone());
 
@@ -836,6 +852,9 @@ impl AgentRunner {
                             // Continue the loop — the next iteration will call
                             // next_step() on the fresh AgentRun.
                         }
+                        Err(DriverError::AuditFailure(category)) => {
+                            return RunTerminalState::AuditFailure { category };
+                        }
                     }
                 }
                 rig_core::agent::run::AgentRunStep::CallTools { calls } => {
@@ -851,6 +870,7 @@ impl AgentRunner {
                             &last_assistant_text,
                             &mut last_failure_kind,
                             Some(authority),
+                            audit_sink,
                         )
                         .await
                     {
@@ -874,6 +894,9 @@ impl AgentRunner {
                         }
                         Err(DriverError::ContextOverflow) => {
                             return RunTerminalState::ContextOverflow;
+                        }
+                        Err(DriverError::AuditFailure(category)) => {
+                            return RunTerminalState::AuditFailure { category };
                         }
                     }
                 }
@@ -1388,6 +1411,7 @@ impl AgentRunner {
         assistant_text: &str,
         last_failure_kind: &mut Option<ToolFailureKind>,
         authority: Option<&crate::authority::AuthoritySnapshot>,
+        audit_sink: Option<&dyn crate::audit::AuditAppendSink>,
     ) -> Result<Option<RunTerminalState>, DriverError> {
         if cancellation.is_cancelled() {
             return Err(DriverError::Cancelled);
@@ -1525,6 +1549,57 @@ impl AgentRunner {
                         call_id,
                         rig_core::message::ToolResultContent::from_tool_output(error),
                     ));
+                }
+                Err(crate::tools::ToolError::AuthorityDenied {
+                    tool,
+                    operation,
+                }) => {
+                    tracing::debug!(
+                        target: "rollshot::agent::driver",
+                        tool = tool.as_str(),
+                        operation = ?operation,
+                        "authority denied — persisting before terminal"
+                    );
+                    event_sink.emit(RunEvent::ToolCallEnd {
+                        name: tool_name.clone(),
+                        success: false,
+                    });
+                    let category = if let Some(sink) = audit_sink {
+                        if let Some(auth) = authority {
+                            let event = crate::audit::AuditEventV1::AuthorityDenied {
+                                authority: auth.audit_ref(),
+                                tool_name: tool.clone(),
+                                required_operation: format!("{operation:?}"),
+                            };
+                            let task_id = auth.task_id().as_str().to_owned();
+                            let correlation =
+                                crate::audit::AuditCorrelationV1::for_task(task_id);
+                            let event_id = crate::audit::AuditEventId::new_v4();
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as i64;
+                            match crate::audit::AuditEnvelopeV1::new(
+                                event_id,
+                                now,
+                                event,
+                                correlation,
+                            ) {
+                                Ok(envelope) => match sink.append(envelope).await {
+                                    Ok(_) => crate::audit::AuditFailureCategory::Unavailable,
+                                    Err(crate::audit::AuditAppendError::AppendFailed {
+                                        category,
+                                    }) => category,
+                                },
+                                Err(_) => crate::audit::AuditFailureCategory::CorrelationMismatch,
+                            }
+                        } else {
+                            crate::audit::AuditFailureCategory::Unavailable
+                        }
+                    } else {
+                        crate::audit::AuditFailureCategory::Unavailable
+                    };
+                    return Err(DriverError::AuditFailure(category));
                 }
                 Err(e) => {
                     tracing::debug!(
@@ -1761,6 +1836,10 @@ impl AgentRunner {
                                 "visual annotation context overflow"
                             );
                             return VisualAnnotationRunTerminal::ProviderFailure;
+                        }
+                        Err(DriverError::AuditFailure(_)) => {
+                            // Visual annotation does not use audit.
+                            return VisualAnnotationRunTerminal::ProtocolFailure;
                         }
                     }
 
@@ -3976,9 +4055,9 @@ pub(crate) mod tests {
 
         /// Records every `ModelRequest` it receives and replays a scripted set of
         /// stream events per call.
-        struct RecordingProvider {
-            requests: Mutex<Vec<ModelRequest>>,
-            scripts: Mutex<VecDeque<Vec<ModelStreamEvent>>>,
+        pub(super) struct RecordingProvider {
+            pub(super) requests: Mutex<Vec<ModelRequest>>,
+            pub(super) scripts: Mutex<VecDeque<Vec<ModelStreamEvent>>>,
         }
 
         impl ProviderAdapter for RecordingProvider {
@@ -4022,7 +4101,7 @@ pub(crate) mod tests {
             }
         }
 
-        fn completion(stop: StopReason) -> ModelStreamEvent {
+        pub(super) fn completion(stop: StopReason) -> ModelStreamEvent {
             ModelStreamEvent::Completed(ModelCompletion {
                 usage: crate::model::ModelUsage {
                     input_tokens: 5,
@@ -4152,6 +4231,7 @@ pub(crate) mod tests {
                     &test_authority(&ctx),
                     &test_skill_use(),
                     &crate::continuity::RunContinuitySource::Unavailable,
+                    None,
                 )
                 .await;
 
@@ -5967,6 +6047,7 @@ main = "SKILL.md"
                     &test_authority(&ctx),
                     &test_skill_use(),
                     &source,
+                    None,
                 )
                 .await;
 
@@ -6047,6 +6128,7 @@ main = "SKILL.md"
                     &test_authority(&ctx),
                     &test_skill_use(),
                     &source,
+                    None,
                 )
                 .await;
 
@@ -6098,6 +6180,7 @@ main = "SKILL.md"
                     &test_authority(&ctx),
                     &test_skill_use(),
                     &RunContinuitySource::Unavailable,
+                    None,
                 )
                 .await;
 
@@ -6155,6 +6238,7 @@ main = "SKILL.md"
                     &test_authority(&ctx),
                     &test_skill_use(),
                     &source,
+                    None,
                 )
                 .await;
 
@@ -6218,6 +6302,7 @@ main = "SKILL.md"
                     &test_authority(&ctx),
                     &test_skill_use(),
                     &source,
+                    None,
                 )
                 .await;
 
@@ -6259,6 +6344,242 @@ main = "SKILL.md"
         fn driver_error_has_context_overflow() {
             let err = DriverError::ContextOverflow;
             assert_eq!(format!("{err:?}"), "ContextOverflow");
+        }
+    }
+
+    // ---- Authority denial audit tests ----
+
+    mod authority_denial_audit {
+        use super::*;
+        use crate::model::{ModelStreamEvent, StopReason};
+        use std::collections::VecDeque;
+
+        /// Mock audit sink that records every appended envelope.
+        struct MockAuditSink {
+            envelopes: std::sync::Mutex<Vec<crate::audit::AuditEnvelopeV1>>,
+        }
+
+        impl MockAuditSink {
+            fn new() -> Self {
+                Self {
+                    envelopes: std::sync::Mutex::new(Vec::new()),
+                }
+            }
+
+            fn take_envelopes(&self) -> Vec<crate::audit::AuditEnvelopeV1> {
+                std::mem::take(&mut *self.envelopes.lock().unwrap())
+            }
+        }
+
+        impl crate::audit::AuditAppendSink for MockAuditSink {
+            fn append(
+                &self,
+                envelope: crate::audit::AuditEnvelopeV1,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<
+                                crate::audit::AuditAppendReceiptV1,
+                                crate::audit::AuditAppendError,
+                            >,
+                        > + Send
+                        + '_,
+                >
+            > {
+                self.envelopes.lock().unwrap().push(envelope.clone());
+                Box::pin(async move {
+                    Ok(crate::audit::AuditAppendReceiptV1 {
+                        event_id: envelope.event_id().to_string(),
+                        sequence: 0,
+                        record_hash: "test-hash".into(),
+                    })
+                })
+            }
+        }
+
+        /// Build an authority that only grants ReadDraft (not WriteDraft).
+        fn read_only_authority(ctx: &Arc<ToolContext>) -> crate::authority::AuthoritySnapshot {
+            use crate::authority::{
+                AuthorityBinding, AuthoritySnapshot, DisclosureCeiling, PreparedCapability,
+                RunOperation,
+            };
+            let binding = AuthorityBinding::new(
+                crate::product_task::ProductTaskId::parse("task-00000000-0000-4000-8000-00000000002a")
+                    .unwrap(),
+                crate::product_task::TaskAttemptId::new(1),
+                ctx.run_id.clone(),
+                ctx.content_binding.clone(),
+            );
+            let grants = [RunOperation::ReadDraft].into_iter().collect();
+            let caps = [PreparedCapability::RegionFeatures].into_iter().collect();
+            AuthoritySnapshot::new(
+                binding,
+                "rollshot-test-v1".into(),
+                DisclosureCeiling::FullScreenshot,
+                true,
+                caps,
+                grants,
+            )
+            .expect("read-only authority should be valid")
+        }
+
+        fn make_recording_provider(
+            scripts: Vec<Vec<ModelStreamEvent>>,
+        ) -> provider_path::RecordingProvider {
+            provider_path::RecordingProvider {
+                requests: Mutex::new(Vec::new()),
+                scripts: Mutex::new(VecDeque::from(scripts)),
+            }
+        }
+
+        /// Step 4 checkpoint: authority denial is acknowledged BEFORE the tool
+        /// terminal — the audit sink receives the envelope before
+        /// `RunTerminalState::AuditFailure` is returned.
+        #[tokio::test]
+        async fn authority_denial_is_acknowledged() {
+            let ctx = test_ctx("src");
+            let authority = read_only_authority(&ctx);
+            let skill_use = test_skill_use();
+
+            let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+            register_all_tools(&mut reg, &ctx);
+
+            // Script: model requests replace_source (requires WriteDraft).
+            let text_delta = ModelStreamEvent::TextDelta("hi".into());
+            let tc_start = ModelStreamEvent::ToolCallStart {
+                id: "tc-1".into(),
+                name: "replace_source".into(),
+            };
+            let tc_complete = ModelStreamEvent::ToolCallComplete {
+                id: "tc-1".into(),
+                name: "replace_source".into(),
+                arguments: serde_json::json!({
+                    "generation": 1,
+                    "new_source": "new"
+                }),
+            };
+            let done = provider_path::completion(StopReason::ToolUse);
+
+            let provider = make_recording_provider(vec![vec![
+                text_delta,
+                tc_start,
+                tc_complete,
+                done,
+            ]]);
+
+            let cancel = RunCancellation::new();
+            let runner = AgentRunner::new(AgentConfig::default());
+            let sink = MockAuditSink::new();
+
+            let terminal = runner
+                .run_with_provider(
+                    AuthorizedModelInput::new(
+                        "anthropic".into(),
+                        "claude-sonnet-4-6".into(),
+                        "please inspect".into(),
+                        vec![],
+                        vec![],
+                    )
+                    .unwrap(),
+                    &mut AgentSession::new(
+                        SessionId::new(99),
+                        RunId::parse("run-00000000-0000-4000-8000-000000000099").unwrap(),
+                    ),
+                    &reg,
+                    RunBudget::unlimited(),
+                    &cancel,
+                    &NullEventSink,
+                    &ctx,
+                    &provider,
+                    &authority,
+                    &skill_use,
+                    &crate::continuity::RunContinuitySource::Unavailable,
+                    Some(&sink),
+                )
+                .await;
+
+            // The audit sink must have received the AuthorityDenied envelope.
+            let envelopes = sink.take_envelopes();
+            assert_eq!(
+                envelopes.len(),
+                1,
+                "audit sink must receive exactly one envelope"
+            );
+            assert!(matches!(
+                envelopes[0].event(),
+                crate::audit::AuditEventV1::AuthorityDenied { .. }
+            ));
+
+            // The terminal must be AuditFailure.
+            assert!(
+                matches!(terminal, RunTerminalState::AuditFailure { .. }),
+                "expected AuditFailure, got {terminal:?}"
+            );
+        }
+
+        /// Step 5 checkpoint: `AuditFailure` terminal carries the failure category.
+        #[tokio::test]
+        async fn authority_denial_audit_failure() {
+            let ctx = test_ctx("src");
+            let authority = read_only_authority(&ctx);
+            let skill_use = test_skill_use();
+
+            let mut reg = ToolRegistry::new(ToolRegistryLimits::permissive());
+            register_all_tools(&mut reg, &ctx);
+
+            let tc_start = ModelStreamEvent::ToolCallStart {
+                id: "tc-1".into(),
+                name: "replace_source".into(),
+            };
+            let tc_complete = ModelStreamEvent::ToolCallComplete {
+                id: "tc-1".into(),
+                name: "replace_source".into(),
+                arguments: serde_json::json!({
+                    "generation": 1,
+                    "new_source": "new"
+                }),
+            };
+            let done = provider_path::completion(StopReason::ToolUse);
+
+            let provider = make_recording_provider(vec![vec![tc_start, tc_complete, done]]);
+
+            let cancel = RunCancellation::new();
+            let runner = AgentRunner::new(AgentConfig::default());
+            let sink = MockAuditSink::new();
+
+            let terminal = runner
+                .run_with_provider(
+                    AuthorizedModelInput::new(
+                        "anthropic".into(),
+                        "claude-sonnet-4-6".into(),
+                        "please inspect".into(),
+                        vec![],
+                        vec![],
+                    )
+                    .unwrap(),
+                    &mut AgentSession::new(
+                        SessionId::new(99),
+                        RunId::parse("run-00000000-0000-4000-8000-000000000099").unwrap(),
+                    ),
+                    &reg,
+                    RunBudget::unlimited(),
+                    &cancel,
+                    &NullEventSink,
+                    &ctx,
+                    &provider,
+                    &authority,
+                    &skill_use,
+                    &crate::continuity::RunContinuitySource::Unavailable,
+                    Some(&sink),
+                )
+                .await;
+
+            match terminal {
+                RunTerminalState::AuditFailure { category } => {
+                    let _ = category;
+                }
+                other => panic!("expected AuditFailure, got {other:?}"),
+            }
         }
     }
 }

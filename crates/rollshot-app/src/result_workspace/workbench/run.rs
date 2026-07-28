@@ -916,6 +916,9 @@ async fn persist_terminal_outcome(
                         category: category.to_string(),
                     }
                 }
+                RunTerminalState::AuditFailure { category } => TaskTerminal::AuditFailure {
+                    category: format!("{category:?}"),
+                },
                 RunTerminalState::ReadyForReview(_) => unreachable!(),
             };
             match current.record_terminal(task_terminal, now) {
@@ -1477,6 +1480,12 @@ pub fn start_agent_run(
         let (tx, mut rx) = tokio::sync::mpsc::channel::<RunEvent>(64);
         let sink = ChannelEventSink { tx };
 
+        // Build audit sink from task store if available.
+        let audit_sink: Option<super::audit_store::TaskAuditSink> =
+            task_store.as_ref().map(|store| {
+                super::audit_store::TaskAuditSink::new(store.clone())
+            });
+
         // B4: tokio::spawn inside the stream block (runtime context).
         let run_task = tokio::spawn(async move {
             let mut session = session;
@@ -1485,6 +1494,7 @@ pub fn start_agent_run(
                 &cancellation_for_task, &sink, &tool_ctx, adapter.as_ref(),
                 &authority, &skill_use,
                 &continuity_source,
+                audit_sink.as_ref().map(|s| s as &dyn rollshot_agent::audit::AuditAppendSink),
             ).await
         });
 

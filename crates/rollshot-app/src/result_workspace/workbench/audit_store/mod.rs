@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use tracing::{info, trace, warn, error};
 
 use rollshot_agent::audit::{
-    AuditAppendError, AuditEventId, AuditFailureCategory,
+    AuditAppendError, AuditAppendSink, AuditEventId, AuditFailureCategory,
     AuditAppendReceiptV1, AuditEnvelopeV1, AuditTaskStateReceiptV1,
 };
 use rollshot_agent::product_task::ProductTaskId;
@@ -769,6 +769,58 @@ impl fmt::Debug for AuditJournal {
 }
 
 // ============================================================================
+// TaskAuditSink (app-side bridge)
+// ============================================================================
+
+/// Async bridge from `AuditAppendSink` to `TaskStore::append_standalone_audit`.
+/// Wraps a shared `TaskStore` behind `Arc` and uses `spawn_blocking`
+/// to avoid blocking the async runtime on filesystem I/O.
+pub(crate) struct TaskAuditSink {
+    store: std::sync::Arc<super::task_store::TaskStore>,
+}
+
+impl TaskAuditSink {
+    pub(crate) fn new(store: std::sync::Arc<super::task_store::TaskStore>) -> Self {
+        Self { store }
+    }
+}
+
+impl AuditAppendSink for TaskAuditSink {
+    fn append(
+        &self,
+        envelope: AuditEnvelopeV1,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<AuditAppendReceiptV1, AuditAppendError>>
+                + Send
+                + '_,
+        >
+    > {
+        let store = self.store.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || store.append_standalone_audit(envelope))
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        target: "rollshot::app::agent_audit_store",
+                        error = %e,
+                        "spawn_blocking join failed"
+                    );
+                    AuditAppendError::from_category(AuditFailureCategory::Unavailable)
+                })?
+                .map_err(|e| {
+                    tracing::error!(
+                        target: "rollshot::app::agent_audit_store",
+                        error = %e,
+                        "standalone audit append failed"
+                    );
+                    AuditAppendError::from_category(AuditFailureCategory::AppendPreCommitFailure)
+                })
+        })
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1189,5 +1241,46 @@ pub(crate) mod tests {
             // With normal write, bytes match, so append succeeds.
             assert!(result.is_ok());
         }
+    }
+
+    // ------------------------------------------------------------------
+    // TaskAuditSink integration
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn task_audit_sink_appends_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(
+            super::super::task_store::TaskStore::open(dir.path()).unwrap(),
+        );
+        let sink = TaskAuditSink::new(store);
+
+        let event = AuditEventV1::AuthorityDenied {
+            authority: rollshot_agent::audit::AuthorityAuditRefV1 {
+                schema_version: 1,
+                task_id: "task-00000000-0000-4000-8000-000000000001".into(),
+                attempt_id: 1,
+                run_id: "run-00000000-0000-4000-8000-000000000001".into(),
+                policy_revision: "rollshot-v1".into(),
+                disclosure_ceiling: rollshot_agent::authority::DisclosureCeiling::FullScreenshot,
+                existing_product_capture: true,
+                snapshot_digest: "a".repeat(64),
+            },
+            tool_name: "replace_source".into(),
+            required_operation: "WriteDraft".into(),
+        };
+        let correlation = AuditCorrelationV1::for_task(
+            "task-00000000-0000-4000-8000-000000000001".into(),
+        );
+        let envelope = AuditEnvelopeV1::new(
+            AuditEventId::new_v4(),
+            1000,
+            event,
+            correlation,
+        )
+        .unwrap();
+
+        let receipt = sink.append(envelope).await.unwrap();
+        assert_eq!(receipt.sequence, 0);
     }
 }
