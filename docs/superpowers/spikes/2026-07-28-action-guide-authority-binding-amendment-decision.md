@@ -78,7 +78,8 @@ decision keeps item 5 with the corrected rationale rather than dropping it.
    `AuthorityBinding` holds the source binding directly. The child spec chooses
    the shape. A degenerate binding is explicitly not permitted.
 2. §9 item 5's rationale is corrected: provenance honesty, not enforcement.
-3. §17 gains an amendment log pointing at this record.
+3. §9 item 4 is widened per §7 below.
+4. §17 gains an amendment log pointing at this record.
 
 No gate evidence changes. Gate A1's items are unchanged; item 7 is what makes
 item 1 reachable. Gate B1 is unchanged: its permitted-additive list already
@@ -89,3 +90,46 @@ covers new variants, and Slice B must not need item 7's shape changed.
 None. No child spec or implementation plan existed when this amendment was
 raised, so there is no completed child document to preserve as historical
 evidence. Slice A's child spec is written against the amended §9.
+
+## 7. Second finding: the artifact payload parameter
+
+Found during the same exploration pass, raised and approved on the same day, and
+recorded here rather than in a separate record because it is the same class of
+omission in the same §9 list.
+
+`ProductTaskSnapshot::record_ready_for_review` takes
+`payload: SmartRedactionReviewPayload` and serializes it internally
+(`crates/rollshot-agent/src/product_task.rs:948`). `PromotionContext` likewise
+carries `PayloadSourceV1` and `PayloadProposalV1`
+(`crates/rollshot-agent/src/product_task.rs:607`). A caption run cannot
+construct any of them.
+
+§9 item 4 as originally written covered only the *interpretation* of
+`pending_proposal_payload`. It did not cover `pending_artifact_payload` or the
+concrete parameter type, so the promotion call itself was unreachable for a
+non-Smart-Redaction artifact.
+
+Item 4 is widened to the whole artifact payload surface: both payload fields
+dispatch on `ArtifactKind`, and `record_ready_for_review`'s payload parameter
+becomes kind-agnostic bytes serialized by the caller, with `PromotionContext`
+moving with it. No snapshot field is added, and `canonical_payload_sha256`
+remains the integrity check.
+
+### 7.1 A counter-example worth recording
+
+Not everything on the review path needed widening. `ReviewReceipt` is reusable
+unchanged: `applied_candidates` and `rejected_candidates` hold suggestion
+identifiers, `resulting_document_state_id` and `resulting_document_digest` are
+already `Option` and are `None` for captions, and `local_delta`'s
+`moved_candidates` and `manual_additions` are honestly empty because
+`CaptionProposal::apply` has no edit-then-accept path
+(`crates/rollshot-action/src/caption_proposal.rs:182`).
+
+`RunOperation` also needed no new variant: a caption run's grant set is exactly
+`{SubmitReviewCandidate}`, because the guide content is composed into the prompt
+before the run rather than fetched by a tool.
+
+These are recorded because the umbrella's Gate B1 tests whether the contracts
+generalize. Two of the surfaces examined generalized without change, which is
+evidence in the affirmative direction and should not be lost among the seven
+that did not.

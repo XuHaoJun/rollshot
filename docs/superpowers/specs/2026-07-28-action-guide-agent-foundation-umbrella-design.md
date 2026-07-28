@@ -253,8 +253,16 @@ Slice A must land all six. Slice B must need none of them changed.
    proven by a V1 fixture load test. This is additive and read-compatible, not a
    destructive schema bump; the precedent is the existing V1/V2 artifact
    metadata pair and its `#[serde(default)]` fields.
-4. **`pending_proposal_payload` interpretation dispatches on `ArtifactKind`.**
-   No new field. `canonical_payload_sha256` remains the integrity check.
+4. **The artifact payload surface becomes kind-agnostic.** Three sites move
+   together: `pending_proposal_payload`'s interpretation dispatches on
+   `ArtifactKind`; `pending_artifact_payload` likewise; and
+   `ProductTaskSnapshot::record_ready_for_review` currently takes a concrete
+   `SmartRedactionReviewPayload` and serializes it internally
+   (`crates/rollshot-agent/src/product_task.rs:948`), so its payload parameter
+   becomes kind-agnostic bytes serialized by the caller. `PromotionContext`
+   carries `PayloadSourceV1` and `PayloadProposalV1` for the same reason and
+   moves with it. No new snapshot field is added, and
+   `canonical_payload_sha256` remains the integrity check.
 5. **`DisclosureCeiling` gains a zero-image level.** Captions transmit no pixels
    at all, so neither existing variant is honest in the durable authority
    receipt. This level buys provenance honesty, not enforcement:
@@ -542,6 +550,7 @@ A discovery contained within one slice belongs in that slice's child spec.
 | Date | Amendment | Record |
 |---|---|---|
 | 2026-07-28 | §9 gains item 7 (authority binding); item 5's rationale corrected to provenance honesty rather than enforcement | [`2026-07-28-action-guide-authority-binding-amendment-decision.md`](../spikes/2026-07-28-action-guide-authority-binding-amendment-decision.md) |
+| 2026-07-28 | §9 item 4 widened from `pending_proposal_payload` alone to the whole artifact payload surface, including `record_ready_for_review`'s concrete payload parameter | same record, §7 |
 
 ## 18. Umbrella completion
 
