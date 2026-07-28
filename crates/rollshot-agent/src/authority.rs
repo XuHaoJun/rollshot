@@ -63,16 +63,35 @@ pub enum RunOperation {
 }
 
 // ========================================================================
+// Authority subject
+// ========================================================================
+
+/// What a run holds authority over. `Document` is the Smart Redaction subject;
+/// its digest input is unchanged so existing receipts stay comparable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthoritySubject {
+    Document(DocumentContentBinding),
+    ActionGuideProject {
+        project_root_sha256: [u8; 32],
+        revision: u64,
+        projection_digest: String,
+    },
+    ActionGuideEphemeralGuide {
+        guide_digest: String,
+    },
+}
+
+// ========================================================================
 // Authority binding
 // ========================================================================
 
-/// Immutable binding of a specific task attempt + run + document state.
+/// Immutable binding of a specific task attempt + run + authority subject.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorityBinding {
     task_id: ProductTaskId,
     attempt_id: TaskAttemptId,
     run_id: RunId,
-    document_binding: DocumentContentBinding,
+    subject: AuthoritySubject,
 }
 
 impl AuthorityBinding {
@@ -80,13 +99,13 @@ impl AuthorityBinding {
         task_id: ProductTaskId,
         attempt_id: TaskAttemptId,
         run_id: RunId,
-        document_binding: DocumentContentBinding,
+        subject: AuthoritySubject,
     ) -> Self {
         Self {
             task_id,
             attempt_id,
             run_id,
-            document_binding,
+            subject,
         }
     }
 
@@ -94,8 +113,8 @@ impl AuthorityBinding {
         &self.run_id
     }
 
-    pub fn document_binding(&self) -> &DocumentContentBinding {
-        &self.document_binding
+    pub fn subject(&self) -> &AuthoritySubject {
+        &self.subject
     }
 }
 
@@ -151,18 +170,18 @@ impl AuthoritySnapshot {
 
     /// Authorize a specific tool invocation for this run.
     ///
-    /// Returns `Ok(())` if the run_id matches, the document binding is
+    /// Returns `Ok(())` if the run_id matches, the authority subject is
     /// consistent, and the required operation is in the grant set.
     pub fn authorize_tool(
         &self,
         run_id: &RunId,
-        document_binding: &DocumentContentBinding,
+        subject: &AuthoritySubject,
         required: RunOperation,
     ) -> Result<(), AuthorityError> {
         if run_id != self.binding.run_id() {
             return Err(AuthorityError::RunMismatch);
         }
-        if document_binding != self.binding.document_binding() {
+        if subject != self.binding.subject() {
             return Err(AuthorityError::DocumentBindingMismatch);
         }
         if !self.grants.contains(&required) {
@@ -205,7 +224,7 @@ impl AuthoritySnapshot {
             policy_revision: self.policy_revision.clone(),
             disclosure_ceiling: self.disclosure,
             existing_product_capture: self.existing_product_capture,
-            document_binding_digest: self.binding_digest_hex(),
+            subject_digest: self.binding_digest_hex(),
             prepared_capabilities: self.prepared_capabilities.iter().copied().collect(),
             granted_operations: self.grants.iter().copied().collect(),
             snapshot_digest: self.digest.clone(),
@@ -248,12 +267,31 @@ impl AuthoritySnapshot {
         &self.digest
     }
 
-    /// Hex-encoded document binding digest (binding-private helper).
+    /// Hex-encoded authority subject digest (binding-private helper).
     fn binding_digest_hex(&self) -> String {
         let mut hasher = Sha256::new();
-        hasher.update(self.binding.document_binding().base_image_digest());
-        hasher.update(self.binding.document_binding().annotation_state_digest());
-        hasher.update(self.binding.document_binding().state_id().to_le_bytes());
+        match self.binding.subject() {
+            AuthoritySubject::Document(binding) => {
+                hasher.update(b"rollshot-authority-subject-document-v1\0");
+                hasher.update(binding.base_image_digest());
+                hasher.update(binding.annotation_state_digest());
+                hasher.update(binding.state_id().to_le_bytes());
+            }
+            AuthoritySubject::ActionGuideProject {
+                project_root_sha256,
+                revision,
+                projection_digest,
+            } => {
+                hasher.update(b"rollshot-authority-subject-action-guide-project-v1\0");
+                hasher.update(project_root_sha256);
+                hasher.update(revision.to_le_bytes());
+                hasher.update(projection_digest.as_bytes());
+            }
+            AuthoritySubject::ActionGuideEphemeralGuide { guide_digest } => {
+                hasher.update(b"rollshot-authority-subject-action-guide-ephemeral-v1\0");
+                hasher.update(guide_digest.as_bytes());
+            }
+        }
         hex_encode(&hasher.finalize())
     }
 
@@ -331,7 +369,8 @@ pub struct AuthoritySnapshotReceiptV1 {
     pub policy_revision: String,
     pub disclosure_ceiling: DisclosureCeiling,
     pub existing_product_capture: bool,
-    pub document_binding_digest: String,
+    #[serde(rename = "document_binding_digest")]
+    pub subject_digest: String,
     pub prepared_capabilities: Vec<PreparedCapability>,
     pub granted_operations: Vec<RunOperation>,
     pub snapshot_digest: String,
@@ -404,7 +443,7 @@ mod tests {
                 task_id(),
                 TaskAttemptId::new(1),
                 run_id(),
-                document_binding(),
+                AuthoritySubject::Document(document_binding()),
             ),
             "rev-1".into(),
             DisclosureCeiling::OcrLayoutOnly,
@@ -425,7 +464,7 @@ mod tests {
                 task_id(),
                 TaskAttemptId::new(1),
                 run_id(),
-                document_binding(),
+                AuthoritySubject::Document(document_binding()),
             ),
             "rev-1".into(),
             disclosure,
@@ -442,7 +481,7 @@ mod tests {
                 task_id(),
                 TaskAttemptId::new(1),
                 run_id(),
-                document_binding(),
+                AuthoritySubject::Document(document_binding()),
             ),
             "rev-full".into(),
             DisclosureCeiling::FullScreenshot,
@@ -587,6 +626,56 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // Persisted receipt key stability (Task 8)
+    //
+    // `AuthoritySnapshotReceiptV1` is persisted inside `RunContractReceiptV1`
+    // in task JSON on disk. The Rust field was renamed from
+    // `document_binding_digest` to `subject_digest` when `AuthorityBinding`
+    // was generalized to hold an `AuthoritySubject`, but the serialized key
+    // must not change or existing task files stop loading. These tests pin
+    // both directions: new receipts still serialize the old key name, and
+    // JSON written under the old key name still deserializes.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn receipt_serializes_with_the_legacy_document_binding_digest_key() {
+        let receipt = full_snapshot().receipt(123);
+        let json = serde_json::to_value(&receipt).unwrap();
+        let obj = json.as_object().unwrap();
+        assert!(
+            obj.contains_key("document_binding_digest"),
+            "serialized receipt must keep the on-disk key `document_binding_digest`, got keys: {:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !obj.contains_key("subject_digest"),
+            "the renamed Rust field name must not leak into JSON"
+        );
+    }
+
+    #[test]
+    fn receipt_deserializes_pre_existing_task_json_using_the_old_key() {
+        // Simulates a task file written to disk before the AuthoritySubject
+        // rename — proves old on-disk receipts still load.
+        let legacy_json = r#"{
+            "schema_version": 1,
+            "task_id": "task-00000000-0000-4000-8000-000000000001",
+            "attempt_id": 1,
+            "run_id": "run-00000000-0000-4000-8000-000000000001",
+            "policy_revision": "rev-1",
+            "disclosure_ceiling": "full_screenshot",
+            "existing_product_capture": true,
+            "document_binding_digest": "deadbeef",
+            "prepared_capabilities": [],
+            "granted_operations": [],
+            "snapshot_digest": "cafef00d",
+            "created_at_unix_ms": 1
+        }"#;
+        let receipt: AuthoritySnapshotReceiptV1 = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(receipt.subject_digest, "deadbeef");
+    }
+
+    // ------------------------------------------------------------------
     // authorize_tool edge cases
     // ------------------------------------------------------------------
 
@@ -595,7 +684,11 @@ mod tests {
         let snapshot = full_snapshot();
         let wrong_run = RunId::parse("run-99999999-9999-4999-8999-999999999999").unwrap();
         assert_eq!(
-            snapshot.authorize_tool(&wrong_run, &document_binding(), RunOperation::ReadDraft),
+            snapshot.authorize_tool(
+                &wrong_run,
+                &AuthoritySubject::Document(document_binding()),
+                RunOperation::ReadDraft
+            ),
             Err(AuthorityError::RunMismatch)
         );
     }
@@ -611,7 +704,11 @@ mod tests {
         };
         let different_binding = DocumentContentBinding::new([0xCD_u8; 32], &state2, 2).unwrap();
         assert_eq!(
-            snapshot.authorize_tool(&run_id(), &different_binding, RunOperation::ReadDraft),
+            snapshot.authorize_tool(
+                &run_id(),
+                &AuthoritySubject::Document(different_binding),
+                RunOperation::ReadDraft
+            ),
             Err(AuthorityError::DocumentBindingMismatch)
         );
     }
@@ -620,7 +717,11 @@ mod tests {
     fn authorize_tool_rejects_missing_operation() {
         let snapshot = snapshot_with_grants([RunOperation::ReadDraft]);
         assert_eq!(
-            snapshot.authorize_tool(&run_id(), &document_binding(), RunOperation::WriteDraft),
+            snapshot.authorize_tool(
+                &run_id(),
+                &AuthoritySubject::Document(document_binding()),
+                RunOperation::WriteDraft
+            ),
             Err(AuthorityError::GrantMissing {
                 operation: RunOperation::WriteDraft,
             })
@@ -631,9 +732,103 @@ mod tests {
     fn authorize_tool_success() {
         let snapshot = full_snapshot();
         assert_eq!(
-            snapshot.authorize_tool(&run_id(), &document_binding(), RunOperation::ReadDraft),
+            snapshot.authorize_tool(
+                &run_id(),
+                &AuthoritySubject::Document(document_binding()),
+                RunOperation::ReadDraft
+            ),
             Ok(())
         );
+    }
+
+    // ------------------------------------------------------------------
+    // AuthoritySubject variants (Task 8)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn action_guide_subject_authorizes_submit_and_rejects_image_ops() {
+        let subject = AuthoritySubject::ActionGuideProject {
+            project_root_sha256: [4u8; 32],
+            revision: 2,
+            projection_digest: "ab".repeat(32),
+        };
+        let run_id = run_id();
+        let snapshot = AuthoritySnapshot::new(
+            AuthorityBinding::new(
+                task_id(),
+                TaskAttemptId::new(1),
+                run_id.clone(),
+                subject.clone(),
+            ),
+            "rollshot-v1".to_owned(),
+            DisclosureCeiling::OcrLayoutOnly,
+            false,
+            BTreeSet::new(),
+            BTreeSet::from([RunOperation::SubmitReviewCandidate]),
+        )
+        .unwrap();
+
+        assert!(snapshot
+            .authorize_tool(&run_id, &subject, RunOperation::SubmitReviewCandidate)
+            .is_ok());
+        assert!(matches!(
+            snapshot.authorize_tool(&run_id, &subject, RunOperation::InspectPreparedImage),
+            Err(AuthorityError::GrantMissing { .. })
+        ));
+    }
+
+    #[test]
+    fn subject_mismatch_is_rejected() {
+        let subject = AuthoritySubject::ActionGuideProject {
+            project_root_sha256: [4u8; 32],
+            revision: 2,
+            projection_digest: "ab".repeat(32),
+        };
+        let moved_on = AuthoritySubject::ActionGuideProject {
+            project_root_sha256: [4u8; 32],
+            revision: 3,
+            projection_digest: "cd".repeat(32),
+        };
+        let run_id = run_id();
+        let snapshot = AuthoritySnapshot::new(
+            AuthorityBinding::new(task_id(), TaskAttemptId::new(1), run_id.clone(), subject),
+            "rollshot-v1".to_owned(),
+            DisclosureCeiling::OcrLayoutOnly,
+            false,
+            BTreeSet::new(),
+            BTreeSet::from([RunOperation::SubmitReviewCandidate]),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            snapshot.authorize_tool(&run_id, &moved_on, RunOperation::SubmitReviewCandidate),
+            Err(AuthorityError::DocumentBindingMismatch)
+        ));
+    }
+
+    #[test]
+    fn run_mismatch_is_checked_before_the_subject() {
+        // Order matters: authorize_tool checks run_id first (authority.rs:162),
+        // so a wrong run on a matching subject must not read as a subject
+        // mismatch.
+        let subject = AuthoritySubject::ActionGuideEphemeralGuide {
+            guide_digest: "ee".repeat(32),
+        };
+        let snapshot = AuthoritySnapshot::new(
+            AuthorityBinding::new(task_id(), TaskAttemptId::new(1), run_id(), subject.clone()),
+            "rollshot-v1".to_owned(),
+            DisclosureCeiling::OcrLayoutOnly,
+            false,
+            BTreeSet::new(),
+            BTreeSet::from([RunOperation::SubmitReviewCandidate]),
+        )
+        .unwrap();
+        let other_run = RunId::parse("run-00000000-0000-4000-8000-000000000002").unwrap();
+
+        assert!(matches!(
+            snapshot.authorize_tool(&other_run, &subject, RunOperation::SubmitReviewCandidate),
+            Err(AuthorityError::RunMismatch)
+        ));
     }
 
     // ------------------------------------------------------------------
@@ -647,7 +842,7 @@ mod tests {
                 task_id(),
                 TaskAttemptId::new(1),
                 run_id(),
-                document_binding(),
+                AuthoritySubject::Document(document_binding()),
             ),
             "".into(),
             DisclosureCeiling::OcrLayoutOnly,
@@ -665,7 +860,7 @@ mod tests {
                 task_id(),
                 TaskAttemptId::new(1),
                 run_id(),
-                document_binding(),
+                AuthoritySubject::Document(document_binding()),
             ),
             "rev-1".into(),
             DisclosureCeiling::OcrLayoutOnly,
@@ -683,7 +878,7 @@ mod tests {
                 task_id(),
                 TaskAttemptId::new(1),
                 run_id(),
-                document_binding(),
+                AuthoritySubject::Document(document_binding()),
             ),
             "rev-1".into(),
             DisclosureCeiling::FullScreenshot,

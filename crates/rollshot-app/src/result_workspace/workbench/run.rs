@@ -1224,7 +1224,7 @@ pub fn start_agent_run(
             task_id.clone(),
             rollshot_agent::product_task::TaskAttemptId::new(1),
             run_id.clone(),
-            content_binding.clone(),
+            rollshot_agent::authority::AuthoritySubject::Document(content_binding.clone()),
         );
         let authority = match rollshot_agent::authority::AuthoritySnapshot::new(
             authority_binding,
@@ -4378,7 +4378,7 @@ mod reducer_tests {
             policy_revision: "rollshot-v1".to_owned(),
             disclosure_ceiling: DisclosureCeiling::FullScreenshot,
             existing_product_capture: true,
-            document_binding_digest: "ab".repeat(32),
+            subject_digest: "ab".repeat(32),
             prepared_capabilities: vec![PreparedCapability::RegionFeatures],
             granted_operations: vec![
                 RunOperation::ReadDraft,

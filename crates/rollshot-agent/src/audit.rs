@@ -1238,8 +1238,8 @@ fn make_artifact_ref(
 mod tests {
     use super::*;
     use crate::authority::{
-        AuthorityBinding, AuthoritySnapshotReceiptV1, DisclosureCeiling, PreparedCapability,
-        RunOperation,
+        AuthorityBinding, AuthoritySnapshotReceiptV1, AuthoritySubject, DisclosureCeiling,
+        PreparedCapability, RunOperation,
     };
     use crate::domain::RunId;
     use crate::product_task::*;
@@ -1374,7 +1374,7 @@ mod tests {
                 task_id_fixture(),
                 TaskAttemptId::new(1),
                 run_id(),
-                document_binding_fixture(),
+                AuthoritySubject::Document(document_binding_fixture()),
             ),
             "auth-sentinel-policy".into(),
             DisclosureCeiling::OcrLayoutOnly,

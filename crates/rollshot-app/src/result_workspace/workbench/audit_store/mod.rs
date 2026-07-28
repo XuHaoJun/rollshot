@@ -922,8 +922,8 @@ pub(crate) mod tests {
 
     fn authority_snapshot_fixture() -> rollshot_agent::authority::AuthoritySnapshot {
         use rollshot_agent::authority::{
-            AuthorityBinding, AuthoritySnapshot, DisclosureCeiling, PreparedCapability,
-            RunOperation,
+            AuthorityBinding, AuthoritySnapshot, AuthoritySubject, DisclosureCeiling,
+            PreparedCapability, RunOperation,
         };
         use rollshot_agent::product_task::{
             AnnotationStateV1, DocumentContentBinding, TaskAttemptId,
@@ -941,7 +941,7 @@ pub(crate) mod tests {
                 TaskAttemptId::new(1),
                 rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
                     .unwrap(),
-                document_binding,
+                AuthoritySubject::Document(document_binding),
             ),
             "rollshot-v1".into(),
             DisclosureCeiling::FullScreenshot,

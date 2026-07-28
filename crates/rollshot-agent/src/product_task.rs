@@ -2604,7 +2604,7 @@ mod tests {
             policy_revision: "rev-1".to_owned(),
             disclosure_ceiling: DisclosureCeiling::FullScreenshot,
             existing_product_capture: false,
-            document_binding_digest: "ab".repeat(32),
+            subject_digest: "ab".repeat(32),
             prepared_capabilities: vec![PreparedCapability::Ocr],
             granted_operations: vec![RunOperation::SubmitReviewCandidate],
             snapshot_digest: "cd".repeat(32),

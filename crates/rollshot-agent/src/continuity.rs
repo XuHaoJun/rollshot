@@ -1213,7 +1213,7 @@ mod tests {
             policy_revision: "policy-rev-1".to_owned(),
             disclosure_ceiling: crate::authority::DisclosureCeiling::OcrLayoutOnly,
             existing_product_capture: false,
-            document_binding_digest: "doc-bind-digest".to_owned(),
+            subject_digest: "doc-bind-digest".to_owned(),
             prepared_capabilities: vec![],
             granted_operations: vec![],
             snapshot_digest: "auth-snap-digest-abc123".to_owned(),
@@ -1903,17 +1903,19 @@ mod tests {
                 task_id_fixture(),
                 TaskAttemptId::new(1),
                 run_id_fixture(),
-                crate::product_task::DocumentContentBinding::new(
-                    [1u8; 32],
-                    &crate::product_task::AnnotationStateV1 {
-                        width: 100,
-                        height: 100,
-                        state_id: 0,
-                        annotations: vec![],
-                    },
-                    0,
-                )
-                .unwrap(),
+                crate::authority::AuthoritySubject::Document(
+                    crate::product_task::DocumentContentBinding::new(
+                        [1u8; 32],
+                        &crate::product_task::AnnotationStateV1 {
+                            width: 100,
+                            height: 100,
+                            state_id: 0,
+                            annotations: vec![],
+                        },
+                        0,
+                    )
+                    .unwrap(),
+                ),
             ),
             "policy-rev-1".to_owned(),
             crate::authority::DisclosureCeiling::OcrLayoutOnly,

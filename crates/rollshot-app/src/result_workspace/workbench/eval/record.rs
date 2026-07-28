@@ -357,7 +357,7 @@ pub(crate) async fn record_cassette(
         .unwrap(),
         rollshot_agent::product_task::TaskAttemptId::new(1),
         RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
-        binding_for_authority,
+        rollshot_agent::authority::AuthoritySubject::Document(binding_for_authority),
     );
     let mut grants = std::collections::BTreeSet::new();
     use rollshot_agent::authority::RunOperation;

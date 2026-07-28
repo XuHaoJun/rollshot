@@ -2099,8 +2099,8 @@ pub(crate) mod tests {
 
     fn test_authority(ctx: &Arc<ToolContext>) -> crate::authority::AuthoritySnapshot {
         use crate::authority::{
-            AuthorityBinding, AuthoritySnapshot, DisclosureCeiling, PreparedCapability,
-            RunOperation,
+            AuthorityBinding, AuthoritySnapshot, AuthoritySubject, DisclosureCeiling,
+            PreparedCapability, RunOperation,
         };
         use std::collections::BTreeSet;
 
@@ -2109,7 +2109,7 @@ pub(crate) mod tests {
                 .unwrap(),
             crate::product_task::TaskAttemptId::new(1),
             ctx.run_id.clone(),
-            ctx.content_binding.clone(),
+            AuthoritySubject::Document(ctx.content_binding.clone()),
         );
         let mut grants = BTreeSet::new();
         grants.insert(RunOperation::ReadDraft);
@@ -5683,8 +5683,8 @@ main = "SKILL.md"
         // registry (explicitly registered). This test proves both are
         // unaffected by the injection.
         use crate::authority::{
-            AuthorityBinding, AuthoritySnapshot, DisclosureCeiling, PreparedCapability,
-            RunOperation,
+            AuthorityBinding, AuthoritySnapshot, AuthoritySubject, DisclosureCeiling,
+            PreparedCapability, RunOperation,
         };
         use crate::product_task::DocumentContentBinding;
 
@@ -5709,7 +5709,7 @@ main = "SKILL.md"
                 .unwrap(),
             crate::product_task::TaskAttemptId::new(1),
             crate::domain::RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap(),
-            binding.clone(),
+            AuthoritySubject::Document(binding.clone()),
         );
         let mut expected_grants = vec![
             RunOperation::ReadDraft,
@@ -5805,7 +5805,7 @@ main = "SKILL.md"
         .unwrap();
         let reject_result = authority.authorize_tool(
             &crate::domain::RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap(),
-            &other_binding,
+            &AuthoritySubject::Document(other_binding),
             RunOperation::ReadDraft,
         );
         assert!(
@@ -5981,7 +5981,7 @@ main = "SKILL.md"
                     policy_revision: "policy-rev-1".to_owned(),
                     disclosure_ceiling: crate::authority::DisclosureCeiling::OcrLayoutOnly,
                     existing_product_capture: false,
-                    document_binding_digest: "doc-bind-digest".to_owned(),
+                    subject_digest: "doc-bind-digest".to_owned(),
                     prepared_capabilities: vec![],
                     granted_operations: vec![],
                     snapshot_digest: auth_digest,
@@ -6426,8 +6426,8 @@ main = "SKILL.md"
         /// Build an authority that only grants ReadDraft (not WriteDraft).
         fn read_only_authority(ctx: &Arc<ToolContext>) -> crate::authority::AuthoritySnapshot {
             use crate::authority::{
-                AuthorityBinding, AuthoritySnapshot, DisclosureCeiling, PreparedCapability,
-                RunOperation,
+                AuthorityBinding, AuthoritySnapshot, AuthoritySubject, DisclosureCeiling,
+                PreparedCapability, RunOperation,
             };
             let binding = AuthorityBinding::new(
                 crate::product_task::ProductTaskId::parse(
@@ -6436,7 +6436,7 @@ main = "SKILL.md"
                 .unwrap(),
                 crate::product_task::TaskAttemptId::new(1),
                 ctx.run_id.clone(),
-                ctx.content_binding.clone(),
+                AuthoritySubject::Document(ctx.content_binding.clone()),
             );
             let grants = [RunOperation::ReadDraft].into_iter().collect();
             let caps = [PreparedCapability::RegionFeatures].into_iter().collect();
