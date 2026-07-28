@@ -1148,8 +1148,12 @@ impl TaskStore {
                 | TaskStatus::NeedsUserInput
                 | TaskStatus::Failed { .. } => {
                     // Prune terminal metadata older than 30 days.
+                    // Spec §9.6: delete task file first, then journal.
+                    // If task deletion fails, retain both.
                     if snapshot.updated_at_unix_ms() < now - PRUNE_AGE_DAYS * 86_400_000 {
-                        let _ = fs::remove_file(&path);
+                        if fs::remove_file(&path).is_ok() {
+                            let _ = self.audit_journal.remove_journal(&task_id);
+                        }
                         continue;
                     }
 
@@ -2737,5 +2741,272 @@ mod tests {
         // No new events after reopen (already reconciled).
         let events2 = store2.committed_audit_events(created.task_id()).unwrap();
         assert_eq!(events2.len(), 2);
+    }
+
+    // ------------------------------------------------------------------
+    // Task 5 checkpoint tests
+    // ------------------------------------------------------------------
+
+    fn review_receipt(apply: bool) -> rollshot_agent::product_task::ReviewReceipt {
+        rollshot_agent::product_task::ReviewReceipt {
+            artifact_id: artifact_id_fixture(),
+            artifact_revision: rollshot_agent::product_task::ArtifactRevision::new(1),
+            proposal_id: "proposal-00000000-0000-4000-8000-000000000001".to_owned(),
+            applied_candidates: if apply { vec![0, 1] } else { Vec::new() },
+            rejected_candidates: if apply { vec![2] } else { vec![0, 1, 2] },
+            local_delta: rollshot_agent::product_task::LocalReviewDeltaV1 {
+                moved_candidates: Vec::new(),
+                manual_additions: Vec::new(),
+            },
+            resulting_document_state_id: if apply { Some(42) } else { None },
+            resulting_document_digest: None,
+            decided_at_unix_ms: 50,
+        }
+    }
+
+    /// Step 4 checkpoint: review apply, reject, and compensation are audited.
+    #[test]
+    fn review_audit() {
+        // --- Apply path: ReadyForReview → Applying → Completed ---
+        {
+            let (store, _dir) = store();
+            let ready = ready_task_fixture();
+            store.create_without_failpoint(&ready).unwrap();
+
+            let applying = ready.begin_apply(40).unwrap();
+            store
+                .transition_audited(&ready, &applying, AuditEventId::new_v4(), 40)
+                .unwrap();
+
+            let completed = applying
+                .complete_apply(review_receipt(true), 50)
+                .unwrap();
+            store
+                .transition_audited(&applying, &completed, AuditEventId::new_v4(), 50)
+                .unwrap();
+
+            let events = store.committed_audit_events(ready.task_id()).unwrap();
+            assert_eq!(events.len(), 2);
+            assert!(matches!(
+                events[0].event(),
+                AuditEventV1::ReviewApplyStarted { .. }
+            ));
+            match events[1].event() {
+                AuditEventV1::ReviewDecisionCommitted {
+                    applied,
+                    review_decision,
+                    document_state,
+                } => {
+                    assert!(*applied);
+                    assert_eq!(
+                        review_decision.artifact_id,
+                        "artifact-00000000-0000-4000-8000-000000000001"
+                    );
+                    assert_eq!(review_decision.applied_candidate_ids, vec![0, 1]);
+                    assert!(document_state.is_some());
+                    assert_eq!(document_state.as_ref().unwrap().state_id, 42);
+                }
+                other => panic!("expected ReviewDecisionCommitted, got {other:?}"),
+            }
+        }
+
+        // --- Reject path: ReadyForReview → Rejected ---
+        {
+            let (store, _dir) = store();
+            let ready = ready_task_fixture();
+            store.create_without_failpoint(&ready).unwrap();
+
+            let rejected = ready.reject(review_receipt(false), 45).unwrap();
+            store
+                .transition_audited(&ready, &rejected, AuditEventId::new_v4(), 45)
+                .unwrap();
+
+            let events = store.committed_audit_events(ready.task_id()).unwrap();
+            assert_eq!(events.len(), 1);
+            match events[0].event() {
+                AuditEventV1::ReviewDecisionCommitted {
+                    applied,
+                    review_decision,
+                    document_state,
+                } => {
+                    assert!(!*applied);
+                    assert_eq!(review_decision.rejected_candidate_ids, vec![0, 1, 2]);
+                    assert!(document_state.is_none());
+                }
+                other => panic!("expected ReviewDecisionCommitted, got {other:?}"),
+            }
+        }
+
+        // --- Compensation path: Applying → Interrupted ---
+        {
+            let (store, _dir) = store();
+            let ready = ready_task_fixture();
+            store.create_without_failpoint(&ready).unwrap();
+
+            let applying = ready.begin_apply(40).unwrap();
+            store
+                .transition_audited(&ready, &applying, AuditEventId::new_v4(), 40)
+                .unwrap();
+
+            let interrupted = applying.reconcile_interrupted(55).unwrap().unwrap();
+            store
+                .transition_audited(&applying, &interrupted, AuditEventId::new_v4(), 55)
+                .unwrap();
+
+            let events = store.committed_audit_events(ready.task_id()).unwrap();
+            assert_eq!(events.len(), 2);
+            assert!(matches!(
+                events[0].event(),
+                AuditEventV1::ReviewApplyStarted { .. }
+            ));
+            match events[1].event() {
+                AuditEventV1::TaskTerminated { terminal } => {
+                    assert_eq!(terminal, &AuditTaskTerminalV1::Interrupted);
+                }
+                other => panic!("expected TaskTerminated, got {other:?}"),
+            }
+        }
+    }
+
+    /// Step 5 checkpoint: applied event binds exact document receipt.
+    #[test]
+    fn applied_review_receipt_audit() {
+        let (store, _dir) = store();
+        let ready = ready_task_fixture();
+        store.create_without_failpoint(&ready).unwrap();
+
+        let applying = ready.begin_apply(40).unwrap();
+        store
+            .transition_audited(&ready, &applying, AuditEventId::new_v4(), 40)
+            .unwrap();
+
+        // Build receipt with exact document state.
+        let receipt = rollshot_agent::product_task::ReviewReceipt {
+            artifact_id: artifact_id_fixture(),
+            artifact_revision: rollshot_agent::product_task::ArtifactRevision::new(1),
+            proposal_id: "proposal-00000000-0000-4000-8000-000000000001".to_owned(),
+            applied_candidates: vec![0, 1],
+            rejected_candidates: vec![],
+            local_delta: rollshot_agent::product_task::LocalReviewDeltaV1 {
+                moved_candidates: Vec::new(),
+                manual_additions: Vec::new(),
+            },
+            resulting_document_state_id: Some(7),
+            resulting_document_digest: None,
+            decided_at_unix_ms: 50,
+        };
+        let completed = applying.complete_apply(receipt, 50).unwrap();
+        store
+            .transition_audited(&applying, &completed, AuditEventId::new_v4(), 50)
+            .unwrap();
+
+        let events = store.committed_audit_events(ready.task_id()).unwrap();
+        assert_eq!(events.len(), 2);
+        match events[1].event() {
+            AuditEventV1::ReviewDecisionCommitted {
+                applied,
+                document_state,
+                review_decision,
+            } => {
+                assert!(*applied);
+                // Exact available document receipt bound.
+                let doc = document_state.as_ref().expect("document_state present");
+                assert_eq!(doc.state_id, 7);
+                assert_eq!(review_decision.applied_candidate_ids, vec![0, 1]);
+            }
+            other => panic!("expected ReviewDecisionCommitted, got {other:?}"),
+        }
+    }
+
+    /// Step 7 checkpoint: whole-pair retention deletes journal with task.
+    #[test]
+    fn audit_retention() {
+        let task_path;
+        let journal_path;
+        {
+            let (store, _dir) = store();
+            let created = created_task_fixture();
+            store
+                .create_audited(&created, AuditEventId::new_v4(), 10)
+                .unwrap();
+
+            let running = created.start_attempt(attempt_fixture(), 20).unwrap();
+            store
+                .transition_audited(&created, &running, AuditEventId::new_v4(), 20)
+                .unwrap();
+
+            let cancelled = running
+                .record_terminal(rollshot_agent::product_task::TaskTerminal::Cancelled, 30)
+                .unwrap();
+            store
+                .transition_audited(&running, &cancelled, AuditEventId::new_v4(), 30)
+                .unwrap();
+
+            // Verify both task and journal exist.
+            task_path = store.task_path(created.task_id()).unwrap();
+            journal_path = store.audit_journal.journal_path(created.task_id());
+            assert!(task_path.exists());
+            assert!(journal_path.exists());
+
+            // Reconcile with now far in the future (> 30 days) — should prune both.
+            let now = 30 + 31 * 86_400_000;
+            let binding = source_binding_fixture();
+            store.reconcile_for_source(&binding, now).unwrap();
+
+            // Both task file and journal should be deleted.
+            assert!(!task_path.exists(), "task file should be pruned");
+            assert!(!journal_path.exists(), "journal should be pruned with task");
+        }
+
+        // --- Half-delete recovery: if task file delete fails, both retained ---
+        {
+            let (store, dir) = store();
+            let created = created_task_fixture();
+            store
+                .create_audited(&created, AuditEventId::new_v4(), 10)
+                .unwrap();
+            let running = created.start_attempt(attempt_fixture(), 20).unwrap();
+            store
+                .transition_audited(&created, &running, AuditEventId::new_v4(), 20)
+                .unwrap();
+            let cancelled = running
+                .record_terminal(rollshot_agent::product_task::TaskTerminal::Cancelled, 30)
+                .unwrap();
+            store
+                .transition_audited(&running, &cancelled, AuditEventId::new_v4(), 30)
+                .unwrap();
+
+            let tp = store.task_path(created.task_id()).unwrap();
+            let jp = store.audit_journal.journal_path(created.task_id());
+
+            // Make task directory read-only so remove_file fails.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let tasks_dir = dir.path().join("agent-tasks").join("tasks");
+                let _ = std::fs::set_permissions(
+                    &tasks_dir,
+                    std::fs::Permissions::from_mode(0o500),
+                );
+
+                let now = 30 + 31 * 86_400_000;
+                let binding = source_binding_fixture();
+                store.reconcile_for_source(&binding, now).unwrap();
+
+                // Task file should still exist (delete failed).
+                assert!(tp.exists(), "task retained when delete fails");
+                // Journal should also be retained (spec: retain both).
+                assert!(
+                    jp.exists(),
+                    "journal retained when task delete fails"
+                );
+
+                // Restore permissions for cleanup.
+                let _ = std::fs::set_permissions(
+                    &tasks_dir,
+                    std::fs::Permissions::from_mode(0o700),
+                );
+            }
+        }
     }
 }

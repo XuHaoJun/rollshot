@@ -662,6 +662,16 @@ impl AuditJournal {
         Ok(())
     }
 
+    /// Delete the journal file for a task, if it exists.
+    /// Spec §9.6: retention removes the entire task and its evidence.
+    pub(crate) fn remove_journal(&self, task_id: &ProductTaskId) -> Result<(), io::Error> {
+        let path = self.journal_path(task_id);
+        if path.exists() {
+            fs::remove_file(&path)?;
+        }
+        Ok(())
+    }
+
     /// Repair unterminated tail fragment.
     ///
     /// Finds the last complete newline and truncates everything after it.

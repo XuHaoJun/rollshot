@@ -278,11 +278,18 @@ pub enum WorkbenchMessage {
     /// Carries the Applying snapshot so Phase 2 can use it for complete_apply.
     ApplyingPersisted {
         operation_id: ReviewOperationId,
+        complete_event_id: rollshot_agent::audit::AuditEventId,
         outcome: Result<rollshot_agent::product_task::ProductTaskSnapshot, String>,
     },
     /// Phase 3: receipt (Completed or Rejected) persisted.
     ReceiptPersisted {
         operation_id: ReviewOperationId,
+        outcome: Result<(), String>,
+    },
+    /// Phase 2: reject CAS persisted (ReadyForReview→Rejected).
+    RejectPersisted {
+        operation_id: ReviewOperationId,
+        reject_event_id: rollshot_agent::audit::AuditEventId,
         outcome: Result<(), String>,
     },
     SavePresetOrRevision,
