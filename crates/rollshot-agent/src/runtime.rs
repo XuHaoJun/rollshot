@@ -601,17 +601,6 @@ impl RunEventSink for NullEventSink {
     fn emit(&self, _event: RunEvent) {}
 }
 
-// ---------- Audit events ----------
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind")]
-pub enum AuditEvent {
-    TurnStarted { session_id: u64, generation: u64 },
-    BudgetCharged { dimension: String },
-    CancellationRequested,
-    RunCompleted { outcome: String },
-}
-
 // ---------- Terminal states ----------
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1144,45 +1133,6 @@ mod tests {
             },
         });
         sink.emit(RunEvent::TurnComplete);
-    }
-
-    // ---- Audit events ----
-
-    #[test]
-    fn audit_event_serialization_is_metadata_only() {
-        let event = AuditEvent::TurnStarted {
-            session_id: 42,
-            generation: 3,
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        assert!(json.contains("TurnStarted"));
-        assert!(json.contains("42"));
-        assert!(json.contains("3"));
-        // No prompt, source, attachment, or provider payload
-        assert!(!json.contains("prompt"));
-        assert!(!json.contains("source"));
-    }
-
-    #[test]
-    fn audit_event_roundtrip() {
-        let events = vec![
-            AuditEvent::TurnStarted {
-                session_id: 1,
-                generation: 0,
-            },
-            AuditEvent::BudgetCharged {
-                dimension: "input_tokens".into(),
-            },
-            AuditEvent::CancellationRequested,
-            AuditEvent::RunCompleted {
-                outcome: "completed".into(),
-            },
-        ];
-        for event in &events {
-            let json = serde_json::to_string(event).unwrap();
-            let back: AuditEvent = serde_json::from_str(&json).unwrap();
-            assert_eq!(&back, event);
-        }
     }
 
     // ---- Terminal states ----

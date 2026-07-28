@@ -438,6 +438,14 @@ impl ProductArtifactMetadata {
     pub fn attempt_id(&self) -> TaskAttemptId {
         self.attempt_id
     }
+
+    pub fn provider_id(&self) -> &str {
+        &self.provider_id
+    }
+
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
 }
 
 // ========================================================================
@@ -638,6 +646,12 @@ pub struct RunConfigFingerprintV2 {
     pub budget_dimensions: BTreeMap<String, u64>,
     pub authority_snapshot_digest: String,
     pub skill_use: SkillUseReceiptV1,
+}
+
+impl ValidateFinite for SourceBinding {
+    fn check_finite(&self) -> Result<(), CanonicalError> {
+        Ok(())
+    }
 }
 
 impl ValidateFinite for RunConfigFingerprintV2 {
