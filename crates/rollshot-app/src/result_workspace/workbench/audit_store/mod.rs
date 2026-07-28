@@ -974,7 +974,7 @@ pub(crate) mod tests {
         ProductTaskSnapshot::new(
             task_id(),
             TaskKind::SmartRedactionAuthor,
-            SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None),
+            SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None),
             10,
         )
         .unwrap()
@@ -1486,7 +1486,7 @@ pub(crate) mod tests {
         let snapshot = rollshot_agent::product_task::ProductTaskSnapshot::new(
             task_id.clone(),
             rollshot_agent::product_task::TaskKind::SmartRedactionAuthor,
-            rollshot_agent::product_task::SourceBinding::new(
+            rollshot_agent::product_task::SourceBinding::smart_redaction(
                 [1u8; 32],
                 [2u8; 32],
                 0,

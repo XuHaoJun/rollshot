@@ -5957,7 +5957,13 @@ main = "SKILL.md"
             let task_id =
                 ProductTaskId::parse("task-00000000-0000-4000-8000-00000000002a").unwrap();
             let run_id = RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap();
-            let source = SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None);
+            let source = SourceBinding::smart_redaction(
+                [1u8; 32],
+                [2u8; 32],
+                0,
+                "preset-001".to_owned(),
+                None,
+            );
 
             // Build the authority to get its digest.
             let ctx = test_ctx("src");

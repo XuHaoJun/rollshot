@@ -972,7 +972,8 @@ mod tests {
             wb.cached_base_digest = Some([99u8; 32]); // mismatch with source_binding
             wb.restore_operation_id.next()
         };
-        let binding = SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-default".into(), None);
+        let binding =
+            SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 0, "preset-default".into(), None);
         let _ = update(
             &mut ws,
             Message::Workbench(workbench::WorkbenchMessage::TaskRestoreFinished {
@@ -1018,7 +1019,8 @@ mod tests {
         let run_id =
             rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
                 .unwrap();
-        let binding = SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-default".into(), None);
+        let binding =
+            SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 0, "preset-default".into(), None);
         let snapshot = rollshot_agent::product_task::ProductTaskSnapshot::new(
             task_id.clone(),
             TaskKind::SmartRedactionAuthor,
@@ -1129,7 +1131,8 @@ mod tests {
         let run_id =
             rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
                 .unwrap();
-        let binding = SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-default".into(), None);
+        let binding =
+            SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 0, "preset-default".into(), None);
         let snapshot = rollshot_agent::product_task::ProductTaskSnapshot::new(
             task_id.clone(),
             TaskKind::SmartRedactionAuthor,

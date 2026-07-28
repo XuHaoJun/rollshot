@@ -256,15 +256,41 @@ impl TryFrom<&crate::product_task::ProductTaskSnapshot> for ContinuityProjection
         let status = snapshot.status();
         let source_binding = snapshot.source_binding();
 
-        // Compute source binding digest.
+        // Compute source binding digest. Each variant carries a distinct domain
+        // separator so bindings from different domains cannot collide.
         let source_binding_digest = {
             let mut hasher = Sha256::new();
-            hasher.update(source_binding.base_image_sha256());
-            hasher.update(source_binding.annotation_state_sha256());
-            hasher.update(source_binding.document_state_id().to_le_bytes());
-            hasher.update(source_binding.preset_id().as_bytes());
-            if let Some(rev) = source_binding.active_preset_revision_id() {
-                hasher.update(rev.as_bytes());
+            match source_binding {
+                crate::product_task::SourceBinding::SmartRedaction {
+                    base_image_sha256,
+                    annotation_state_sha256,
+                    document_state_id,
+                    preset_id,
+                    active_preset_revision_id,
+                } => {
+                    hasher.update(b"rollshot-source-binding-smart-redaction-v1\0");
+                    hasher.update(base_image_sha256);
+                    hasher.update(annotation_state_sha256);
+                    hasher.update(document_state_id.to_le_bytes());
+                    hasher.update(preset_id.as_bytes());
+                    if let Some(rev) = active_preset_revision_id {
+                        hasher.update(rev.as_bytes());
+                    }
+                }
+                crate::product_task::SourceBinding::ActionGuideProject {
+                    project_root_sha256,
+                    revision,
+                    projection_digest,
+                } => {
+                    hasher.update(b"rollshot-source-binding-action-guide-project-v1\0");
+                    hasher.update(project_root_sha256);
+                    hasher.update(revision.to_le_bytes());
+                    hasher.update(projection_digest.as_bytes());
+                }
+                crate::product_task::SourceBinding::ActionGuideEphemeralGuide { guide_digest } => {
+                    hasher.update(b"rollshot-source-binding-action-guide-ephemeral-v1\0");
+                    hasher.update(guide_digest.as_bytes());
+                }
             }
             format!("{:x}", hasher.finalize())
         };
@@ -1171,7 +1197,7 @@ mod tests {
     }
 
     fn source_binding_fixture() -> SourceBinding {
-        SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None)
+        SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None)
     }
 
     fn attempt_fixture() -> TaskAttempt {

@@ -816,15 +816,25 @@ async fn persist_terminal_outcome(
                 None => return Some("missing run contract for V2 promotion".into()),
             };
 
-            let source_binding = SourceBinding::new(
+            // This call site is Smart-Redaction-only today (no Action Guide
+            // producer exists yet), so `current`'s binding is always
+            // `SmartRedaction`.
+            let (current_preset_id, current_active_preset_revision_id) =
+                match current.source_binding() {
+                    SourceBinding::SmartRedaction {
+                        preset_id,
+                        active_preset_revision_id,
+                        ..
+                    } => (preset_id.clone(), active_preset_revision_id.clone()),
+                    _ => (String::new(), None),
+                };
+
+            let source_binding = SourceBinding::smart_redaction(
                 *content_binding.base_image_digest(),
                 *content_binding.annotation_state_digest(),
                 content_binding.state_id(),
-                current.source_binding().preset_id().to_owned(),
-                current
-                    .source_binding()
-                    .active_preset_revision_id()
-                    .map(String::from),
+                current_preset_id,
+                current_active_preset_revision_id,
             );
             let artifact_id = ArtifactId::parse(format!("artifact-{}", uuid::Uuid::new_v4()))
                 .expect("v4 UUID is valid");
@@ -1009,7 +1019,7 @@ pub fn start_agent_run(
                 ProductTaskSnapshot, SourceBinding, TaskAttempt, TaskAttemptId,
             };
             let now = chrono::Utc::now().timestamp_millis();
-            let source_binding = SourceBinding::new(
+            let source_binding = SourceBinding::smart_redaction(
                 *content_binding.base_image_digest(),
                 *content_binding.annotation_state_digest(),
                 content_binding.state_id(),
@@ -3423,7 +3433,8 @@ mod reducer_tests {
 
         // Simulate what the stream does: create a running snapshot.
         let now = chrono::Utc::now().timestamp_millis();
-        let source_binding = SourceBinding::new([0u8; 32], [0u8; 32], 0, "test".into(), None);
+        let source_binding =
+            SourceBinding::smart_redaction([0u8; 32], [0u8; 32], 0, "test".into(), None);
         let snapshot = ProductTaskSnapshot::new(
             task_id.clone(),
             TaskKind::SmartRedactionAuthor,
@@ -3468,7 +3479,8 @@ mod reducer_tests {
 
         // Create and persist running snapshot.
         let now = chrono::Utc::now().timestamp_millis();
-        let source_binding = SourceBinding::new([0u8; 32], [0u8; 32], 0, "test".into(), None);
+        let source_binding =
+            SourceBinding::smart_redaction([0u8; 32], [0u8; 32], 0, "test".into(), None);
         let snapshot = ProductTaskSnapshot::new(
             task_id.clone(),
             TaskKind::SmartRedactionAuthor,
@@ -3488,7 +3500,7 @@ mod reducer_tests {
             ArtifactKind::SmartRedaction,
             1,
             String::new(),
-            SourceBinding::new([1u8; 32], [0u8; 32], 0, "test".into(), None),
+            SourceBinding::smart_redaction([1u8; 32], [0u8; 32], 0, "test".into(), None),
             task_id.clone(),
             running.attempts().last().unwrap().attempt_id(),
             run_id.clone(),
@@ -3555,7 +3567,8 @@ mod reducer_tests {
 
         // Create running snapshot (without failpoint).
         let now = chrono::Utc::now().timestamp_millis();
-        let source_binding = SourceBinding::new([0u8; 32], [0u8; 32], 0, "test".into(), None);
+        let source_binding =
+            SourceBinding::smart_redaction([0u8; 32], [0u8; 32], 0, "test".into(), None);
         let snapshot = ProductTaskSnapshot::new(
             task_id.clone(),
             TaskKind::SmartRedactionAuthor,
@@ -3607,7 +3620,8 @@ mod reducer_tests {
 
         // Create and persist running snapshot with real source binding.
         let now = chrono::Utc::now().timestamp_millis();
-        let source_binding = SourceBinding::new([0u8; 32], [0u8; 32], 0, "test".into(), None);
+        let source_binding =
+            SourceBinding::smart_redaction([0u8; 32], [0u8; 32], 0, "test".into(), None);
         let snapshot = ProductTaskSnapshot::new(
             task_id.clone(),
             TaskKind::SmartRedactionAuthor,
@@ -3869,7 +3883,7 @@ mod reducer_tests {
             "task-00000000-0000-4000-8000-000000000001",
         )
         .unwrap();
-        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
         let snapshot = ready_snapshot_with_proposal(&task_id, binding.clone());
         store.create(&snapshot).unwrap();
 
@@ -3917,12 +3931,12 @@ mod reducer_tests {
         )
         .unwrap();
         // Task was created with base_image = [1u8; 32].
-        let task_binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let task_binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
         let snapshot = ready_snapshot_with_proposal(&task_id, task_binding);
         store.create(&snapshot).unwrap();
 
         // Current source has a DIFFERENT base image but same state_id.
-        let current_binding = Sb::new([99u8; 32], [2u8; 32], 0, "p".into(), None);
+        let current_binding = Sb::smart_redaction([99u8; 32], [2u8; 32], 0, "p".into(), None);
         let result = store.reconcile_for_source(&current_binding, 2000).unwrap();
 
         // reconcile_for_source returns None — unrelated image skipped.
@@ -3948,12 +3962,12 @@ mod reducer_tests {
         )
         .unwrap();
         // Task: base=[1], annotations=[2], state_id=0.
-        let task_binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let task_binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
         let snapshot = ready_snapshot_with_proposal(&task_id, task_binding);
         store.create(&snapshot).unwrap();
 
         // Current: base=[1], annotations=[99], state_id=0.
-        let current_binding = Sb::new([1u8; 32], [99u8; 32], 0, "p".into(), None);
+        let current_binding = Sb::smart_redaction([1u8; 32], [99u8; 32], 0, "p".into(), None);
         let result = store.reconcile_for_source(&current_binding, 2000).unwrap();
 
         assert!(result.is_none(), "changed annotations must not restore");
@@ -3977,7 +3991,7 @@ mod reducer_tests {
             "task-00000000-0000-4000-8000-000000000001",
         )
         .unwrap();
-        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
         let snapshot = ProductTaskSnapshot::new(
             task_id.clone(),
@@ -4014,7 +4028,7 @@ mod reducer_tests {
     fn stale_restore_completion_is_ignored() {
         // 5. old restore completion delivered after a new restore/run is ignored.
         let mut ws = ws_with_workbench();
-        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
         // Set up workbench with a restore operation in progress.
         let stale_op = {
@@ -4069,7 +4083,7 @@ mod reducer_tests {
         let snapshot = ProductTaskSnapshot::new(
             task_id.clone(),
             Tk::SmartRedactionAuthor,
-            Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None),
+            Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None),
             10,
         )
         .unwrap();
@@ -4131,7 +4145,7 @@ mod reducer_tests {
         let run_id =
             rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000041")
                 .unwrap();
-        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
         let snapshot =
             ProductTaskSnapshot::new(task_id.clone(), Tk::SmartRedactionAuthor, binding, 10)
@@ -4200,7 +4214,7 @@ mod reducer_tests {
         let run_id =
             rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000042")
                 .unwrap();
-        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
         let snapshot =
             ProductTaskSnapshot::new(task_id.clone(), Tk::SmartRedactionAuthor, binding, 10)
@@ -4244,7 +4258,7 @@ mod reducer_tests {
         let run_id =
             rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000043")
                 .unwrap();
-        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
         let snapshot =
             ProductTaskSnapshot::new_v2(task_id.clone(), Tk::SmartRedactionAuthor, binding, 10)
@@ -4294,7 +4308,7 @@ mod reducer_tests {
         let run_id =
             rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000044")
                 .unwrap();
-        let _binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let _binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
         // Without a store, no persistence path is available.
         // The persist_* helpers return silently (no error surfaced to user).
@@ -4451,7 +4465,7 @@ mod reducer_tests {
             ArtifactKind::SmartRedaction,
             2,
             payload_sha,
-            Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None),
+            Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None),
             rollshot_agent::product_task::ProductTaskId::parse(
                 "task-00000000-0000-4000-8000-000000000001",
             )
@@ -4487,7 +4501,7 @@ mod reducer_tests {
         let snapshot = ProductTaskSnapshot::new_v2(
             task_id,
             Tk::SmartRedactionAuthor,
-            Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None),
+            Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None),
             10,
         )
         .unwrap();
@@ -4649,7 +4663,7 @@ mod reducer_tests {
         let run_id =
             rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
                 .unwrap();
-        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
         let snapshot =
             ProductTaskSnapshot::new_v2(task_id.clone(), Tk::SmartRedactionAuthor, binding, 10)
@@ -4670,7 +4684,7 @@ mod reducer_tests {
             rollshot_agent::product_task::ArtifactKind::SmartRedaction,
             1,
             String::new(),
-            Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None),
+            Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None),
             rollshot_agent::product_task::ProductTaskId::parse(
                 "task-00000000-0000-4000-8000-000000000001",
             )
@@ -4790,7 +4804,7 @@ mod reducer_tests {
         let run_id =
             rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
                 .unwrap();
-        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
         let snapshot =
             ProductTaskSnapshot::new_v2(task_id.clone(), Tk::SmartRedactionAuthor, binding, 10)
@@ -4833,7 +4847,7 @@ mod reducer_tests {
             rollshot_agent::product_task::ArtifactKind::SmartRedaction,
             1,
             String::new(),
-            Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None),
+            Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None),
             rollshot_agent::product_task::ProductTaskId::parse(
                 "task-00000000-0000-4000-8000-000000000001",
             )
@@ -4895,7 +4909,7 @@ mod reducer_tests {
         let run_id =
             rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
                 .unwrap();
-        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
         let snapshot =
             ProductTaskSnapshot::new_v2(task_id.clone(), Tk::SmartRedactionAuthor, binding, 10)
@@ -4924,7 +4938,7 @@ mod reducer_tests {
             rollshot_agent::product_task::ArtifactKind::SmartRedaction,
             1,
             String::new(),
-            Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None),
+            Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None),
             task_id.clone(),
             rollshot_agent::product_task::TaskAttemptId::new(1),
             wrong_run_id,
@@ -4990,7 +5004,7 @@ mod reducer_tests {
                 .unwrap();
 
         // Original source binding (what the run was started with).
-        let original_binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let original_binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
         let snapshot = ProductTaskSnapshot::new_v2(
             task_id.clone(),
@@ -5070,7 +5084,7 @@ mod reducer_tests {
         let snapshot = ProductTaskSnapshot::new(
             task_id.clone(),
             Tk::SmartRedactionAuthor,
-            Sb::new([1u8; 32], [2u8; 32], 0, "preset".into(), None),
+            Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "preset".into(), None),
             10,
         )
         .unwrap();
@@ -5118,7 +5132,7 @@ mod reducer_tests {
         let snapshot = ProductTaskSnapshot::new(
             task_id.clone(),
             Tk::SmartRedactionAuthor,
-            Sb::new([1u8; 32], [2u8; 32], 0, "preset".into(), None),
+            Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "preset".into(), None),
             10,
         )
         .unwrap();
@@ -5189,7 +5203,7 @@ mod reducer_tests {
             "task-00000000-0000-4000-8000-000000000001",
         )
         .unwrap();
-        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
         let snapshot = ready_snapshot_with_proposal(&task_id, binding.clone());
         store.create(&snapshot).unwrap();
 
@@ -5257,7 +5271,7 @@ mod reducer_tests {
             let run_id =
                 rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
                     .unwrap();
-            let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+            let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
             let snapshot = rollshot_agent::product_task::ProductTaskSnapshot::new(
                 task_id.clone(),
                 Tk::SmartRedactionAuthor,
@@ -5349,7 +5363,7 @@ mod reducer_tests {
             "task-00000000-0000-4000-8000-000000000001",
         )
         .unwrap();
-        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
         let snapshot = ready_snapshot_with_proposal(&task_id, binding.clone());
         store.create(&snapshot).unwrap();
 
@@ -5403,7 +5417,7 @@ mod reducer_tests {
         let run_id =
             rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
                 .unwrap();
-        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
         let snapshot = rollshot_agent::product_task::ProductTaskSnapshot::new(
             task_id.clone(),
             Tk::SmartRedactionAuthor,
@@ -5536,7 +5550,7 @@ mod dropped_display_events {
     }
 
     fn binding() -> SourceBinding {
-        SourceBinding::new([7u8; 32], [8u8; 32], 0, "preset-repair".into(), None)
+        SourceBinding::smart_redaction([7u8; 32], [8u8; 32], 0, "preset-repair".into(), None)
     }
 
     fn payload() -> SmartRedactionReviewPayload {

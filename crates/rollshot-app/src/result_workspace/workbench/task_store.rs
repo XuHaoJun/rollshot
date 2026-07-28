@@ -1288,17 +1288,32 @@ impl TaskStore {
                     continue;
                 }
                 TaskStatus::ReadyForReview => {
+                    // Temporary: Task 3 replaces this with
+                    // identity_matches / freshness_matches.
+                    let (snap_base, snap_annotation) = match snapshot.source_binding() {
+                        SourceBinding::SmartRedaction {
+                            base_image_sha256,
+                            annotation_state_sha256,
+                            ..
+                        } => (base_image_sha256, annotation_state_sha256),
+                        _ => continue,
+                    };
+                    let (want_base, want_annotation) = match binding {
+                        SourceBinding::SmartRedaction {
+                            base_image_sha256,
+                            annotation_state_sha256,
+                            ..
+                        } => (base_image_sha256, annotation_state_sha256),
+                        _ => continue,
+                    };
                     // Skip tasks with completely unrelated base images.
-                    if snapshot.source_binding().base_image_sha256() != binding.base_image_sha256()
-                    {
+                    if snap_base != want_base {
                         continue;
                     }
 
                     // Mark same-base-image but mismatching annotation-state
                     // tasks as stale.
-                    if snapshot.source_binding().annotation_state_sha256()
-                        != binding.annotation_state_sha256()
-                    {
+                    if snap_annotation != want_annotation {
                         // Audited mark stale.
                         if let Ok(stale) = snapshot.mark_stale(now) {
                             let event_id = AuditEventId::new_v4();
@@ -1521,7 +1536,7 @@ mod tests {
     }
 
     fn source_binding_fixture() -> SourceBinding {
-        SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None)
+        SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None)
     }
 
     fn attempt_fixture() -> TaskAttempt {
@@ -2219,7 +2234,7 @@ mod tests {
         store.create_without_failpoint(&ready).unwrap();
 
         // Same base image, different annotation-state.
-        let new_binding = SourceBinding::new(
+        let new_binding = SourceBinding::smart_redaction(
             [1u8; 32],  // same base image
             [99u8; 32], // different annotation state
             1,
@@ -2240,7 +2255,7 @@ mod tests {
         store.create_without_failpoint(&ready).unwrap();
 
         // Different base image entirely.
-        let unrelated_binding = SourceBinding::new(
+        let unrelated_binding = SourceBinding::smart_redaction(
             [99u8; 32], // different base image
             [2u8; 32],
             0,

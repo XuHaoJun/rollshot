@@ -1691,7 +1691,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 annotations: vec![],
             };
             let base_digest = state.base_image_digest;
-            let source_binding = rollshot_agent::product_task::SourceBinding::new(
+            let source_binding = rollshot_agent::product_task::SourceBinding::smart_redaction(
                 base_digest,
                 rollshot_agent::product_task::compute_annotation_state_digest(&annotation_state)
                     .unwrap_or(base_digest),
@@ -2759,7 +2759,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         return Task::none();
                     }
                     // Content guard: drop if base digest changed.
-                    if workbench.cached_base_digest != Some(*source_binding.base_image_sha256()) {
+                    if workbench.cached_base_digest
+                        != source_binding.smart_redaction_base_image_sha256().copied()
+                    {
                         return Task::none();
                     }
                     // Must still be idle (not mid-run).

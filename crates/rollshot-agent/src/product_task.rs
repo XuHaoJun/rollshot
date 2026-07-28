@@ -181,25 +181,39 @@ pub enum PayloadMode {
 // Source binding
 // ========================================================================
 
-/// Content binding: base-image SHA-256 + annotation-state SHA-256 + state ID.
+/// Domain-tagged binding identifying the source a task acts on.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SourceBinding {
-    base_image_sha256: [u8; 32],
-    annotation_state_sha256: [u8; 32],
-    document_state_id: u32,
-    preset_id: String,
-    active_preset_revision_id: Option<String>,
+#[serde(tag = "domain", rename_all = "snake_case")]
+pub enum SourceBinding {
+    SmartRedaction {
+        base_image_sha256: [u8; 32],
+        annotation_state_sha256: [u8; 32],
+        document_state_id: u32,
+        preset_id: String,
+        active_preset_revision_id: Option<String>,
+    },
+    ActionGuideProject {
+        /// SHA-256 of the canonicalized project root path. The project manifest
+        /// has no stable identity, so the path is the only one available.
+        project_root_sha256: [u8; 32],
+        revision: u64,
+        projection_digest: String,
+    },
+    ActionGuideEphemeralGuide {
+        guide_digest: String,
+    },
 }
 
 impl SourceBinding {
-    pub fn new(
+    /// Constructor preserving the pre-migration argument order.
+    pub fn smart_redaction(
         base_image_sha256: [u8; 32],
         annotation_state_sha256: [u8; 32],
         document_state_id: u32,
         preset_id: String,
         active_preset_revision_id: Option<String>,
     ) -> Self {
-        Self {
+        Self::SmartRedaction {
             base_image_sha256,
             annotation_state_sha256,
             document_state_id,
@@ -208,24 +222,14 @@ impl SourceBinding {
         }
     }
 
-    pub fn base_image_sha256(&self) -> &[u8; 32] {
-        &self.base_image_sha256
-    }
-
-    pub fn annotation_state_sha256(&self) -> &[u8; 32] {
-        &self.annotation_state_sha256
-    }
-
-    pub fn document_state_id(&self) -> u32 {
-        self.document_state_id
-    }
-
-    pub fn preset_id(&self) -> &str {
-        &self.preset_id
-    }
-
-    pub fn active_preset_revision_id(&self) -> Option<&str> {
-        self.active_preset_revision_id.as_deref()
+    /// Smart Redaction base-image digest, or `None` for other domains.
+    pub fn smart_redaction_base_image_sha256(&self) -> Option<&[u8; 32]> {
+        match self {
+            Self::SmartRedaction {
+                base_image_sha256, ..
+            } => Some(base_image_sha256),
+            _ => None,
+        }
     }
 }
 
@@ -1520,7 +1524,7 @@ mod tests {
     }
 
     fn source_binding_fixture() -> SourceBinding {
-        SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None)
+        SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None)
     }
 
     fn attempt_fixture() -> TaskAttempt {
@@ -2729,5 +2733,26 @@ mod tests {
         assert!(!json_str.contains("api_key"));
         assert!(!json_str.contains("password"));
         assert!(!json_str.contains("/home/"));
+    }
+
+    #[test]
+    fn source_binding_round_trips_all_variants() {
+        let cases = vec![
+            SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 7, "p".into(), None),
+            SourceBinding::ActionGuideProject {
+                project_root_sha256: [3u8; 32],
+                revision: 9,
+                projection_digest: "ab".repeat(32),
+            },
+            SourceBinding::ActionGuideEphemeralGuide {
+                guide_digest: "cd".repeat(32),
+            },
+        ];
+
+        for case in cases {
+            let json = serde_json::to_string(&case).unwrap();
+            let back: SourceBinding = serde_json::from_str(&json).unwrap();
+            assert_eq!(case, back, "round trip failed for {json}");
+        }
     }
 }

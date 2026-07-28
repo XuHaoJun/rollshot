@@ -1263,7 +1263,7 @@ mod tests {
     }
 
     fn source_binding_fixture() -> SourceBinding {
-        SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None)
+        SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None)
     }
 
     fn attempt_fixture() -> TaskAttempt {
@@ -2566,7 +2566,13 @@ mod tests {
             let task = ProductTaskSnapshot::new(
                 task_id_fixture(),
                 TaskKind::SmartRedactionAuthor,
-                SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None),
+                SourceBinding::smart_redaction(
+                    [1u8; 32],
+                    [2u8; 32],
+                    0,
+                    "preset-001".to_owned(),
+                    None,
+                ),
                 10,
             )
             .unwrap();
