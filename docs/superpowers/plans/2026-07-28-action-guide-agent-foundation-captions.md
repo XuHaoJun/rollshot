@@ -1486,21 +1486,77 @@ For each hit, classify it as one of:
 - **recomputes a digest from a loaded snapshot and compares it to a persisted
   string (unsafe — triggers the fallback).**
 
-**Pre-populated from the review pass on 2026-07-28.** Re-run the grep and confirm
-no drift, then keep or correct this table:
+**Pre-populated from the review pass on 2026-07-28; re-verified on 2026-07-29**
+against the current tree (Slices 4-6 landed in between and shifted line numbers
+in `continuity.rs`, `run.rs`, `task_store.rs`, `driver.rs`; no classification
+changed). `product_task.rs` sites, missed by the first pass, are added below.
 
 | Site | Classification |
 |---|---|
 | `authority.rs:208`, `:269` | producer — `binding_digest_hex()` into receipt and into `DigestedSnapshotV1`. Safe |
-| `authority.rs:252`-258 | the formula itself |
+| `authority.rs:252`-258 | the document-binding-digest formula (`binding_digest_hex`) |
+| `authority.rs:261`-279 | the snapshot digest formula itself (`compute_digest` / `DigestedSnapshotV1`) — this is what Task 8 changes |
 | `authority.rs:503`-505 | test, live-vs-live receipt comparison. Safe |
-| `audit.rs:835`, `:1089` | copy into an audit envelope. Safe |
-| `audit.rs:1802` | test, compares a value against itself. Safe |
-| `audit.rs:2204` | test, `bound.snapshot_digest == authority.digest()` — live snapshot, same process. Safe |
-| `continuity.rs:288` | copy into `ContinuityProjectionV1`, which is built on demand and never persisted. Safe |
-| `run.rs:839`, `:4404`, `:4536`-4537, `:4552` | copy into a fingerprint / test comparisons against a live contract. Safe |
-| `task_store.rs:1724`, `:2822` | copy into a fingerprint / test compares a loaded receipt against the receipt it was built from. Safe |
-| `run.rs:4356`, `task_store.rs:1677`, `continuity.rs:1190`, `driver.rs:5978` | test fixtures constructing `AuthoritySnapshotReceiptV1` with a literal `document_binding_digest`. These four are the **field-rename fan-out for Task 8 Step 4**, not digest comparisons |
+| `audit.rs:835`, `:1089` | copy into an audit envelope (`AuthorityAuditRefV1`). Safe |
+| `audit.rs:1806` (was `:1802`) | test, compares a value against itself. Safe |
+| `audit.rs:2208` (was `:2204`) | test, `bound.snapshot_digest == authority.digest()` — live snapshot, same process. Safe |
+| `continuity.rs:313`-314 (was `:288`) | copy into `ContinuityProjectionV1`'s DTO (`run_contract_authority_snapshot_digest`), never recomputed. Safe |
+| `continuity.rs:929`-941 | `RunContinuityManifestV1::build`'s `AuthorityMismatch`/`SkillMismatch` checks — see Note A below. Safe |
+| `continuity.rs:1746`, `:1776` | test, asserts the JSON *field name* `run_contract_authority_snapshot_digest` is absent when no contract exists — a serialization-shape check, not a digest-value comparison. Not applicable |
+| `run.rs:851` (was `:839`) | copy into `RunConfigFingerprintV2`. Safe |
+| `run.rs:4429` (was `:4404`) | copy into fingerprint (`run_config_v2_with`). Safe |
+| `run.rs:4561`-4562 (was `:4536`-4537) | test, compares a value against the same in-process fixture it was built from. Safe |
+| `run.rs:4577` (was `:4552`) | test, mutates a fixture field to prove fingerprint sensitivity, not a comparison against a persisted digest. Safe |
+| `task_store.rs:1724` | copy into fingerprint. Safe |
+| `task_store.rs:2865` (was `:2822`) | test, compares a durably-appended-then-reread audit-journal string field (`committed_audit_events(...)`) against the in-memory fixture it was written from. The stored field is an opaque string copy end to end — no digest algorithm runs on the read path. Safe |
+| `run.rs:4373`-4394 (was `:4356`), `task_store.rs:1677`, `:1680`, `continuity.rs:1216`, `:1219` (was `:1190`), `driver.rs:5984` (was `:5978`) | test fixtures constructing `AuthoritySnapshotReceiptV1` with a literal `document_binding_digest`/`snapshot_digest`. **Field-rename fan-out for Task 8 Step 4**, not digest comparisons |
+| `driver.rs:5987` | test, embeds the live `authority.digest()` (captured at `:5971`) into a fixture receipt so a downstream overflow-recovery check passes. Live-vs-live, not a comparison against an independently persisted value. Safe |
+| `product_task.rs:939` | struct field declaration (`RunConfigFingerprintV2.authority_snapshot_digest`). Not a comparison site |
+| `product_task.rs:2607`, `:2610`, `:2674` | fixture literal / copy into fingerprint — same pattern as `run.rs`/`task_store.rs` above. Field-rename fan-out / Safe |
+| `product_task.rs:2962`-3104` | tests: literal fixture inputs, determinism (same config hashed twice), serde round-trip equality, privacy scan. None recompute from a loaded snapshot. Safe |
+
+**Note A — the continuity recovery check (§ task instructions point 2).**
+`continuity.rs:929`-941 compares `inputs.authority.digest()` /
+`inputs.skill_use.digest()` (cached fields, never recomputed) against a
+substring of a freshly-rebuilt `ContinuityProjectionV1`'s canonical bytes. That
+projection copies `contract.authority.snapshot_digest` verbatim from a
+`ProductTaskSnapshot` reloaded from disk — also never recomputed. Traced to the
+sole production caller (`rollshot-app`'s
+`result_workspace/workbench/run.rs:1229`-1334): the `authority`/`skill_use`
+objects are the same live, in-memory instances held for the entire
+`run_with_provider` call, including through in-run overflow-recovery restarts,
+and the run contract they are checked against was written to disk by this same
+run moments earlier. Neither side recomputes a digest from a loaded snapshot;
+the check fails closed (`ContextRecoveryFailure`) on any mismatch rather than
+silently accepting stale data. Safe.
+
+**Note B — is `ContinuityProjectionV1` ever persisted (§ task instructions
+point 1)?** No. It has no `Deserialize` impl and no on-disk representation;
+every instance is rebuilt fresh via `TryFrom<&ProductTaskSnapshot>`
+(`continuity.rs:243`). Its own digest (over `ContinuityProjectionDto` with the
+`CONTINUITY_PROJECTION_DOMAIN` separator) is used only transiently — embedded
+into the never-persisted `RunContinuityManifestV1` (`continuity.rs:1011`) or
+truncated for a tracing log (`continuity.rs:1076`) — and is never itself
+written to disk or compared against a stored value.
+
+**Note C — structural guarantee.** `AuthoritySnapshot` cannot be reconstructed
+from a persisted receipt: it has no `Deserialize` impl, and every
+`AuthoritySnapshot::new` call site in the workspace builds it from full binding
+fields, never from `AuthoritySnapshotReceiptV1`. The recompute-from-loaded-
+snapshot pattern is closed off at the type level, independent of the site-by-
+site audit above.
+
+**Note D — other Serialize-only, JSON-is-the-hash-input DTOs.** Beyond
+`DigestedSnapshotV1`, two more types play the same role, where a field
+rename/reorder silently changes their digest: `ContinuityProjectionDto`
+(`continuity.rs:88`, hashed with `CONTINUITY_PROJECTION_DOMAIN` into
+`ContinuityProjectionV1.digest`) and `RunContinuityManifestDto`
+(`continuity.rs:1132`, hashed into `RunContinuityManifestV1.digest`, explicitly
+documented "Never persisted"). Neither computes the `AuthoritySnapshot` digest
+Task 8 is changing — both only ever embed `AuthoritySnapshot.digest()` /
+`AuthoritySnapshotReceiptV1.snapshot_digest` as an opaque string field — so
+Task 8 needs no action on them, but they are flagged as the same risk pattern
+for any future change to either DTO.
 
 **Finding: clean.** No site recomputes an authority digest from a loaded snapshot
 and compares it against a persisted string. Task 8 may therefore give the
@@ -1540,9 +1596,12 @@ builders are `snapshot_with`, `snapshot_with_grants`, and
 
 - [ ] **Step 3: Record the finding in the plan file**
 
-Append the audit result to this task in the plan document, replacing this step's
-text with the classification table produced in Step 1. Then commit the plan
-change together with the test.
+**Done.** The classification table in Step 1 above was re-verified on 2026-07-29
+against the current tree and corrected for line-number drift; the verdict is
+unchanged from the 2026-07-28 pass: **clean**. See Step 1's table and Notes
+A-D for the full record, including the two points the task instructions called
+out for extra scrutiny (`ContinuityProjectionV1` persistence status, and the
+continuity-recovery digest check's same-process/same-code-version provenance).
 
 - [ ] **Step 4: Run the test**
 
