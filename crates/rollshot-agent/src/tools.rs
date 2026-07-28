@@ -724,6 +724,7 @@ impl ToolContext {
     /// Locks each field in a fixed order and copies only privacy-safe
     /// metadata. Contains no source, proposals, validated programs,
     /// metrics debug text, capability handles, or pending review content.
+    #[allow(dead_code)] // exercised by continuity.rs privacy sentinel tests
     pub(crate) fn continuity_state(&self) -> crate::continuity::ToolContinuitySnapshot {
         let draft = self.draft.lock().unwrap();
         let generation = draft.generation();
@@ -733,17 +734,13 @@ impl ToolContext {
             .evidence()
             .iter()
             .filter(|e| e.source_generation == generation)
-            .map(|e| crate::continuity::EvidenceContinuityV1::from_record(e))
+            .map(crate::continuity::EvidenceContinuityV1::from_record)
             .collect();
 
         drop(draft);
 
-        let has_validation_evidence = current_evidence
-            .iter()
-            .any(|e| e.is_validation());
-        let has_dry_run_evidence = current_evidence
-            .iter()
-            .any(|e| e.is_dry_run());
+        let has_validation_evidence = current_evidence.iter().any(|e| e.is_validation());
+        let has_dry_run_evidence = current_evidence.iter().any(|e| e.is_dry_run());
 
         let pending_review = self.pending_ready_for_review.lock().unwrap().is_some();
 

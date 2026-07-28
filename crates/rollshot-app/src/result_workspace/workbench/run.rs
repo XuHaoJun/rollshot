@@ -1259,7 +1259,7 @@ pub fn start_agent_run(
                         match rollshot_agent::continuity::ContinuityProjectionV1::try_from(&snapshot) {
                             Ok(projection) => {
                                 rollshot_agent::continuity::RunContinuitySource::Durable {
-                                    expected: projection,
+                                    expected: Box::new(projection),
                                     source: std::sync::Arc::new(
                                         super::task_store::TaskStoreContinuitySource::new(store.clone()),
                                     ),

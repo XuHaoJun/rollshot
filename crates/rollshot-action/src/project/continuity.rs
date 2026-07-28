@@ -13,8 +13,8 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 
 use super::model::{LoadedProject, ProjectStepId};
-use crate::models::{CandidateKind, DetectReason, FrameId, Millis};
 use crate::guide::Guide;
+use crate::models::{CandidateKind, DetectReason, FrameId, Millis};
 use crate::GuideStep;
 
 // ========================================================================
@@ -118,7 +118,9 @@ impl ActionGuideContextProjectionV1 {
 
         // Bound step count.
         if manifest.steps.len() > MAX_PROJECTED_STEPS {
-            return Err(ActionGuideProjectionError::TooManySteps(manifest.steps.len()));
+            return Err(ActionGuideProjectionError::TooManySteps(
+                manifest.steps.len(),
+            ));
         }
 
         // Bound guide title.
@@ -175,7 +177,9 @@ impl ActionGuideContextProjectionV1 {
             .map_err(|e| ActionGuideProjectionError::Canonical(e.to_string()))?;
 
         if canonical_bytes.len() > MAX_PROJECTED_BYTES {
-            return Err(ActionGuideProjectionError::ProjectionTooLarge(canonical_bytes.len()));
+            return Err(ActionGuideProjectionError::ProjectionTooLarge(
+                canonical_bytes.len(),
+            ));
         }
 
         // Derive digest with domain separator.
@@ -268,7 +272,9 @@ fn bound_text(
         return Err(match (field, step_id) {
             (_, 0) => ActionGuideProjectionError::GuideTitleTooLong { len },
             ("step_title", id) => ActionGuideProjectionError::StepTitleTooLong { step_id: id, len },
-            ("step_caption", id) => ActionGuideProjectionError::StepCaptionTooLong { step_id: id, len },
+            ("step_caption", id) => {
+                ActionGuideProjectionError::StepCaptionTooLong { step_id: id, len }
+            }
             _ => ActionGuideProjectionError::GuideTitleTooLong { len },
         });
     }
@@ -291,13 +297,12 @@ mod tests {
     use super::*;
     use crate::models::{CaptureRegion, InputCapability, InputSourceKind, Millis};
     use crate::project::model::{
-        EnabledOutputs, ProjectFrame, ProjectManifestV2, ProjectSnapshot, ProjectStep,
-        SnapshotFrame, SnapshotFramePayload, PROJECT_SCHEMA_VERSION,
+        EnabledOutputs, ProjectSnapshot, ProjectStep, SnapshotFrame, SnapshotFramePayload,
     };
     use crate::project::store::{create_project, load_project};
 
-    use image::RgbaImage;
     use image::Rgba;
+    use image::RgbaImage;
     use std::sync::Arc;
 
     fn pixel_image(w: u32, h: u32) -> Arc<RgbaImage> {
@@ -628,7 +633,10 @@ mod tests {
         create_project(&snapshot, &root).unwrap();
         let loaded = load_project(&root).unwrap();
         let projection = ActionGuideContextProjectionV1::from_loaded_project(&loaded).unwrap();
-        assert_eq!(projection.steps()[0].caption.as_deref(), Some(caption_4096.as_str()));
+        assert_eq!(
+            projection.steps()[0].caption.as_deref(),
+            Some(caption_4096.as_str())
+        );
     }
 
     #[test]
@@ -757,7 +765,10 @@ mod tests {
         create_project(&snapshot, &root).unwrap();
         let loaded = load_project(&root).unwrap();
         let err = ActionGuideContextProjectionV1::from_loaded_project(&loaded).unwrap_err();
-        assert!(matches!(err, ActionGuideProjectionError::GuideTitleTooLong { len: 4097 }));
+        assert!(matches!(
+            err,
+            ActionGuideProjectionError::GuideTitleTooLong { len: 4097 }
+        ));
     }
 
     #[test]
@@ -801,7 +812,13 @@ mod tests {
         create_project(&snapshot, &root).unwrap();
         let loaded = load_project(&root).unwrap();
         let err = ActionGuideContextProjectionV1::from_loaded_project(&loaded).unwrap_err();
-        assert!(matches!(err, ActionGuideProjectionError::StepTitleTooLong { step_id: 1, len: 4097 }));
+        assert!(matches!(
+            err,
+            ActionGuideProjectionError::StepTitleTooLong {
+                step_id: 1,
+                len: 4097
+            }
+        ));
     }
 
     #[test]
@@ -845,6 +862,12 @@ mod tests {
         create_project(&snapshot, &root).unwrap();
         let loaded = load_project(&root).unwrap();
         let err = ActionGuideContextProjectionV1::from_loaded_project(&loaded).unwrap_err();
-        assert!(matches!(err, ActionGuideProjectionError::StepCaptionTooLong { step_id: 1, len: 4097 }));
+        assert!(matches!(
+            err,
+            ActionGuideProjectionError::StepCaptionTooLong {
+                step_id: 1,
+                len: 4097
+            }
+        ));
     }
 }

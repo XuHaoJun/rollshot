@@ -11,11 +11,11 @@
 use sha2::{Digest, Sha256};
 use std::fmt;
 
-use crate::product_task::{
-    ArtifactId, ArtifactKind, ArtifactRevision, ProductTaskId,
-    TaskAttemptId, TaskKind, TaskStatus, ValidateFinite,
-};
 use crate::domain::RunId;
+use crate::product_task::{
+    ArtifactId, ArtifactKind, ArtifactRevision, ProductTaskId, TaskAttemptId, TaskKind, TaskStatus,
+    ValidateFinite,
+};
 
 // ========================================================================
 // Constants
@@ -56,7 +56,7 @@ pub enum ContinuityProjectionError {
     MissingArtifact { state: &'static str },
     #[error("missing review receipt required for review state {state}")]
     MissingReview { state: &'static str },
-    #[error("canonical serialization failed: {0}")] 
+    #[error("canonical serialization failed: {0}")]
     Canonical(String),
 }
 
@@ -243,9 +243,7 @@ impl fmt::Debug for ContinuityProjectionV1 {
 impl TryFrom<&crate::product_task::ProductTaskSnapshot> for ContinuityProjectionV1 {
     type Error = ContinuityProjectionError;
 
-    fn try_from(
-        snapshot: &crate::product_task::ProductTaskSnapshot,
-    ) -> Result<Self, Self::Error> {
+    fn try_from(snapshot: &crate::product_task::ProductTaskSnapshot) -> Result<Self, Self::Error> {
         // 1. Accept store schema 1 and 2, reject zero or greater than 2.
         let store_schema = snapshot.store_schema_version();
         if store_schema == 0 || store_schema > 2 {
@@ -367,8 +365,7 @@ impl TryFrom<&crate::product_task::ProductTaskSnapshot> for ContinuityProjection
         };
 
         // 5. Derive review state.
-        let (review_state, review_receipt_digest) =
-            derive_review_state(snapshot)?;
+        let (review_state, review_receipt_digest) = derive_review_state(snapshot)?;
 
         // Build DTO and canonicalize.
         let dto = ContinuityProjectionDto {
@@ -393,8 +390,7 @@ impl TryFrom<&crate::product_task::ProductTaskSnapshot> for ContinuityProjection
             review_receipt_digest,
         };
 
-        let canonical_bytes =
-            crate::product_task::canonical_v1_bytes(&dto)?;
+        let canonical_bytes = crate::product_task::canonical_v1_bytes(&dto)?;
 
         // 7. Reject canonical serialized projections larger than 64 KiB.
         if canonical_bytes.len() > MAX_CANONICAL_PROJECTION_BYTES {
@@ -462,22 +458,18 @@ fn derive_review_state(
             Ok((ReviewContinuityStateV1::PendingExactRevision, None))
         }
         TaskStatus::Completed => {
-            let receipt = snapshot.review_receipt().ok_or_else(|| {
-                ContinuityProjectionError::MissingReview {
-                    state: "Completed",
-                }
-            })?;
+            let receipt = snapshot
+                .review_receipt()
+                .ok_or(ContinuityProjectionError::MissingReview { state: "Completed" })?;
             // Verify receipt matches artifact.
             verify_review_receipt(snapshot, receipt)?;
             let digest = review_receipt_digest(receipt)?;
             Ok((ReviewContinuityStateV1::AcceptedExactRevision, Some(digest)))
         }
         TaskStatus::Rejected => {
-            let receipt = snapshot.review_receipt().ok_or_else(|| {
-                ContinuityProjectionError::MissingReview {
-                    state: "Rejected",
-                }
-            })?;
+            let receipt = snapshot
+                .review_receipt()
+                .ok_or(ContinuityProjectionError::MissingReview { state: "Rejected" })?;
             verify_review_receipt(snapshot, receipt)?;
             let digest = review_receipt_digest(receipt)?;
             Ok((ReviewContinuityStateV1::RejectedExactRevision, Some(digest)))
@@ -593,7 +585,10 @@ pub(crate) enum RunContinuityStageV1 {
 }
 
 /// Privacy-safe summary of one evidence record from the draft state.
+///
+/// Exercised by privacy sentinel tests via `continuity_state()`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[allow(dead_code)] // exercised by continuity_state() tests
 pub(crate) struct EvidenceContinuityV1 {
     kind: crate::runtime::EvidenceKind,
     source_generation: u64,
@@ -615,6 +610,7 @@ impl EvidenceContinuityV1 {
         matches!(self.kind, crate::runtime::EvidenceKind::DryRun)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn source_generation(&self) -> u64 {
         self.source_generation
     }
@@ -714,7 +710,9 @@ impl BudgetContinuityV1 {
 ///
 /// Privacy-safe: contains no source, proposals, validated programs,
 /// metrics debug text, capability handles, or pending review content.
+/// Exercised by privacy sentinel tests.
 #[derive(Debug)]
+#[allow(dead_code)] // exercised by privacy sentinel tests
 pub(crate) struct ToolContinuitySnapshot {
     run_id: crate::domain::RunId,
     content_binding_digest: String,
@@ -726,6 +724,7 @@ pub(crate) struct ToolContinuitySnapshot {
 }
 
 impl ToolContinuitySnapshot {
+    #[allow(dead_code)]
     pub(crate) fn new(
         run_id: crate::domain::RunId,
         content_binding_digest: String,
@@ -746,30 +745,37 @@ impl ToolContinuitySnapshot {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn run_id(&self) -> &crate::domain::RunId {
         &self.run_id
     }
 
+    #[allow(dead_code)]
     pub(crate) fn content_binding_digest(&self) -> &str {
         &self.content_binding_digest
     }
 
+    #[allow(dead_code)]
     pub(crate) fn generation(&self) -> u64 {
         self.generation
     }
 
+    #[allow(dead_code)]
     pub(crate) fn current_evidence(&self) -> &[EvidenceContinuityV1] {
         &self.current_evidence
     }
 
+    #[allow(dead_code)]
     pub(crate) fn has_validation_evidence(&self) -> bool {
         self.has_validation_evidence
     }
 
+    #[allow(dead_code)]
     pub(crate) fn has_dry_run_evidence(&self) -> bool {
         self.has_dry_run_evidence
     }
 
+    #[allow(dead_code)]
     pub(crate) fn pending_review(&self) -> bool {
         self.pending_review
     }
@@ -798,10 +804,7 @@ pub(crate) struct RunContinuityManifestV1 {
     projection: ContinuityProjectionV1,
     stage: RunContinuityStageV1,
     evidence: Vec<EvidenceContinuityV1>,
-    budget: BudgetContinuityV1,
-    content_binding_digest: String,
     pending_review: bool,
-    canonical_bytes: Vec<u8>,
     digest: String,
 }
 
@@ -813,7 +816,10 @@ pub enum ContextRecoveryError {
     #[error("stale task: expected {expected}, got {got}")]
     StaleTask { expected: String, got: String },
     #[error("stale attempt: expected {expected:?}, got {got:?}")]
-    StaleAttempt { expected: Option<u32>, got: Option<u32> },
+    StaleAttempt {
+        expected: Option<u32>,
+        got: Option<u32>,
+    },
     #[error("stale run: expected {expected}, got {got}")]
     StaleRun { expected: String, got: String },
     #[error("stale source binding")]
@@ -912,9 +918,8 @@ impl RunContinuityManifestV1 {
         // Snapshot tool context.
         let draft = inputs.tool_ctx.draft.lock().unwrap();
         let current_gen = draft.generation();
-        let content_binding_digest = compute_content_binding_digest(
-            &inputs.tool_ctx.content_binding,
-        );
+        let content_binding_digest =
+            compute_content_binding_digest(&inputs.tool_ctx.content_binding);
 
         // Snapshot current-generation evidence.
         let current_evidence: Vec<EvidenceContinuityV1> = draft
@@ -935,16 +940,19 @@ impl RunContinuityManifestV1 {
             .any(|e| matches!(e.kind, crate::runtime::EvidenceKind::DryRun));
 
         // Stale evidence check.
-        if has_validation_evidence
-            && inputs.tool_ctx.last_validated.lock().unwrap().is_none()
-        {
+        if has_validation_evidence && inputs.tool_ctx.last_validated.lock().unwrap().is_none() {
             return Err(ContextRecoveryError::StaleEvidence {
                 kind: "validation".to_owned(),
                 generation: current_gen,
             });
         }
         if has_dry_run_evidence
-            && inputs.tool_ctx.last_dry_run_proposal.lock().unwrap().is_none()
+            && inputs
+                .tool_ctx
+                .last_dry_run_proposal
+                .lock()
+                .unwrap()
+                .is_none()
         {
             return Err(ContextRecoveryError::StaleEvidence {
                 kind: "dry_run".to_owned(),
@@ -980,7 +988,7 @@ impl RunContinuityManifestV1 {
             budget: &budget,
             content_binding_digest: &content_binding_digest,
             authority_digest: auth_digest,
-            skill_digest: skill_digest,
+            skill_digest,
             pending_review,
         };
 
@@ -1002,10 +1010,7 @@ impl RunContinuityManifestV1 {
             projection: proj.clone(),
             stage,
             evidence: current_evidence,
-            budget,
-            content_binding_digest,
             pending_review,
-            canonical_bytes,
             digest,
         })
     }
@@ -1014,43 +1019,15 @@ impl RunContinuityManifestV1 {
         self.stage
     }
 
-    pub(crate) fn evidence(&self) -> &[EvidenceContinuityV1] {
-        &self.evidence
-    }
-
-    pub(crate) fn budget(&self) -> &BudgetContinuityV1 {
-        &self.budget
-    }
-
-    pub(crate) fn content_binding_digest(&self) -> &str {
-        &self.content_binding_digest
-    }
-
-    pub(crate) fn pending_review(&self) -> bool {
-        self.pending_review
-    }
-
-    pub(crate) fn canonical_bytes(&self) -> &[u8] {
-        &self.canonical_bytes
-    }
-
     pub(crate) fn digest(&self) -> &str {
         &self.digest
-    }
-
-    pub(crate) fn projection(&self) -> &ContinuityProjectionV1 {
-        &self.projection
     }
 
     /// Derive a deterministic restart user message from the manifest.
     /// Privacy-safe: contains only stage, digest prefix, and bounded evidence summary.
     pub(crate) fn restart_user_message(&self) -> String {
         let stage = stage_str(self.stage);
-        let evidence_kinds: Vec<&str> = self
-            .evidence
-            .iter()
-            .map(|e| e.kind_str())
-            .collect();
+        let evidence_kinds: Vec<&str> = self.evidence.iter().map(|e| e.kind_str()).collect();
         let evidence_summary = if evidence_kinds.is_empty() {
             "none".to_owned()
         } else {
@@ -1087,8 +1064,9 @@ pub trait ContinuitySnapshotSource: Send + Sync {
         task_id: ProductTaskId,
     ) -> std::pin::Pin<
         Box<
-            dyn std::future::Future<Output = Result<crate::product_task::ProductTaskSnapshot, ContextRecoveryError>>
-                + Send,
+            dyn std::future::Future<
+                    Output = Result<crate::product_task::ProductTaskSnapshot, ContextRecoveryError>,
+                > + Send,
         >,
     >;
 }
@@ -1097,7 +1075,7 @@ pub trait ContinuitySnapshotSource: Send + Sync {
 pub enum RunContinuitySource {
     /// Durable source backed by a `ContinuitySnapshotSource` and an expected projection.
     Durable {
-        expected: ContinuityProjectionV1,
+        expected: Box<ContinuityProjectionV1>,
         source: std::sync::Arc<dyn ContinuitySnapshotSource>,
     },
     /// No continuity source available; overflow is terminal.
@@ -1819,9 +1797,7 @@ mod tests {
     #[test]
     fn different_snapshots_produce_different_digests() {
         let snapshot_a = ready_v2_snapshot();
-        let snapshot_b = ready_v2_snapshot()
-            .begin_apply(35)
-            .unwrap();
+        let snapshot_b = ready_v2_snapshot().begin_apply(35).unwrap();
         let proj_a = ContinuityProjectionV1::try_from(&snapshot_a).unwrap();
         let proj_b = ContinuityProjectionV1::try_from(&snapshot_b).unwrap();
         // Different status → different digest.
@@ -1919,8 +1895,7 @@ mod tests {
     }
 
     fn skill_use_fixture() -> crate::skills::SkillUse {
-        crate::skills::bundled_smart_redaction_use()
-            .expect("bundled skill should be available")
+        crate::skills::bundled_smart_redaction_use().expect("bundled skill should be available")
     }
 
     #[test]
@@ -1952,7 +1927,9 @@ mod tests {
         // The build may fail due to authority/skill digest mismatch in the
         // projection (expected since we're using a real projection with
         // different authority/skill digests). Verify it fails gracefully.
-        assert!(result.is_err() || result.as_ref().unwrap().stage() == RunContinuityStageV1::Drafting);
+        assert!(
+            result.is_err() || result.as_ref().unwrap().stage() == RunContinuityStageV1::Drafting
+        );
     }
 
     #[test]
@@ -2125,8 +2102,14 @@ mod tests {
     fn derive_stage_table() {
         assert_eq!(derive_stage(false, false), RunContinuityStageV1::Drafting);
         assert_eq!(derive_stage(true, false), RunContinuityStageV1::NeedsDryRun);
-        assert_eq!(derive_stage(false, true), RunContinuityStageV1::NeedsValidation);
-        assert_eq!(derive_stage(true, true), RunContinuityStageV1::ReadyToSubmit);
+        assert_eq!(
+            derive_stage(false, true),
+            RunContinuityStageV1::NeedsValidation
+        );
+        assert_eq!(
+            derive_stage(true, true),
+            RunContinuityStageV1::ReadyToSubmit
+        );
     }
 
     #[test]
