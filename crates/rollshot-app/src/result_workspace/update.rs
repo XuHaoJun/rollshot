@@ -2159,7 +2159,9 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                                                                 complete_event_id,
                                                                 now,
                                                             )
-                                                            .map_err(|e| format!("audit complete: {e}"))
+                                                            .map_err(|e| {
+                                                                format!("audit complete: {e}")
+                                                            })
                                                     })
                                                     .await
                                                     .unwrap_or_else(|e| Err(format!("spawn: {e}")))
@@ -2271,8 +2273,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         Ok(()) => {
                             workbench.cached_task_snapshot = None;
                             workbench.pending_proposal = None;
-                            workbench.review =
-                                super::workbench::CandidateReview::default();
+                            workbench.review = super::workbench::CandidateReview::default();
                             workbench.selected_candidate = None;
                             workbench.corrections_non_empty = false;
                         }
@@ -2662,9 +2663,7 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                             artifact_revision: snapshot
                                 .artifact_metadata()
                                 .map(|m| m.artifact_revision())
-                                .unwrap_or(
-                                    rollshot_agent::product_task::ArtifactRevision::new(0),
-                                ),
+                                .unwrap_or(rollshot_agent::product_task::ArtifactRevision::new(0)),
                             proposal_id: workbench
                                 .pending_proposal
                                 .as_ref()
@@ -2706,23 +2705,21 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                                     .await
                                     .unwrap_or_else(|e| Err(format!("spawn: {e}")))
                                 },
-                                move |result| {
-                                    match result {
-                                        Ok(eid) => Message::Workbench(
-                                            super::workbench::WorkbenchMessage::RejectPersisted {
-                                                operation_id: token,
-                                                reject_event_id: eid,
-                                                outcome: Ok(()),
-                                            },
-                                        ),
-                                        Err(e) => Message::Workbench(
-                                            super::workbench::WorkbenchMessage::RejectPersisted {
-                                                operation_id: token,
-                                                reject_event_id: AuditEventId::new_v4(),
-                                                outcome: Err(e),
-                                            },
-                                        ),
-                                    }
+                                move |result| match result {
+                                    Ok(eid) => Message::Workbench(
+                                        super::workbench::WorkbenchMessage::RejectPersisted {
+                                            operation_id: token,
+                                            reject_event_id: eid,
+                                            outcome: Ok(()),
+                                        },
+                                    ),
+                                    Err(e) => Message::Workbench(
+                                        super::workbench::WorkbenchMessage::RejectPersisted {
+                                            operation_id: token,
+                                            reject_event_id: AuditEventId::new_v4(),
+                                            outcome: Err(e),
+                                        },
+                                    ),
                                 },
                             );
                         }

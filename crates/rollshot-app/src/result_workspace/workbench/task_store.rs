@@ -18,21 +18,16 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tracing::{info, warn};
-
 use rollshot_agent::audit::{
-    AuditAppendReceiptV1, AuditEnvelopeV1, AuditEventId,
-    derive_material_transition,
+    derive_material_transition, AuditAppendReceiptV1, AuditEnvelopeV1, AuditEventId,
 };
 use rollshot_agent::product_task::{ProductTaskId, ProductTaskSnapshot, SourceBinding, TaskStatus};
 
 use crate::result_workspace::workbench::audit_store::{
-    AuditJournal, AuditStoreError,
+    reconcile::{classify_unresolved, ReconcileDecision},
     record,
-    record::{
-        AuditAbortCategory, AuditTransactionId, JournalPayloadV1, PreparedTransactionV1,
-    },
-    reconcile::{ReconcileDecision, classify_unresolved},
+    record::{AuditAbortCategory, AuditTransactionId, JournalPayloadV1, PreparedTransactionV1},
+    AuditJournal, AuditStoreError,
 };
 
 // ============================================================================
@@ -244,8 +239,11 @@ impl TaskStore {
                 None => continue,
             };
             // Extract task ID from filename: "task-<uuid>.json" → "task-<uuid>"
-            let task_id_str =
-                format!("{}{}", TASK_FILE_PREFIX, &filename[TASK_FILE_PREFIX.len()..filename.len() - TASK_FILE_SUFFIX.len()]);
+            let task_id_str = format!(
+                "{}{}",
+                TASK_FILE_PREFIX,
+                &filename[TASK_FILE_PREFIX.len()..filename.len() - TASK_FILE_SUFFIX.len()]
+            );
             let task_id = match ProductTaskId::parse(&task_id_str) {
                 Ok(id) => id,
                 Err(_) => continue,
@@ -731,10 +729,11 @@ impl TaskStore {
         let task_id = snapshot.task_id();
 
         // Derive envelope.
-        let envelope = derive_material_transition(None, snapshot, event_id.clone(), occurred_at_unix_ms)
-            .map_err(|e| TaskStoreError::PreCommit {
-                reason: format!("derive envelope: {e}"),
-            })?;
+        let envelope =
+            derive_material_transition(None, snapshot, event_id.clone(), occurred_at_unix_ms)
+                .map_err(|e| TaskStoreError::PreCommit {
+                    reason: format!("derive envelope: {e}"),
+                })?;
 
         // Acquire lock.
         let _lock = self.acquire_lock()?;
@@ -778,7 +777,7 @@ impl TaskStore {
         };
         let audit_receipt = self.audit_journal.append(task_id, commit_payload)?;
 
-        info!(
+        tracing::info!(
             target: "rollshot::app::agent_audit_store",
             task_id = task_id.as_str(),
             event_id = %event_id.as_str(),
@@ -814,10 +813,11 @@ impl TaskStore {
         let task_id = old.task_id();
 
         // Derive envelope.
-        let envelope = derive_material_transition(Some(old), new, event_id.clone(), occurred_at_unix_ms)
-            .map_err(|e| TaskStoreError::PreCommit {
-                reason: format!("derive envelope: {e}"),
-            })?;
+        let envelope =
+            derive_material_transition(Some(old), new, event_id.clone(), occurred_at_unix_ms)
+                .map_err(|e| TaskStoreError::PreCommit {
+                    reason: format!("derive envelope: {e}"),
+                })?;
 
         // Acquire lock.
         let _lock = self.acquire_lock()?;
@@ -861,7 +861,7 @@ impl TaskStore {
         };
         let audit_receipt = self.audit_journal.append(task_id, commit_payload)?;
 
-        info!(
+        tracing::info!(
             target: "rollshot::app::agent_audit_store",
             task_id = task_id.as_str(),
             event_id = %event_id.as_str(),
@@ -885,8 +885,8 @@ impl TaskStore {
         envelope: AuditEnvelopeV1,
     ) -> Result<AuditAppendReceiptV1, TaskStoreError> {
         let task_id_str = envelope.correlation().task_id().to_owned();
-        let task_id = ProductTaskId::parse(task_id_str.clone())
-            .map_err(|e| TaskStoreError::PreCommit {
+        let task_id =
+            ProductTaskId::parse(task_id_str.clone()).map_err(|e| TaskStoreError::PreCommit {
                 reason: format!("invalid task ID in envelope: {e}"),
             })?;
 
@@ -904,20 +904,14 @@ impl TaskStore {
     ///
     /// Scans the journal, finds any unresolved prepared transaction,
     /// and resolves it by comparing with the authoritative task state.
-    pub fn reconcile_task_audit(
-        &self,
-        task_id: &ProductTaskId,
-    ) -> Result<(), TaskStoreError> {
+    pub fn reconcile_task_audit(&self, task_id: &ProductTaskId) -> Result<(), TaskStoreError> {
         let _lock = self.acquire_lock()?;
         self.reconcile_task_audit_locked(task_id)
     }
 
     /// Reconcile using an already-held lock. Must be called with the
     /// exclusive file lock held.
-    fn reconcile_task_audit_locked(
-        &self,
-        task_id: &ProductTaskId,
-    ) -> Result<(), TaskStoreError> {
+    fn reconcile_task_audit_locked(&self, task_id: &ProductTaskId) -> Result<(), TaskStoreError> {
         let verified = self.audit_journal.scan(task_id)?;
 
         let pending = match verified.pending_transaction {
@@ -947,7 +941,7 @@ impl TaskStore {
                     event_id: pending.event_id,
                 };
                 self.audit_journal.append(task_id, commit_payload)?;
-                info!(
+                tracing::info!(
                     target: "rollshot::app::agent_audit_store",
                     task_id = task_id.as_str(),
                     "reconcile: committed"
@@ -960,7 +954,7 @@ impl TaskStore {
                     reason,
                 };
                 self.audit_journal.append(task_id, abort_payload)?;
-                info!(
+                tracing::info!(
                     target: "rollshot::app::agent_audit_store",
                     task_id = task_id.as_str(),
                     "reconcile: aborted"
@@ -1129,13 +1123,15 @@ impl TaskStore {
                     if let Ok(Some(reconciled)) = snapshot.reconcile_interrupted(now) {
                         // Audited transition: reconcile to Interrupted.
                         let event_id = AuditEventId::new_v4();
-                        if let Err(e) = self.transition_audited(
-                            &snapshot,
-                            &reconciled,
-                            event_id,
-                            now,
-                        ) {
-                            warn!(error = %e, task_id = task_id.as_str(), "reconcile interrupted: transition_audited failed");
+                        if let Err(e) =
+                            self.transition_audited(&snapshot, &reconciled, event_id, now)
+                        {
+                            tracing::warn!(
+                                target: "rollshot::app::agent_audit_store",
+                                error = %e,
+                                task_id = task_id.as_str(),
+                                "reconcile interrupted: transition_audited failed"
+                            );
                         }
                     }
                     continue;
@@ -1176,13 +1172,15 @@ impl TaskStore {
                         // Audited mark stale.
                         if let Ok(stale) = snapshot.mark_stale(now) {
                             let event_id = AuditEventId::new_v4();
-                            if let Err(e) = self.transition_audited(
-                                &snapshot,
-                                &stale,
-                                event_id,
-                                now,
-                            ) {
-                                warn!(error = %e, task_id = task_id.as_str(), "mark stale: transition_audited failed");
+                            if let Err(e) =
+                                self.transition_audited(&snapshot, &stale, event_id, now)
+                            {
+                                tracing::warn!(
+                                    target: "rollshot::app::agent_audit_store",
+                                    error = %e,
+                                    task_id = task_id.as_str(),
+                                    "mark stale: transition_audited failed"
+                                );
                             }
                         }
                         continue;
@@ -1356,6 +1354,7 @@ fn map_store_error(e: TaskStoreError) -> rollshot_agent::continuity::ContextReco
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rollshot_agent::audit::{AuditEventV1, AuditTaskTerminalV1};
     use rollshot_agent::authority::{
         AuthoritySnapshotReceiptV1, DisclosureCeiling, PreparedCapability, RunOperation,
     };
@@ -1367,7 +1366,6 @@ mod tests {
         RunContractReceiptV1, SmartRedactionReviewPayload, TaskAttempt, TaskAttemptId, TaskKind,
         TaskTerminal,
     };
-    use rollshot_agent::audit::{AuditEventV1, AuditTaskTerminalV1};
     use rollshot_agent::skills::{SkillInvocationKind, SkillUseReceiptV1};
     use sha2::{Digest, Sha256};
     use std::collections::BTreeMap;
@@ -2368,7 +2366,10 @@ mod tests {
         // Audit journal has 2 records: prepare + commit.
         let events = store.committed_audit_events(snapshot.task_id()).unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event(), &rollshot_agent::audit::AuditEventV1::TaskCreated);
+        assert_eq!(
+            events[0].event(),
+            &rollshot_agent::audit::AuditEventV1::TaskCreated
+        );
     }
 
     #[test]
@@ -2377,11 +2378,11 @@ mod tests {
         let created = created_task_fixture();
         store.create(&created).unwrap();
 
-        let running = created
-            .start_attempt(attempt_fixture(), 20)
-            .unwrap();
+        let running = created.start_attempt(attempt_fixture(), 20).unwrap();
         let event_id = AuditEventId::parse("audit-00000000-0000-4000-8000-000000000002").unwrap();
-        let outcome = store.transition_audited(&created, &running, event_id, 20).unwrap();
+        let outcome = store
+            .transition_audited(&created, &running, event_id, 20)
+            .unwrap();
 
         assert_eq!(outcome.store, StoreCommitOutcome::Committed);
         let loaded = store.load(created.task_id()).unwrap();
@@ -2436,7 +2437,9 @@ mod tests {
             AuditEventId::parse("audit-00000000-0000-4000-8000-000000000004").unwrap(),
             10,
             rollshot_agent::audit::AuditEventV1::TaskCreated,
-            rollshot_agent::audit::AuditCorrelationV1::for_task(task_id_fixture().as_str().to_owned()),
+            rollshot_agent::audit::AuditCorrelationV1::for_task(
+                task_id_fixture().as_str().to_owned(),
+            ),
         )
         .unwrap();
         let receipt = store.append_standalone_audit(envelope).unwrap();
@@ -2498,7 +2501,9 @@ mod tests {
             AuditEventId::parse("audit-00000000-0000-4000-8000-000000000006").unwrap(),
             10,
             rollshot_agent::audit::AuditEventV1::TaskCreated,
-            rollshot_agent::audit::AuditCorrelationV1::for_task(snapshot.task_id().as_str().to_owned()),
+            rollshot_agent::audit::AuditCorrelationV1::for_task(
+                snapshot.task_id().as_str().to_owned(),
+            ),
         )
         .unwrap();
         let receipt = snapshot.audit_transition_receipt();
@@ -2510,7 +2515,10 @@ mod tests {
             replacement_revision: 0,
             replacement_receipt: receipt,
         });
-        store.audit_journal.append(snapshot.task_id(), prepared).unwrap();
+        store
+            .audit_journal
+            .append(snapshot.task_id(), prepared)
+            .unwrap();
 
         // Reconcile: task exists at revision 0 (matches replacement_revision 0). Should commit.
         store.reconcile_task_audit(snapshot.task_id()).unwrap();
@@ -2524,7 +2532,9 @@ mod tests {
         let (store, dir) = store();
         let snapshot = created_task_fixture();
         let event_id = AuditEventId::parse("audit-00000000-0000-4000-8000-000000000007").unwrap();
-        store.create_audited(&snapshot, event_id.clone(), 10).unwrap();
+        store
+            .create_audited(&snapshot, event_id.clone(), 10)
+            .unwrap();
 
         // Drop and reopen the store — open() reconciles all journals.
         drop(store);
@@ -2540,7 +2550,9 @@ mod tests {
         let (store, _dir) = store();
         let snapshot = created_task_fixture();
         let event_id = AuditEventId::parse("audit-00000000-0000-4000-8000-000000000008").unwrap();
-        store.create_audited(&snapshot, event_id.clone(), 10).unwrap();
+        store
+            .create_audited(&snapshot, event_id.clone(), 10)
+            .unwrap();
 
         // Reconcile in the same process — should be a no-op (no pending txn).
         store.reconcile_task_audit(snapshot.task_id()).unwrap();
@@ -2574,7 +2586,10 @@ mod tests {
         let events = store.committed_audit_events(created.task_id()).unwrap();
         assert_eq!(events.len(), 2);
         assert!(matches!(events[0].event(), AuditEventV1::TaskCreated));
-        assert!(matches!(events[1].event(), AuditEventV1::AttemptStarted { .. }));
+        assert!(matches!(
+            events[1].event(),
+            AuditEventV1::AttemptStarted { .. }
+        ));
     }
 
     #[test]
@@ -2639,9 +2654,15 @@ mod tests {
         let events = store.committed_audit_events(created.task_id()).unwrap();
         assert_eq!(events.len(), 3);
         assert!(matches!(events[0].event(), AuditEventV1::TaskCreated));
-        assert!(matches!(events[1].event(), AuditEventV1::AttemptStarted { .. }));
+        assert!(matches!(
+            events[1].event(),
+            AuditEventV1::AttemptStarted { .. }
+        ));
         match events[2].event() {
-            AuditEventV1::RunContractBound { authority, skill_use } => {
+            AuditEventV1::RunContractBound {
+                authority,
+                skill_use,
+            } => {
                 assert_eq!(authority.snapshot_digest, receipt.authority.snapshot_digest);
                 assert_eq!(authority.policy_revision, receipt.authority.policy_revision);
                 assert_eq!(skill_use.package_id, receipt.skill_use.package_id);
@@ -2682,11 +2703,20 @@ mod tests {
         let events = store.committed_audit_events(bound.task_id()).unwrap();
         assert_eq!(events.len(), 4);
         assert!(matches!(events[0].event(), AuditEventV1::TaskCreated));
-        assert!(matches!(events[1].event(), AuditEventV1::AttemptStarted { .. }));
-        assert!(matches!(events[2].event(), AuditEventV1::RunContractBound { .. }));
+        assert!(matches!(
+            events[1].event(),
+            AuditEventV1::AttemptStarted { .. }
+        ));
+        assert!(matches!(
+            events[2].event(),
+            AuditEventV1::RunContractBound { .. }
+        ));
         match events[3].event() {
             AuditEventV1::ArtifactPromoted { artifact } => {
-                assert_eq!(artifact.artifact_id, "artifact-00000000-0000-4000-8000-000000000001");
+                assert_eq!(
+                    artifact.artifact_id,
+                    "artifact-00000000-0000-4000-8000-000000000001"
+                );
             }
             other => panic!("expected ArtifactPromoted, got {other:?}"),
         }
@@ -2773,9 +2803,7 @@ mod tests {
                 .transition_audited(&ready, &applying, AuditEventId::new_v4(), 40)
                 .unwrap();
 
-            let completed = applying
-                .complete_apply(review_receipt(true), 50)
-                .unwrap();
+            let completed = applying.complete_apply(review_receipt(true), 50).unwrap();
             store
                 .transition_audited(&applying, &completed, AuditEventId::new_v4(), 50)
                 .unwrap();
@@ -2979,10 +3007,8 @@ mod tests {
             {
                 use std::os::unix::fs::PermissionsExt;
                 let tasks_dir = dir.path().join("agent-tasks").join("tasks");
-                let _ = std::fs::set_permissions(
-                    &tasks_dir,
-                    std::fs::Permissions::from_mode(0o500),
-                );
+                let _ =
+                    std::fs::set_permissions(&tasks_dir, std::fs::Permissions::from_mode(0o500));
 
                 let now = 30 + 31 * 86_400_000;
                 let binding = source_binding_fixture();
@@ -2991,16 +3017,11 @@ mod tests {
                 // Task file should still exist (delete failed).
                 assert!(tp.exists(), "task retained when delete fails");
                 // Journal should also be retained (spec: retain both).
-                assert!(
-                    jp.exists(),
-                    "journal retained when task delete fails"
-                );
+                assert!(jp.exists(), "journal retained when task delete fails");
 
                 // Restore permissions for cleanup.
-                let _ = std::fs::set_permissions(
-                    &tasks_dir,
-                    std::fs::Permissions::from_mode(0o700),
-                );
+                let _ =
+                    std::fs::set_permissions(&tasks_dir, std::fs::Permissions::from_mode(0o700));
             }
         }
     }
@@ -3074,27 +3095,36 @@ mod tests {
         // Every AuditEventV1 variant, when persisted through the TaskStore
         // audited operations, must not contain forbidden sensitive fields.
         let forbidden = &[
-            "api_key", "secret", "password", "token",
-            "system_prompt", "user_prompt", "response_text",
-            "tool_arguments", "tool_result",
-            "pixel_data", "raw_bytes", "proposal_payload",
+            "api_key",
+            "secret",
+            "password",
+            "token",
+            "system_prompt",
+            "user_prompt",
+            "response_text",
+            "tool_arguments",
+            "tool_result",
+            "pixel_data",
+            "raw_bytes",
+            "proposal_payload",
         ];
 
         let (store, _dir) = store();
         let created = created_task_fixture();
-        store.create_audited(&created, AuditEventId::new_v4(), 10).unwrap();
+        store
+            .create_audited(&created, AuditEventId::new_v4(), 10)
+            .unwrap();
 
         let running = created.start_attempt(attempt_fixture(), 20).unwrap();
-        store.transition_audited(&created, &running, AuditEventId::new_v4(), 20).unwrap();
+        store
+            .transition_audited(&created, &running, AuditEventId::new_v4(), 20)
+            .unwrap();
 
         let events = store.committed_audit_events(created.task_id()).unwrap();
         for event in &events {
             let json = serde_json::to_string(event).unwrap();
             for pat in forbidden {
-                assert!(
-                    !json.contains(pat),
-                    "persisted event leaks '{pat}': {json}"
-                );
+                assert!(!json.contains(pat), "persisted event leaks '{pat}': {json}");
             }
         }
     }
@@ -3109,7 +3139,9 @@ mod tests {
         // can still load product state independently.
         let (store, dir) = store();
         let snapshot = created_task_fixture();
-        store.create_audited(&snapshot, AuditEventId::new_v4(), 10).unwrap();
+        store
+            .create_audited(&snapshot, AuditEventId::new_v4(), 10)
+            .unwrap();
 
         // Corrupt the journal file.
         let audit_dir = dir.path().join("agent-tasks").join("audit");
@@ -3118,11 +3150,17 @@ mod tests {
 
         // TaskStore product state is still loadable.
         let loaded = store.load(snapshot.task_id()).unwrap();
-        assert_eq!(loaded.status(), rollshot_agent::product_task::TaskStatus::Created);
+        assert_eq!(
+            loaded.status(),
+            rollshot_agent::product_task::TaskStatus::Created
+        );
 
         // committed_audit_events should fail (journal corrupt),
         // but product state was already loaded.
         let audit_result = store.committed_audit_events(snapshot.task_id());
-        assert!(audit_result.is_err(), "corrupt journal must fail audit read");
+        assert!(
+            audit_result.is_err(),
+            "corrupt journal must fail audit read"
+        );
     }
 }

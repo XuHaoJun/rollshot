@@ -1550,10 +1550,7 @@ impl AgentRunner {
                         rig_core::message::ToolResultContent::from_tool_output(error),
                     ));
                 }
-                Err(crate::tools::ToolError::AuthorityDenied {
-                    tool,
-                    operation,
-                }) => {
+                Err(crate::tools::ToolError::AuthorityDenied { tool, operation }) => {
                     tracing::debug!(
                         target: "rollshot::agent::driver",
                         tool = tool.as_str(),
@@ -1572,8 +1569,7 @@ impl AgentRunner {
                                 required_operation: format!("{operation:?}"),
                             };
                             let task_id = auth.task_id().as_str().to_owned();
-                            let correlation =
-                                crate::audit::AuditCorrelationV1::for_task(task_id);
+                            let correlation = crate::audit::AuditCorrelationV1::for_task(task_id);
                             let event_id = crate::audit::AuditEventId::new_v4();
                             let now = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
@@ -6384,7 +6380,7 @@ main = "SKILL.md"
                             >,
                         > + Send
                         + '_,
-                >
+                >,
             > {
                 self.envelopes.lock().unwrap().push(envelope.clone());
                 Box::pin(async move {
@@ -6404,8 +6400,10 @@ main = "SKILL.md"
                 RunOperation,
             };
             let binding = AuthorityBinding::new(
-                crate::product_task::ProductTaskId::parse("task-00000000-0000-4000-8000-00000000002a")
-                    .unwrap(),
+                crate::product_task::ProductTaskId::parse(
+                    "task-00000000-0000-4000-8000-00000000002a",
+                )
+                .unwrap(),
                 crate::product_task::TaskAttemptId::new(1),
                 ctx.run_id.clone(),
                 ctx.content_binding.clone(),
@@ -6460,12 +6458,8 @@ main = "SKILL.md"
             };
             let done = provider_path::completion(StopReason::ToolUse);
 
-            let provider = make_recording_provider(vec![vec![
-                text_delta,
-                tc_start,
-                tc_complete,
-                done,
-            ]]);
+            let provider =
+                make_recording_provider(vec![vec![text_delta, tc_start, tc_complete, done]]);
 
             let cancel = RunCancellation::new();
             let runner = AgentRunner::new(AgentConfig::default());
@@ -6602,7 +6596,8 @@ main = "SKILL.md"
 
         impl crate::runtime::RunEventSink for DropAllSink {
             fn emit(&self, _event: crate::runtime::RunEvent) {
-                self.count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
 

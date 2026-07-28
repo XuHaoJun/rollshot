@@ -8,9 +8,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use rollshot_agent::audit::{
-    AuditEnvelopeV1, AuditEventId, AuditTaskStateReceiptV1,
-};
+use rollshot_agent::audit::{AuditEnvelopeV1, AuditEventId, AuditTaskStateReceiptV1};
 use rollshot_agent::product_task::ProductTaskId;
 
 // ============================================================================
@@ -199,10 +197,7 @@ impl JournalRecordV1 {
                     expected: previous
                         .map(|p| p.record_sha256.clone())
                         .unwrap_or_default(),
-                    actual: self
-                        .previous_record_sha256
-                        .clone()
-                        .unwrap_or_default(),
+                    actual: self.previous_record_sha256.clone().unwrap_or_default(),
                 });
             }
         }
@@ -225,8 +220,8 @@ impl JournalRecordV1 {
             previous_record_sha256,
             payload,
         };
-        let bytes = serde_json::to_vec(&canonical)
-            .expect("CanonicalRecord serialization infallible");
+        let bytes =
+            serde_json::to_vec(&canonical).expect("CanonicalRecord serialization infallible");
         let hash = Sha256::digest(&bytes);
         hex_encode(&hash)
     }
@@ -270,7 +265,7 @@ pub(crate) fn hex_valid(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rollshot_agent::audit::{AuditEventId};
+    use rollshot_agent::audit::AuditEventId;
     use rollshot_agent::product_task::ProductTaskId;
 
     // ------------------------------------------------------------------
@@ -301,13 +296,7 @@ mod tests {
     }
 
     fn two_record_journal() -> Vec<JournalRecordV1> {
-        let first = JournalRecordV1::build(
-            task_id(),
-            0,
-            None,
-            aborted_payload_fixture(),
-        )
-        .unwrap();
+        let first = JournalRecordV1::build(task_id(), 0, None, aborted_payload_fixture()).unwrap();
         let second = JournalRecordV1::build(
             task_id(),
             1,
@@ -336,12 +325,18 @@ mod tests {
         let mut records = Vec::new();
         let mut prev_hash: Option<String> = None;
         for (line_no, line_result) in reader.split(b'\n').enumerate() {
-            let line = line_result.map_err(|e| ScanError::Io { line: line_no, reason: e.to_string() })?;
+            let line = line_result.map_err(|e| ScanError::Io {
+                line: line_no,
+                reason: e.to_string(),
+            })?;
             if line.is_empty() {
                 continue;
             }
-            let record: JournalRecordV1 = serde_json::from_slice(&line)
-                .map_err(|e| ScanError::Parse { line: line_no, reason: e.to_string() })?;
+            let record: JournalRecordV1 =
+                serde_json::from_slice(&line).map_err(|e| ScanError::Parse {
+                    line: line_no,
+                    reason: e.to_string(),
+                })?;
             // Verify hash chain.
             let expected_prev = prev_hash.as_deref();
             let computed = JournalRecordV1::compute_hash(
@@ -404,13 +399,7 @@ mod tests {
 
     #[test]
     fn first_record_has_sequence_zero_no_previous_hash_and_stable_digest() {
-        let record = JournalRecordV1::build(
-            task_id(),
-            0,
-            None,
-            aborted_payload_fixture(),
-        )
-        .unwrap();
+        let record = JournalRecordV1::build(task_id(), 0, None, aborted_payload_fixture()).unwrap();
         assert_eq!(record.sequence, 0);
         assert_eq!(record.previous_record_sha256, None);
         // The expected hash is computed from the canonical format.
@@ -431,7 +420,10 @@ mod tests {
             committed_payload_fixture(),
         )
         .unwrap();
-        assert_eq!(second.previous_record_sha256.as_deref(), Some(first.record_sha256.as_str()));
+        assert_eq!(
+            second.previous_record_sha256.as_deref(),
+            Some(first.record_sha256.as_str())
+        );
         assert!(second.verify(Some(&first)).is_ok());
     }
 

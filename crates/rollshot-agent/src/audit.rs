@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::authority::{AuthoritySnapshot, DisclosureCeiling};
-use crate::product_task::{canonical_v1_digest, ProductTaskSnapshot, TaskAttemptId, TaskStatus, TaskTerminal};
+use crate::product_task::{
+    canonical_v1_digest, ProductTaskSnapshot, TaskAttemptId, TaskStatus, TaskTerminal,
+};
 
 // ========================================================================
 // Constants
@@ -115,7 +117,7 @@ pub struct AuthorityAuditRefV1 {
 // SkillUseAuditRefV1
 // ========================================================================
 
-    /// Audit-safe reference from a skill-use receipt.
+/// Audit-safe reference from a skill-use receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillUseAuditRefV1 {
     pub schema_version: u32,
@@ -227,8 +229,6 @@ impl AuditCorrelationV1 {
     pub fn run_id_str(&self) -> Option<&str> {
         self.run_id.as_deref()
     }
-
-
 
     pub fn authority(&self) -> Option<&AuthorityAuditRefV1> {
         self.authority.as_ref()
@@ -447,7 +447,10 @@ impl AuditEnvelopeV1 {
             {
                 return Err(AuditContractError::StringTooLong {
                     field: "candidate_ids".to_string(),
-                    len: rd.applied_candidate_ids.len().max(rd.rejected_candidate_ids.len()),
+                    len: rd
+                        .applied_candidate_ids
+                        .len()
+                        .max(rd.rejected_candidate_ids.len()),
                 });
             }
         }
@@ -668,8 +671,8 @@ impl ProductTaskSnapshot {
             created_at_unix_ms: self.created_at_unix_ms(),
             updated_at_unix_ms: self.updated_at_unix_ms(),
             artifact: self.artifact_metadata().map(|meta| {
-                let source_binding_sha256 = canonical_v1_digest(meta.source_binding())
-                    .unwrap_or_default();
+                let source_binding_sha256 =
+                    canonical_v1_digest(meta.source_binding()).unwrap_or_default();
                 ArtifactAuditRefV1 {
                     artifact_id: meta.artifact_id().as_str().to_owned(),
                     artifact_revision: meta.artifact_revision().get(),
@@ -792,14 +795,14 @@ pub fn derive_material_transition(
 
     // Populate correlation fields from event.
     match &event {
-        AuditEventV1::AttemptStarted {
-            attempt_id,
-            run_id,
-        } => {
+        AuditEventV1::AttemptStarted { attempt_id, run_id } => {
             correlation.attempt_id = Some(*attempt_id);
             correlation.run_id = Some(run_id.clone());
         }
-        AuditEventV1::RunContractBound { authority, skill_use } => {
+        AuditEventV1::RunContractBound {
+            authority,
+            skill_use,
+        } => {
             let last = new.attempts().last();
             correlation.attempt_id = last.map(|a| a.attempt_id().get());
             correlation.run_id = last.map(|a| a.run_id().as_str().to_owned());
@@ -860,20 +863,20 @@ fn derive_event(
                 .last()
                 .expect("Running task must have at least one attempt");
             Ok(AuditEventV1::AttemptStarted {
-                    attempt_id: last.attempt_id().get(),
-                    run_id: last.run_id().as_str().to_owned(),
+                attempt_id: last.attempt_id().get(),
+                run_id: last.run_id().as_str().to_owned(),
             })
         }
 
         // RunContractBound: Running → Running (bind_run_contract)
         (Some(TaskStatus::Running), TaskStatus::Running) => {
-            let contract = new
-                .active_run_contract()
-                .ok_or(AuditContractError::TransitionMismatch {
-                    task_id: new.task_id().as_str().to_owned(),
-                    old_status: Some("Running".to_owned()),
-                    new_status: "Running".to_owned(),
-                })?;
+            let contract =
+                new.active_run_contract()
+                    .ok_or(AuditContractError::TransitionMismatch {
+                        task_id: new.task_id().as_str().to_owned(),
+                        old_status: Some("Running".to_owned()),
+                        new_status: "Running".to_owned(),
+                    })?;
             let authority_ref = AuthorityAuditRefV1 {
                 schema_version: 1,
                 task_id: contract.authority.task_id.clone(),
@@ -893,8 +896,8 @@ fn derive_event(
                 invocation_kind: contract.skill_use.invocation_kind,
             };
             Ok(AuditEventV1::RunContractBound {
-                    authority: authority_ref,
-                    skill_use: skill_ref,
+                authority: authority_ref,
+                skill_use: skill_ref,
             })
         }
 
@@ -904,7 +907,9 @@ fn derive_event(
                 .artifact_metadata()
                 .expect("ReadyForReview must have artifact metadata");
             let artifact_ref = make_artifact_ref(meta);
-            Ok(AuditEventV1::ArtifactPromoted { artifact: artifact_ref })
+            Ok(AuditEventV1::ArtifactPromoted {
+                artifact: artifact_ref,
+            })
         }
 
         // ReviewApplyStarted: ReadyForReview → Applying
@@ -913,7 +918,9 @@ fn derive_event(
                 .artifact_metadata()
                 .expect("Applying must have artifact metadata");
             let artifact_ref = make_artifact_ref(meta);
-            Ok(AuditEventV1::ReviewApplyStarted { artifact: artifact_ref })
+            Ok(AuditEventV1::ReviewApplyStarted {
+                artifact: artifact_ref,
+            })
         }
 
         // ReviewDecisionCommitted::Applied: Applying → Completed
@@ -940,9 +947,9 @@ fn derive_event(
                 }
             });
             Ok(AuditEventV1::ReviewDecisionCommitted {
-                    applied: true,
-                    review_decision: rd,
-                    document_state: doc_state,
+                applied: true,
+                review_decision: rd,
+                document_state: doc_state,
             })
         }
 
@@ -960,49 +967,43 @@ fn derive_event(
                 decided_at_unix_ms: receipt.decided_at_unix_ms,
             };
             Ok(AuditEventV1::ReviewDecisionCommitted {
-                    applied: false,
-                    review_decision: rd,
-                    document_state: None,
+                applied: false,
+                review_decision: rd,
+                document_state: None,
             })
         }
 
         // TaskTerminated: ReadyForReview → Stale
-        (Some(TaskStatus::ReadyForReview), TaskStatus::Stale) => Ok(
-            AuditEventV1::TaskTerminated {
-                terminal: AuditTaskTerminalV1::Stale,
-            },
-        ),
+        (Some(TaskStatus::ReadyForReview), TaskStatus::Stale) => Ok(AuditEventV1::TaskTerminated {
+            terminal: AuditTaskTerminalV1::Stale,
+        }),
 
         // TaskTerminated: Created → Interrupted (startup interruption)
-        (Some(TaskStatus::Created), TaskStatus::Interrupted) => Ok(
-            AuditEventV1::TaskTerminated {
-                terminal: AuditTaskTerminalV1::Interrupted,
-            },
-        ),
+        (Some(TaskStatus::Created), TaskStatus::Interrupted) => Ok(AuditEventV1::TaskTerminated {
+            terminal: AuditTaskTerminalV1::Interrupted,
+        }),
 
         // TaskTerminated: Running|Applying → Interrupted
-        (Some(TaskStatus::Running | TaskStatus::Applying), TaskStatus::Interrupted) => Ok(
-            AuditEventV1::TaskTerminated {
+        (Some(TaskStatus::Running | TaskStatus::Applying), TaskStatus::Interrupted) => {
+            Ok(AuditEventV1::TaskTerminated {
                 terminal: AuditTaskTerminalV1::Interrupted,
-            },
-        ),
+            })
+        }
 
         // TaskTerminated: Running → Failed/NeedsUserInput/Cancelled
-        (Some(TaskStatus::Running), TaskStatus::Failed { terminal }) => Ok(
-            AuditEventV1::TaskTerminated {
+        (Some(TaskStatus::Running), TaskStatus::Failed { terminal }) => {
+            Ok(AuditEventV1::TaskTerminated {
                 terminal: map_terminal(terminal),
-            },
-        ),
-        (Some(TaskStatus::Running), TaskStatus::NeedsUserInput) => Ok(
-            AuditEventV1::TaskTerminated {
+            })
+        }
+        (Some(TaskStatus::Running), TaskStatus::NeedsUserInput) => {
+            Ok(AuditEventV1::TaskTerminated {
                 terminal: AuditTaskTerminalV1::NeedsUserInput,
-            },
-        ),
-        (Some(TaskStatus::Running), TaskStatus::Cancelled) => Ok(
-            AuditEventV1::TaskTerminated {
-                terminal: AuditTaskTerminalV1::Cancelled,
-            },
-        ),
+            })
+        }
+        (Some(TaskStatus::Running), TaskStatus::Cancelled) => Ok(AuditEventV1::TaskTerminated {
+            terminal: AuditTaskTerminalV1::Cancelled,
+        }),
 
         // Unsupported transition.
         _ => Err(AuditContractError::TransitionMismatch {
@@ -1013,11 +1014,8 @@ fn derive_event(
     }
 }
 
-fn make_artifact_ref(
-    meta: &crate::product_task::ProductArtifactMetadata,
-) -> ArtifactAuditRefV1 {
-    let source_binding_sha256 = canonical_v1_digest(meta.source_binding())
-        .unwrap_or_default();
+fn make_artifact_ref(meta: &crate::product_task::ProductArtifactMetadata) -> ArtifactAuditRefV1 {
+    let source_binding_sha256 = canonical_v1_digest(meta.source_binding()).unwrap_or_default();
     ArtifactAuditRefV1 {
         artifact_id: meta.artifact_id().as_str().to_owned(),
         artifact_revision: meta.artifact_revision().get(),
@@ -1061,10 +1059,7 @@ mod tests {
     }
 
     fn audit_id(n: u64) -> AuditEventId {
-        AuditEventId::parse(format!(
-            "audit-00000000-0000-4000-8000-{n:012x}"
-        ))
-        .unwrap()
+        AuditEventId::parse(format!("audit-00000000-0000-4000-8000-{n:012x}")).unwrap()
     }
 
     fn source_binding_fixture() -> SourceBinding {
@@ -1204,7 +1199,10 @@ mod tests {
         authority_snapshot_fixture().receipt(10)
     }
 
-    fn run_contract_fixture(authority: &AuthoritySnapshot, skill_use: &SkillUseReceiptV1) -> RunContractReceiptV1 {
+    fn run_contract_fixture(
+        authority: &AuthoritySnapshot,
+        skill_use: &SkillUseReceiptV1,
+    ) -> RunContractReceiptV1 {
         RunContractReceiptV1 {
             authority: authority.receipt(10),
             skill_use: skill_use.clone(),
@@ -1222,10 +1220,7 @@ mod tests {
         let authority = authority_snapshot_fixture();
         let skill_use = skill_use_receipt_fixture();
         let running = created_task_fixture()
-            .start_attempt(
-                TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20),
-                20,
-            )
+            .start_attempt(TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20), 20)
             .unwrap();
         (
             running,
@@ -1267,8 +1262,7 @@ mod tests {
 
         #[test]
         fn audit_event_id_parse_roundtrip() {
-            let id =
-                AuditEventId::parse("audit-00000000-0000-4000-8000-000000000001").unwrap();
+            let id = AuditEventId::parse("audit-00000000-0000-4000-8000-000000000001").unwrap();
             assert_eq!(id.as_str(), "audit-00000000-0000-4000-8000-000000000001");
         }
 
@@ -1303,12 +1297,8 @@ mod tests {
                 review_decision: None,
                 document_state: None,
             };
-            let result = AuditEnvelopeV1::new(
-                audit_id(1),
-                10,
-                AuditEventV1::TaskCreated,
-                correlation,
-            );
+            let result =
+                AuditEnvelopeV1::new(audit_id(1), 10, AuditEventV1::TaskCreated, correlation);
             assert!(matches!(
                 result,
                 Err(AuditContractError::StringTooLong { .. })
@@ -1392,7 +1382,10 @@ mod tests {
                 review_decision: None,
                 document_state: None,
             };
-            assert_eq!(correlation.task_id(), "task-00000000-0000-4000-8000-000000000001");
+            assert_eq!(
+                correlation.task_id(),
+                "task-00000000-0000-4000-8000-000000000001"
+            );
             assert_eq!(correlation.attempt_id(), Some(TaskAttemptId::new(1)));
         }
     }
@@ -1409,11 +1402,17 @@ mod tests {
             let snapshot = authority_snapshot_fixture();
             let audit_ref = snapshot.audit_ref();
             assert_eq!(audit_ref.schema_version, 1);
-            assert_eq!(audit_ref.task_id, "task-00000000-0000-4000-8000-000000000001");
+            assert_eq!(
+                audit_ref.task_id,
+                "task-00000000-0000-4000-8000-000000000001"
+            );
             assert_eq!(audit_ref.attempt_id, 1);
             assert_eq!(audit_ref.run_id, "run-00000000-0000-4000-8000-000000000001");
             assert_eq!(audit_ref.policy_revision, "auth-sentinel-policy");
-            assert_eq!(audit_ref.disclosure_ceiling, DisclosureCeiling::OcrLayoutOnly);
+            assert_eq!(
+                audit_ref.disclosure_ceiling,
+                DisclosureCeiling::OcrLayoutOnly
+            );
             assert!(!audit_ref.existing_product_capture);
             assert!(!audit_ref.snapshot_digest.is_empty());
             // Verify no grant or capability data
@@ -1465,7 +1464,10 @@ mod tests {
             assert_eq!(receipt.status, AuditTaskStatusV1::ReadyForReview);
             assert!(receipt.artifact.is_some());
             let art = receipt.artifact.as_ref().unwrap();
-            assert_eq!(art.artifact_id, "artifact-00000000-0000-4000-8000-000000000001");
+            assert_eq!(
+                art.artifact_id,
+                "artifact-00000000-0000-4000-8000-000000000001"
+            );
             assert_eq!(art.artifact_revision, 1);
             assert!(!art.canonical_payload_sha256.is_empty());
             assert!(receipt.review_decision.is_none());
@@ -1497,22 +1499,17 @@ mod tests {
         fn derives_attempt_started_from_created_to_running() {
             let created = created_task_fixture();
             let running = created
-                .start_attempt(
-                    TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20),
-                    20,
-                )
+                .start_attempt(TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20), 20)
                 .unwrap();
-            let envelope = derive_material_transition(
-                Some(&created),
-                &running,
-                audit_id(2),
-                20,
-            )
-            .unwrap();
-            assert_eq!(envelope.event(), &AuditEventV1::AttemptStarted {
-                attempt_id: 1,
-                run_id: "run-00000000-0000-4000-8000-000000000001".to_owned(),
-            });
+            let envelope =
+                derive_material_transition(Some(&created), &running, audit_id(2), 20).unwrap();
+            assert_eq!(
+                envelope.event(),
+                &AuditEventV1::AttemptStarted {
+                    attempt_id: 1,
+                    run_id: "run-00000000-0000-4000-8000-000000000001".to_owned(),
+                }
+            );
             assert_eq!(
                 envelope.correlation().attempt_id(),
                 Some(TaskAttemptId::new(1))
@@ -1527,10 +1524,7 @@ mod tests {
         fn rejects_collapsed_absent_to_running_transition() {
             let created = created_task_fixture();
             let running = created
-                .start_attempt(
-                    TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20),
-                    20,
-                )
+                .start_attempt(TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20), 20)
                 .unwrap();
             assert!(matches!(
                 derive_material_transition(None, &running, audit_id(3), 20),
@@ -1553,10 +1547,7 @@ mod tests {
             // skill_sentinel ("resource-1") from receipt must not appear
             // in adjacent object dumps, but main_resource_id is now an
             // allowed durable field in SkillUseAuditRefV1.
-            for forbidden in [
-                "granted_operations",
-                "prepared_capabilities",
-            ] {
+            for forbidden in ["granted_operations", "prepared_capabilities"] {
                 assert!(!json.contains(forbidden), "audit leak: {forbidden}");
             }
         }
@@ -1566,8 +1557,7 @@ mod tests {
         #[test]
         fn derives_task_created() {
             let created = created_task_fixture();
-            let envelope =
-                derive_material_transition(None, &created, audit_id(1), 10).unwrap();
+            let envelope = derive_material_transition(None, &created, audit_id(1), 10).unwrap();
             assert_eq!(envelope.event(), &AuditEventV1::TaskCreated);
         }
 
@@ -1577,10 +1567,7 @@ mod tests {
         fn derives_attempt_started() {
             let created = created_task_fixture();
             let running = created
-                .start_attempt(
-                    TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20),
-                    20,
-                )
+                .start_attempt(TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20), 20)
                 .unwrap();
             let envelope =
                 derive_material_transition(Some(&created), &running, audit_id(2), 20).unwrap();
@@ -1598,10 +1585,7 @@ mod tests {
         #[test]
         fn derives_run_contract_bound() {
             let running = created_task_fixture()
-                .start_attempt(
-                    TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20),
-                    20,
-                )
+                .start_attempt(TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20), 20)
                 .unwrap();
             let authority = authority_snapshot_fixture();
             let skill_use = skill_use_receipt_fixture();
@@ -1611,7 +1595,10 @@ mod tests {
             let envelope =
                 derive_material_transition(Some(&running), &bound, audit_id(3), 30).unwrap();
             match envelope.event() {
-                AuditEventV1::RunContractBound { authority, skill_use } => {
+                AuditEventV1::RunContractBound {
+                    authority,
+                    skill_use,
+                } => {
                     assert_eq!(authority.snapshot_digest, authority.snapshot_digest);
                     assert_eq!(skill_use.package_id, "package-sentinel");
                 }
@@ -1624,10 +1611,7 @@ mod tests {
         #[test]
         fn derives_artifact_promoted() {
             let running = created_task_fixture()
-                .start_attempt(
-                    TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20),
-                    20,
-                )
+                .start_attempt(TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20), 20)
                 .unwrap();
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             let ready = running
@@ -1652,10 +1636,7 @@ mod tests {
         #[test]
         fn derives_review_apply_started() {
             let running = created_task_fixture()
-                .start_attempt(
-                    TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20),
-                    20,
-                )
+                .start_attempt(TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20), 20)
                 .unwrap();
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             let ready = running
@@ -1675,10 +1656,7 @@ mod tests {
         #[test]
         fn derives_review_decision_committed_applied() {
             let running = created_task_fixture()
-                .start_attempt(
-                    TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20),
-                    20,
-                )
+                .start_attempt(TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20), 20)
                 .unwrap();
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             let ready = running
@@ -1711,10 +1689,7 @@ mod tests {
         #[test]
         fn derives_review_decision_committed_rejected() {
             let running = created_task_fixture()
-                .start_attempt(
-                    TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20),
-                    20,
-                )
+                .start_attempt(TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20), 20)
                 .unwrap();
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             let ready = running
@@ -1763,10 +1738,7 @@ mod tests {
         #[test]
         fn derives_task_terminated_stale() {
             let running = created_task_fixture()
-                .start_attempt(
-                    TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20),
-                    20,
-                )
+                .start_attempt(TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20), 20)
                 .unwrap();
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             let ready = running
@@ -1788,10 +1760,7 @@ mod tests {
         #[test]
         fn derives_task_terminated_cancelled() {
             let running = created_task_fixture()
-                .start_attempt(
-                    TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20),
-                    20,
-                )
+                .start_attempt(TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20), 20)
                 .unwrap();
             let cancelled = running
                 .record_terminal(TaskTerminal::Cancelled, 30)
@@ -1811,10 +1780,7 @@ mod tests {
         #[test]
         fn derives_task_terminated_budget_exhausted() {
             let running = created_task_fixture()
-                .start_attempt(
-                    TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20),
-                    20,
-                )
+                .start_attempt(TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20), 20)
                 .unwrap();
             let failed = running
                 .record_terminal(
@@ -1839,10 +1805,7 @@ mod tests {
         #[test]
         fn derives_task_terminated_interrupted() {
             let running = created_task_fixture()
-                .start_attempt(
-                    TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20),
-                    20,
-                )
+                .start_attempt(TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20), 20)
                 .unwrap();
             let interrupted = running.reconcile_interrupted(30).unwrap().unwrap();
             let envelope =
@@ -1860,10 +1823,7 @@ mod tests {
         #[test]
         fn derives_task_terminated_needs_user_input() {
             let running = created_task_fixture()
-                .start_attempt(
-                    TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20),
-                    20,
-                )
+                .start_attempt(TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20), 20)
                 .unwrap();
             let needs_input = running
                 .record_terminal(TaskTerminal::NeedsUserInput, 30)
@@ -1883,7 +1843,8 @@ mod tests {
         #[test]
         fn rejects_task_id_mismatch() {
             let old = created_task_fixture();
-            let wrong_id = ProductTaskId::parse("task-99999999-9999-4999-8999-999999999999").unwrap();
+            let wrong_id =
+                ProductTaskId::parse("task-99999999-9999-4999-8999-999999999999").unwrap();
             let new = ProductTaskSnapshot::new(
                 wrong_id,
                 TaskKind::SmartRedactionAuthor,
@@ -1901,10 +1862,7 @@ mod tests {
         fn rejects_revision_mismatch() {
             let created = created_task_fixture();
             let running = created
-                .start_attempt(
-                    TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20),
-                    20,
-                )
+                .start_attempt(TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20), 20)
                 .unwrap();
             let authority = authority_snapshot_fixture();
             let skill_use = skill_use_receipt_fixture();
@@ -1915,7 +1873,10 @@ mod tests {
             // Created → Running is legal, but expected rev = 0+1 = 1, got 2.
             assert!(matches!(
                 derive_material_transition(Some(&created), &bound, audit_id(1), 30),
-                Err(AuditContractError::RevisionMismatch { expected: 1, got: 2 })
+                Err(AuditContractError::RevisionMismatch {
+                    expected: 1,
+                    got: 2
+                })
             ));
         }
 
@@ -1923,10 +1884,7 @@ mod tests {
         fn rejects_timestamp_regression() {
             let created = created_task_fixture();
             let running = created
-                .start_attempt(
-                    TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20),
-                    20,
-                )
+                .start_attempt(TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20), 20)
                 .unwrap();
             assert!(matches!(
                 derive_material_transition(Some(&created), &running, audit_id(1), 5),
@@ -1938,10 +1896,7 @@ mod tests {
         fn rejects_unsupported_transition() {
             let created = created_task_fixture();
             let running = created
-                .start_attempt(
-                    TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20),
-                    20,
-                )
+                .start_attempt(TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20), 20)
                 .unwrap();
             // Created → ReadyForReview hits RevisionMismatch (0+1 != 2)
             // because the reducer path requires Running as an intermediate.
@@ -1985,8 +1940,7 @@ mod tests {
 
         #[test]
         fn append_error_from_category() {
-            let err =
-                AuditAppendError::from_category(AuditFailureCategory::CorruptJournal);
+            let err = AuditAppendError::from_category(AuditFailureCategory::CorruptJournal);
             assert!(matches!(
                 err,
                 AuditAppendError::AppendFailed {
@@ -2029,13 +1983,21 @@ mod tests {
 
         const FORBIDDEN: &[&str] = &[
             // provider internals / credentials
-            "api_key", "secret", "password", "token",
+            "api_key",
+            "secret",
+            "password",
+            "token",
             // prose / prompts / source code / response text
-            "system_prompt", "user_prompt", "response_text",
+            "system_prompt",
+            "user_prompt",
+            "response_text",
             // tool args / results
-            "tool_arguments", "tool_result",
+            "tool_arguments",
+            "tool_result",
             // pixel data / proposal bytes
-            "pixel_data", "raw_bytes", "proposal_payload",
+            "pixel_data",
+            "raw_bytes",
+            "proposal_payload",
         ];
 
         fn auth_ref() -> AuthorityAuditRefV1 {
@@ -2174,12 +2136,8 @@ mod tests {
                 authority: auth_ref(),
                 skill_use: skill_ref(),
             };
-            let correlation = AuditCorrelationV1::for_task(
-                task_id_fixture().as_str().to_owned(),
-            );
-            let envelope = AuditEnvelopeV1::new(
-                audit_id(99), 9999, event, correlation,
-            ).unwrap();
+            let correlation = AuditCorrelationV1::for_task(task_id_fixture().as_str().to_owned());
+            let envelope = AuditEnvelopeV1::new(audit_id(99), 9999, event, correlation).unwrap();
             let json = serde_json::to_string(&envelope).unwrap();
             for pat in FORBIDDEN {
                 assert!(
@@ -2208,14 +2166,13 @@ mod tests {
                 TaskKind::SmartRedactionAuthor,
                 SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None),
                 10,
-            ).unwrap();
+            )
+            .unwrap();
             let _receipt = task.audit_transition_receipt();
-            let correlation = AuditCorrelationV1::for_task(
-                task_id_fixture().as_str().to_owned(),
-            );
-            let envelope = AuditEnvelopeV1::new(
-                audit_id(1), 10, AuditEventV1::TaskCreated, correlation,
-            ).unwrap();
+            let correlation = AuditCorrelationV1::for_task(task_id_fixture().as_str().to_owned());
+            let envelope =
+                AuditEnvelopeV1::new(audit_id(1), 10, AuditEventV1::TaskCreated, correlation)
+                    .unwrap();
 
             // The envelope itself is valid and can be used for a prepare.
             // Verify it round-trips.

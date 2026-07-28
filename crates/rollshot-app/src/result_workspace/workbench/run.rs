@@ -931,11 +931,10 @@ async fn persist_terminal_outcome(
     let store = store.clone();
     let expected = current.clone();
     let event_id = AuditEventId::new_v4();
-    let result =
-        tokio::task::spawn_blocking(move || {
-            store.transition_audited(&expected, &next, event_id, now)
-        })
-        .await;
+    let result = tokio::task::spawn_blocking(move || {
+        store.transition_audited(&expected, &next, event_id, now)
+    })
+    .await;
     match result {
         Ok(Ok(_)) => None,
         Ok(Err(e)) => Some(format!("persist terminal: {e}")),
@@ -4056,9 +4055,9 @@ mod reducer_tests {
         // This proves that a prepare failure prevents model dispatch:
         // no AttemptStarted, no RunContractBound, no ArtifactPromoted
         // audit events could have been committed.
+        use super::super::task_store::TaskStore;
         use rollshot_agent::audit::AuditEventV1;
         use rollshot_agent::product_task::ProductTaskSnapshot;
-        use super::super::task_store::TaskStore;
 
         let tmp = tempfile::tempdir().unwrap();
         // Create store normally, then make directory read-only to force I/O error.
@@ -4084,8 +4083,12 @@ mod reducer_tests {
         std::fs::set_permissions(&tasks_dir, ro).unwrap();
 
         // create_audited fails due to I/O error.
-        let result = store.create_audited(&snapshot, rollshot_agent::audit::AuditEventId::new_v4(), 10);
-        assert!(result.is_err(), "create_audited must fail with read-only dir");
+        let result =
+            store.create_audited(&snapshot, rollshot_agent::audit::AuditEventId::new_v4(), 10);
+        assert!(
+            result.is_err(),
+            "create_audited must fail with read-only dir"
+        );
 
         // Restore permissions for cleanup.
         let mut rw = _perm;
@@ -4101,7 +4104,9 @@ mod reducer_tests {
         // Invariant: AttemptStarted would prove model dispatch began.
         // Its absence proves dispatch was prevented.
         assert!(
-            !events.iter().any(|e| matches!(e.event(), AuditEventV1::AttemptStarted { .. })),
+            !events
+                .iter()
+                .any(|e| matches!(e.event(), AuditEventV1::AttemptStarted { .. })),
             "no AttemptStarted after prepare failure"
         );
     }
@@ -4112,11 +4117,11 @@ mod reducer_tests {
         // conflict), the audit transaction is aborted and no ArtifactPromoted
         // event is committed.  We force a CAS conflict by advancing the
         // store via a second handle before the audited transition.
+        use super::super::task_store::TaskStore;
         use rollshot_agent::audit::AuditEventV1;
         use rollshot_agent::product_task::{
             ProductTaskSnapshot, TaskAttempt, TaskAttemptId, TaskTerminal,
         };
-        use super::super::task_store::TaskStore;
 
         let tmp = tempfile::tempdir().unwrap();
         let store = TaskStore::open(tmp.path()).unwrap();
@@ -4129,13 +4134,9 @@ mod reducer_tests {
                 .unwrap();
         let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
-        let snapshot = ProductTaskSnapshot::new(
-            task_id.clone(),
-            Tk::SmartRedactionAuthor,
-            binding,
-            10,
-        )
-        .unwrap();
+        let snapshot =
+            ProductTaskSnapshot::new(task_id.clone(), Tk::SmartRedactionAuthor, binding, 10)
+                .unwrap();
         let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), 10);
         let running = snapshot.start_attempt(attempt, 20).unwrap();
 
@@ -4160,12 +4161,17 @@ mod reducer_tests {
             rollshot_agent::audit::AuditEventId::new_v4(),
             30,
         );
-        assert!(result.is_err(), "transition_audited must fail with CAS conflict");
+        assert!(
+            result.is_err(),
+            "transition_audited must fail with CAS conflict"
+        );
 
         // No ArtifactPromoted committed — the audited transition was aborted.
         let events = store.committed_audit_events(&task_id).unwrap();
         assert!(
-            !events.iter().any(|e| matches!(e.event(), AuditEventV1::ArtifactPromoted { .. })),
+            !events
+                .iter()
+                .any(|e| matches!(e.event(), AuditEventV1::ArtifactPromoted { .. })),
             "no ArtifactPromoted after audit failure"
         );
         // Snapshot unchanged from terminal2 — ReadyForReview was not delivered.
@@ -4181,10 +4187,10 @@ mod reducer_tests {
         // When the provider returns a failure (e.g. ProviderFailure),
         // the terminal is a failure state, not ReadyForReview.
         // This means no ArtifactPromoted audit event could be committed.
+        use super::super::task_store::TaskStore;
         use rollshot_agent::product_task::{
             ProductTaskSnapshot, TaskAttempt, TaskAttemptId, TaskTerminal,
         };
-        use super::super::task_store::TaskStore;
 
         let tmp = tempfile::tempdir().unwrap();
         let store = TaskStore::open(tmp.path()).unwrap();
@@ -4197,13 +4203,9 @@ mod reducer_tests {
                 .unwrap();
         let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
-        let snapshot = ProductTaskSnapshot::new(
-            task_id.clone(),
-            Tk::SmartRedactionAuthor,
-            binding,
-            10,
-        )
-        .unwrap();
+        let snapshot =
+            ProductTaskSnapshot::new(task_id.clone(), Tk::SmartRedactionAuthor, binding, 10)
+                .unwrap();
         let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), 10);
         let running = snapshot.start_attempt(attempt, 20).unwrap();
         store.create(&running).unwrap();
@@ -4220,7 +4222,10 @@ mod reducer_tests {
             !matches!(loaded.status(), Ts::ReadyForReview),
             "partial failure must not reach ReadyForReview"
         );
-        assert!(loaded.artifact_metadata().is_none(), "no artifact on failure");
+        assert!(
+            loaded.artifact_metadata().is_none(),
+            "no artifact on failure"
+        );
     }
 
     #[test]

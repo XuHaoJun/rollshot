@@ -71,7 +71,9 @@ pub(crate) fn classify_unresolved(
             } else if receipt.snapshot_revision == prepared.expected_revision {
                 // The expected revision is still authoritative: the task
                 // mutation never landed. Abort the audit record.
-                Ok(ReconcileDecision::Abort(AuditAbortCategory::StateNotCommitted))
+                Ok(ReconcileDecision::Abort(
+                    AuditAbortCategory::StateNotCommitted,
+                ))
             } else {
                 // Unrelated revision: neither expected nor replacement.
                 // This indicates intervening mutations that make the
@@ -90,7 +92,9 @@ pub(crate) fn classify_unresolved(
         None => {
             // Task file absent: the task was never created or was pruned.
             // Abort the audit record.
-            Ok(ReconcileDecision::Abort(AuditAbortCategory::StateNotCommitted))
+            Ok(ReconcileDecision::Abort(
+                AuditAbortCategory::StateNotCommitted,
+            ))
         }
     }
 }
@@ -103,8 +107,8 @@ pub(crate) fn classify_unresolved(
 mod tests {
     use super::*;
     use rollshot_agent::audit::{
-        AuditCorrelationV1, AuditEnvelopeV1, AuditEventId, AuditEventV1,
-        AuditTaskStateReceiptV1, AuditTaskStatusV1,
+        AuditCorrelationV1, AuditEnvelopeV1, AuditEventId, AuditEventV1, AuditTaskStateReceiptV1,
+        AuditTaskStatusV1,
     };
     use rollshot_agent::product_task::ProductTaskId;
 

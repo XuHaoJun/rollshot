@@ -1,12 +1,12 @@
 #![allow(dead_code, clippy::large_enum_variant)] // SP6 scaffolding
 
+pub mod audit_store;
 pub mod provider_config;
 pub mod review;
 pub mod run;
 pub mod state;
 pub mod task_store;
 pub mod view;
-pub mod audit_store;
 
 #[cfg(test)]
 pub(crate) mod eval;
