@@ -684,6 +684,38 @@ impl TimelineWorkspace {
         }
     }
 
+    /// Build the [`CaptionApplyContext`] for the current workspace state.
+    /// For durable proposals on a saved, clean project, returns a
+    /// `DurableProject` context with the current revision, the proposal's
+    /// projection digest, and the clean flag. Otherwise returns
+    /// `EphemeralGuide`.
+    #[cfg(feature = "action-guide")]
+    pub(crate) fn caption_apply_context(
+        &self,
+        proposal: &rollshot_action::CaptionProposal,
+    ) -> rollshot_action::CaptionApplyContext {
+        if let (
+            Some(project::ProjectSession::Saved { base_revision, .. }),
+            ProjectSaveState::Clean,
+            rollshot_action::CaptionProposalOrigin::DurableProject {
+                projection_digest,
+                ..
+            },
+        ) = (
+            &self.project_session,
+            self.save_state,
+            proposal.origin(),
+        ) {
+            rollshot_action::CaptionApplyContext::DurableProject {
+                revision: *base_revision,
+                projection_digest: projection_digest.clone(),
+                clean: true,
+            }
+        } else {
+            rollshot_action::CaptionApplyContext::EphemeralGuide
+        }
+    }
+
     #[cfg(feature = "action-guide")]
     pub(crate) fn publish_aggregate(&self) -> Option<PublishAggregate> {
         let session = self.project_session.as_ref()?;

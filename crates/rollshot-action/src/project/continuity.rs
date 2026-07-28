@@ -94,6 +94,7 @@ struct ActionGuideProjectionDto {
 /// Excludes frame payloads, annotations, frame digests, frame dimensions,
 /// capture region, input source, nearby frames, enabled outputs, project root,
 /// and import warnings.
+#[derive(Clone)]
 pub struct ActionGuideContextProjectionV1 {
     revision: u64,
     title: String,
