@@ -1,4 +1,5 @@
 pub mod authority;
+pub mod continuity;
 pub mod domain;
 pub mod driver;
 pub mod jobs;

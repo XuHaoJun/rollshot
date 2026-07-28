@@ -424,6 +424,18 @@ impl ProductArtifactMetadata {
     pub fn run_contract(&self) -> Option<&RunContractReceiptV1> {
         self.run_contract.as_ref()
     }
+
+    pub fn kind(&self) -> ArtifactKind {
+        self.kind
+    }
+
+    pub fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    pub fn attempt_id(&self) -> TaskAttemptId {
+        self.attempt_id
+    }
 }
 
 // ========================================================================
