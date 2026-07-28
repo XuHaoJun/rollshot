@@ -816,9 +816,8 @@ async fn persist_terminal_outcome(
                 None => return Some("missing run contract for V2 promotion".into()),
             };
 
-            // This call site is Smart-Redaction-only today (no Action Guide
-            // producer exists yet), so `current`'s binding is always
-            // `SmartRedaction`.
+            // The source binding must be SmartRedaction here; if it is not, the
+            // task state is corrupted (invariant violation).
             let (current_preset_id, current_active_preset_revision_id) =
                 match current.source_binding() {
                     SourceBinding::SmartRedaction {
@@ -826,7 +825,10 @@ async fn persist_terminal_outcome(
                         active_preset_revision_id,
                         ..
                     } => (preset_id.clone(), active_preset_revision_id.clone()),
-                    _ => (String::new(), None),
+                    _ => return Some(
+                        "persist_terminal_outcome: unexpected non-SmartRedaction source binding"
+                            .into(),
+                    ),
                 };
 
             let source_binding = SourceBinding::smart_redaction(

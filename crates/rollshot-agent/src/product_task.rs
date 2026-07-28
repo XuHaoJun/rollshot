@@ -2739,6 +2739,7 @@ mod tests {
     fn source_binding_round_trips_all_variants() {
         let cases = vec![
             SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 7, "p".into(), None),
+            SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 7, "p".into(), Some("r1".into())),
             SourceBinding::ActionGuideProject {
                 project_root_sha256: [3u8; 32],
                 revision: 9,
