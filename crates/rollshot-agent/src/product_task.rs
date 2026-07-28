@@ -182,7 +182,7 @@ pub enum PayloadMode {
 // ========================================================================
 
 /// Domain-tagged binding identifying the source a task acts on.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(tag = "domain", rename_all = "snake_case")]
 pub enum SourceBinding {
     SmartRedaction {
@@ -202,6 +202,89 @@ pub enum SourceBinding {
     ActionGuideEphemeralGuide {
         guide_digest: String,
     },
+}
+
+/// Deserialization shim accepting both the tagged form and the pre-migration
+/// flat Smart Redaction object. Tagged is tried first; a flat object can only
+/// have been a Smart Redaction binding, because no other domain existed.
+impl<'de> Deserialize<'de> for SourceBinding {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(tag = "domain", rename_all = "snake_case")]
+        enum Tagged {
+            SmartRedaction {
+                base_image_sha256: [u8; 32],
+                annotation_state_sha256: [u8; 32],
+                document_state_id: u32,
+                preset_id: String,
+                active_preset_revision_id: Option<String>,
+            },
+            ActionGuideProject {
+                project_root_sha256: [u8; 32],
+                revision: u64,
+                projection_digest: String,
+            },
+            ActionGuideEphemeralGuide {
+                guide_digest: String,
+            },
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct LegacyFlat {
+            base_image_sha256: [u8; 32],
+            annotation_state_sha256: [u8; 32],
+            document_state_id: u32,
+            preset_id: String,
+            #[serde(default)]
+            active_preset_revision_id: Option<String>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Tagged(Tagged),
+            LegacyFlat(LegacyFlat),
+        }
+
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::Tagged(Tagged::SmartRedaction {
+                base_image_sha256,
+                annotation_state_sha256,
+                document_state_id,
+                preset_id,
+                active_preset_revision_id,
+            }) => Self::SmartRedaction {
+                base_image_sha256,
+                annotation_state_sha256,
+                document_state_id,
+                preset_id,
+                active_preset_revision_id,
+            },
+            Repr::Tagged(Tagged::ActionGuideProject {
+                project_root_sha256,
+                revision,
+                projection_digest,
+            }) => Self::ActionGuideProject {
+                project_root_sha256,
+                revision,
+                projection_digest,
+            },
+            Repr::Tagged(Tagged::ActionGuideEphemeralGuide { guide_digest }) => {
+                Self::ActionGuideEphemeralGuide { guide_digest }
+            }
+            Repr::LegacyFlat(flat) => Self::SmartRedaction {
+                base_image_sha256: flat.base_image_sha256,
+                annotation_state_sha256: flat.annotation_state_sha256,
+                document_state_id: flat.document_state_id,
+                preset_id: flat.preset_id,
+                active_preset_revision_id: flat.active_preset_revision_id,
+            },
+        })
+    }
 }
 
 impl SourceBinding {
@@ -922,6 +1005,31 @@ impl ProductTaskSnapshot {
     ) -> Result<Self, TaskContractError> {
         Ok(Self {
             store_schema_version: 2,
+            snapshot_revision: 0,
+            task_id,
+            kind,
+            source_binding,
+            status: TaskStatus::Created,
+            attempts: Vec::new(),
+            artifact_metadata: None,
+            pending_artifact_payload: None,
+            pending_proposal_payload: None,
+            review_receipt: None,
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+        })
+    }
+
+    /// V3 constructor: domain-tagged source binding, kind-agnostic artifact
+    /// payload. Like V2, requires a run-contract binding before promotion.
+    pub fn new_v3(
+        task_id: ProductTaskId,
+        kind: TaskKind,
+        source_binding: SourceBinding,
+        now: i64,
+    ) -> Result<Self, TaskContractError> {
+        Ok(Self {
+            store_schema_version: 3,
             snapshot_revision: 0,
             task_id,
             kind,
@@ -2824,6 +2932,52 @@ mod tests {
             let back: SourceBinding = serde_json::from_str(&json).unwrap();
             assert_eq!(case, back, "round trip failed for {json}");
         }
+    }
+
+    #[test]
+    fn legacy_flat_source_binding_deserializes_as_smart_redaction() {
+        // Pre-migration on-disk shape: a flat object with no "domain" tag.
+        let legacy = r#"{
+            "base_image_sha256": [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+                                  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+            "annotation_state_sha256": [2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
+                                        2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],
+            "document_state_id": 4,
+            "preset_id": "preset-001",
+            "active_preset_revision_id": null
+        }"#;
+
+        let parsed: SourceBinding = serde_json::from_str(legacy).unwrap();
+
+        assert_eq!(
+            parsed,
+            SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 4, "preset-001".into(), None)
+        );
+    }
+
+    #[test]
+    fn unrelated_object_is_rejected_not_defaulted() {
+        // The untagged shim must not silently invent a SmartRedaction binding
+        // from an object it does not recognize.
+        let err = serde_json::from_str::<SourceBinding>(r#"{"nope":1}"#)
+            .expect_err("unrelated object must not deserialize");
+        assert!(
+            err.to_string().contains("did not match any variant"),
+            "unexpected error text: {err}"
+        );
+    }
+
+    #[test]
+    fn new_v3_writes_schema_three() {
+        let task = ProductTaskSnapshot::new_v3(
+            task_id_fixture(),
+            TaskKind::SmartRedactionAuthor,
+            source_binding_fixture(),
+            1_000,
+        )
+        .unwrap();
+
+        assert_eq!(task.store_schema_version(), 3);
     }
 
     #[test]

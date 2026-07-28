@@ -490,7 +490,7 @@ impl TaskStore {
         })?;
 
         // Validate schema version.
-        if snapshot.store_schema_version() > 2 {
+        if snapshot.store_schema_version() > 3 {
             return Err(TaskStoreError::UnsupportedSchema {
                 version: snapshot.store_schema_version(),
             });
@@ -2358,12 +2358,37 @@ mod tests {
     }
 
     #[test]
-    fn schema_three_fails_closed() {
-        let error = load_snapshot_with_schema(3).unwrap_err();
+    fn schema_four_fails_closed() {
+        let error = load_snapshot_with_schema(4).unwrap_err();
         assert!(matches!(
             error,
-            TaskStoreError::UnsupportedSchema { version: 3 }
+            TaskStoreError::UnsupportedSchema { version: 4 }
         ));
+    }
+
+    #[test]
+    fn loads_pre_migration_schema_fixtures() {
+        for (name, expected_version) in [
+            ("task-schema-v1.json", 1u32),
+            ("task-schema-v2.json", 2u32),
+            ("task-schema-v2-ready.json", 2u32),
+        ] {
+            let raw = std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/agent_tasks")
+                    .join(name),
+            )
+            .unwrap();
+
+            let snapshot: ProductTaskSnapshot =
+                serde_json::from_str(&raw).unwrap_or_else(|e| panic!("{name} failed to load: {e}"));
+
+            assert_eq!(snapshot.store_schema_version(), expected_version);
+            assert!(matches!(
+                snapshot.source_binding(),
+                SourceBinding::SmartRedaction { .. }
+            ));
+        }
     }
 
     #[test]

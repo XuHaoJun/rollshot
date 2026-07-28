@@ -244,9 +244,9 @@ impl TryFrom<&crate::product_task::ProductTaskSnapshot> for ContinuityProjection
     type Error = ContinuityProjectionError;
 
     fn try_from(snapshot: &crate::product_task::ProductTaskSnapshot) -> Result<Self, Self::Error> {
-        // 1. Accept store schema 1 and 2, reject zero or greater than 2.
+        // 1. Accept store schema 1, 2, and 3; reject zero or greater than 3.
         let store_schema = snapshot.store_schema_version();
-        if store_schema == 0 || store_schema > 2 {
+        if store_schema == 0 || store_schema > 3 {
             return Err(ContinuityProjectionError::UnsupportedSchema(store_schema));
         }
 
@@ -1609,8 +1609,8 @@ mod tests {
     #[test]
     fn v1_schema_accepted() {
         // Verify that a V1 task (store_schema_version = 1) is accepted.
-        // Schema 0 / >2 rejection is validated by the store_schema_version guard
-        // in TryFrom, which rejects values 0 and >2.
+        // Schema 0 / >3 rejection is validated by the store_schema_version guard
+        // in TryFrom, which rejects values 0 and >3.
         let snapshot = ProductTaskSnapshot::new(
             task_id_fixture(),
             TaskKind::SmartRedactionAuthor,
