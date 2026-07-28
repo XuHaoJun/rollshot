@@ -872,7 +872,7 @@ mod tests {
 
     // -- Task 7: UI evidence for restored agent review state ------------------
 
-    fn workbench_proposal_with_candidate() -> rollshot_edit_proposal::EditProposal {
+    pub(crate) fn workbench_proposal_with_candidate() -> rollshot_edit_proposal::EditProposal {
         use rollshot_edit_proposal::{
             CandidateId, ConfidenceSummary, ProposalId, ProposedCandidate, ProposedEdit,
             Provenance, ProvenanceSource,
@@ -996,6 +996,125 @@ mod tests {
         assert!(
             ui.find("Apply 1 redactions").is_err(),
             "stale restored review must not show Apply button"
+        );
+    }
+
+    #[test]
+    fn projection_validation_failure_hides_apply_button() {
+        // When ContinuityProjectionV1 fails (e.g. corrupt artifact binding),
+        // the restore must be silently dropped and no Apply button shown.
+        use rollshot_agent::product_task::{
+            ArtifactId, ArtifactKind, ArtifactRevision, PayloadConfigV1, PayloadDryRunV1,
+            PayloadProposalV1, PayloadSourceV1, ProductArtifactMetadata, ProductTaskId,
+            SmartRedactionReviewPayload, SourceBinding, TaskAttempt, TaskAttemptId, TaskKind,
+        };
+
+        let size = IcedSize::new(1100.0, 760.0);
+        let mut ws = workspace();
+        ws.mode = workbench::WorkspaceMode::Workbench(workbench::WorkbenchState::default());
+
+        // Build a snapshot with mismatched artifact task ID so projection fails.
+        let task_id = ProductTaskId::parse("task-00000000-0000-4000-8000-000000000001").unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap();
+        let binding = SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-default".into(), None);
+        let snapshot = rollshot_agent::product_task::ProductTaskSnapshot::new(
+            task_id.clone(),
+            TaskKind::SmartRedactionAuthor,
+            binding.clone(),
+            10,
+        )
+        .unwrap();
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), 10);
+        let running = snapshot.start_attempt(attempt, 20).unwrap();
+
+        // Wrong task ID in artifact metadata.
+        let wrong_task = ProductTaskId::parse("task-00000000-0000-4000-8000-999999999999").unwrap();
+        let metadata = ProductArtifactMetadata::new(
+            ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000001").unwrap(),
+            ArtifactRevision::new(1),
+            ArtifactKind::SmartRedaction,
+            1,
+            String::new(),
+            binding.clone(),
+            wrong_task,
+            TaskAttemptId::new(1),
+            run_id,
+            "proposal-00000001-0000-4000-8000-000000000000".to_owned(),
+            String::new(),
+            String::new(),
+            String::new(),
+            1,
+            0.42,
+            30,
+        );
+        let payload = SmartRedactionReviewPayload {
+            source: PayloadSourceV1 {
+                kind: "agent_run".into(),
+                validation_summary: "5 nodes".into(),
+            },
+            proposal: PayloadProposalV1 {
+                proposal_id: "proposal-00000001-0000-4000-8000-000000000000".into(),
+                candidate_count: 1,
+            },
+            dry_run: PayloadDryRunV1 {
+                candidate_count: 1,
+                affected_area: 0.42,
+            },
+            config: PayloadConfigV1 {
+                provider: "anthropic".into(),
+                model: "claude".into(),
+                payload_mode: rollshot_agent::product_task::PayloadMode::Author,
+                run_kind: "smart_redaction".into(),
+                budget_dimensions: std::collections::BTreeMap::new(),
+            },
+        };
+        let proposal_bytes = serde_json::to_vec(&workbench_proposal_with_candidate()).unwrap();
+        let corrupt_ready = running
+            .record_ready_for_review(metadata, payload, Some(proposal_bytes), 30)
+            .unwrap();
+
+        // Confirm projection fails.
+        assert!(
+            rollshot_agent::continuity::ContinuityProjectionV1::try_from(&corrupt_ready).is_err()
+        );
+
+        // Simulate restore with the corrupt snapshot.
+        let op_id = {
+            let wb = match &mut ws.mode {
+                workbench::WorkspaceMode::Workbench(wb) => wb,
+                _ => unreachable!(),
+            };
+            wb.cached_base_digest = Some([1u8; 32]);
+            wb.restore_operation_id.next()
+        };
+        let _ = update(
+            &mut ws,
+            Message::Workbench(workbench::WorkbenchMessage::TaskRestoreFinished {
+                operation_id: op_id,
+                source_binding: binding,
+                result: Some(corrupt_ready),
+            }),
+        );
+
+        let wb = match &ws.mode {
+            workbench::WorkspaceMode::Workbench(wb) => wb,
+            _ => unreachable!(),
+        };
+        assert!(
+            wb.pending_proposal.is_none(),
+            "corrupt snapshot must not populate proposal"
+        );
+        assert!(
+            wb.cached_task_snapshot.is_none(),
+            "corrupt snapshot must not cache task snapshot"
+        );
+
+        let mut ui = simulator_at(&ws, size);
+        assert!(
+            ui.find("Apply 1 redactions").is_err(),
+            "projection validation failure must not show Apply button"
         );
     }
 

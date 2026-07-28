@@ -2018,11 +2018,25 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     }
 
                     // Async path: CAS ReadyForReview → Applying.
+                    // Task 9: revalidate projection before CAS.
                     let store = workbench.task_store.as_ref().unwrap().clone();
                     let snapshot = workbench
                         .cached_task_snapshot
                         .clone()
                         .expect("task store present implies cached snapshot");
+                    let proj_valid = match rollshot_agent::continuity::ContinuityProjectionV1::try_from(&snapshot) {
+                        Ok(proj) => proj.review_state() == rollshot_agent::continuity::ReviewContinuityStateV1::PendingExactRevision,
+                        Err(_) => false,
+                    };
+                    if !proj_valid {
+                        workbench.review_operation_active = false;
+                        workbench.pending_proposal = None;
+                        workbench.review = super::workbench::CandidateReview::default();
+                        workbench.selected_candidate = None;
+                        workbench.corrections_non_empty = false;
+                        workbench.cached_task_snapshot = None;
+                        return Task::none();
+                    }
                     Task::perform(
                         async move {
                             tokio::task::spawn_blocking(move || {
@@ -2562,7 +2576,20 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                         return Task::none();
                     }
                     // Persist rejection before clearing UI.
+                    // Task 9: revalidate projection before reject CAS.
                     if let Some(snapshot) = workbench.cached_task_snapshot.as_ref() {
+                        let proj_valid = match rollshot_agent::continuity::ContinuityProjectionV1::try_from(snapshot) {
+                            Ok(proj) => proj.review_state() == rollshot_agent::continuity::ReviewContinuityStateV1::PendingExactRevision,
+                            Err(_) => false,
+                        };
+                        if !proj_valid {
+                            workbench.cached_task_snapshot = None;
+                            workbench.pending_proposal = None;
+                            workbench.review = super::workbench::CandidateReview::default();
+                            workbench.selected_candidate = None;
+                            workbench.corrections_non_empty = false;
+                            return Task::none();
+                        }
                         if let Some(store) = workbench.task_store.clone() {
                             let receipt = rollshot_agent::product_task::ReviewReceipt {
                                 artifact_id: snapshot
@@ -2653,6 +2680,21 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                     }
                     // Populate workbench from the restored snapshot.
                     if let Some(snapshot) = result {
+                        // Task 9: validate ContinuityProjectionV1 before
+                        // exposing apply. The projection must succeed and
+                        // show PendingExactRevision.
+                        let projection_ok = match rollshot_agent::continuity::ContinuityProjectionV1::try_from(&snapshot) {
+                            Ok(projection) => {
+                                projection.review_state()
+                                    == rollshot_agent::continuity::ReviewContinuityStateV1::PendingExactRevision
+                            }
+                            Err(_) => false,
+                        };
+                        if !projection_ok {
+                            return Task::none();
+                        }
+                        // Cache the snapshot for the apply CAS path.
+                        workbench.cached_task_snapshot = Some(snapshot.clone());
                         // Deserialize the stored proposal.
                         if let Some(proposal_bytes) = snapshot.pending_proposal_payload() {
                             if let Ok(proposal) = serde_json::from_slice::<

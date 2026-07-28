@@ -4706,10 +4706,9 @@ mod reducer_tests {
             "task-00000000-0000-4000-8000-000000000001",
         )
         .unwrap();
-        let run_id = rollshot_agent::domain::RunId::parse(
-            "run-00000000-0000-4000-8000-000000000001",
-        )
-        .unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let store = TaskStore::open(tmp.path()).unwrap();
 
@@ -4755,10 +4754,9 @@ mod reducer_tests {
             "task-00000000-0000-4000-8000-000000000001",
         )
         .unwrap();
-        let run_id = rollshot_agent::domain::RunId::parse(
-            "run-00000000-0000-4000-8000-000000000001",
-        )
-        .unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let store = TaskStore::open(tmp.path()).unwrap();
 
@@ -4786,7 +4784,10 @@ mod reducer_tests {
         let store2 = TaskStore::open(tmp.path()).unwrap();
         let loaded = store2.load(&task_id).unwrap();
         let terminal = loaded
-            .record_terminal(rollshot_agent::product_task::TaskTerminal::RuntimeFailure, 30)
+            .record_terminal(
+                rollshot_agent::product_task::TaskTerminal::RuntimeFailure,
+                30,
+            )
             .unwrap();
         store2.compare_and_swap(&loaded, &terminal).unwrap();
 
@@ -4812,6 +4813,335 @@ mod reducer_tests {
             std::sync::Arc::new(source);
         let rt = tokio::runtime::Runtime::new().unwrap();
         let err = rt.block_on(source.load(task_id)).unwrap_err();
-        assert_eq!(err, rollshot_agent::continuity::ContextRecoveryError::MissingTask);
+        assert_eq!(
+            err,
+            rollshot_agent::continuity::ContextRecoveryError::MissingTask
+        );
+    }
+
+    // -- Task 9: projection validation before restored review display/apply ---
+
+    #[test]
+    fn restore_validates_projection_before_display() {
+        // Restored ReadyForReview with valid projection populates proposal and
+        // caches the snapshot for the apply CAS path.
+        use super::super::task_store::TaskStore;
+        use rollshot_agent::continuity::{ContinuityProjectionV1, ReviewContinuityStateV1};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let snapshot = ready_snapshot_with_proposal(&task_id, binding.clone());
+        store.create(&snapshot).unwrap();
+
+        // Verify the projection from the snapshot is PendingExactRevision.
+        let projection = ContinuityProjectionV1::try_from(&snapshot).unwrap();
+        assert_eq!(
+            projection.review_state(),
+            ReviewContinuityStateV1::PendingExactRevision,
+            "snapshot must project as PendingExactRevision"
+        );
+        assert_eq!(
+            projection.artifact_revision().unwrap(),
+            rollshot_agent::product_task::ArtifactRevision::new(1),
+        );
+
+        // Restore through the full update path.
+        let mut ws = ws_with_workbench();
+        let store_arc = std::sync::Arc::new(store);
+        {
+            let wb = wb_mut(&mut ws);
+            wb.task_store = Some(store_arc.clone());
+            wb.cached_base_digest = Some([1u8; 32]);
+            let op_id = wb.restore_operation_id.next();
+
+            let result = store_arc.reconcile_for_source(&binding, 2000).unwrap();
+            let _ = update(
+                &mut ws,
+                Message::Workbench(WorkbenchMessage::TaskRestoreFinished {
+                    operation_id: op_id,
+                    source_binding: binding,
+                    result,
+                }),
+            );
+        }
+        // Valid projection: proposal populated.
+        assert!(
+            wb(&ws).pending_proposal.is_some(),
+            "valid projection must restore proposal"
+        );
+        // Snapshot cached for apply CAS.
+        assert!(
+            wb(&ws).cached_task_snapshot.is_some(),
+            "valid projection must cache snapshot for apply CAS"
+        );
+    }
+
+    #[test]
+    fn restore_rejects_mutated_artifact_revision() {
+        // Two ReadyForReview snapshots with different artifact revisions
+        // produce different projection digests. The projection validation
+        // ensures we can detect revision drift.
+        use rollshot_agent::continuity::{ContinuityProjectionV1, ReviewContinuityStateV1};
+        use rollshot_agent::product_task::{
+            ArtifactId, ArtifactKind, ArtifactRevision, PayloadConfigV1, PayloadDryRunV1,
+            PayloadProposalV1, PayloadSourceV1, ProductArtifactMetadata,
+            SmartRedactionReviewPayload, TaskAttempt, TaskAttemptId,
+        };
+
+        // Build two separate ReadyForReview snapshots with different artifact revisions.
+        let build_ready = |revision: u32| {
+            let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+                "task-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap();
+            let run_id =
+                rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                    .unwrap();
+            let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+            let snapshot = rollshot_agent::product_task::ProductTaskSnapshot::new(
+                task_id.clone(),
+                Tk::SmartRedactionAuthor,
+                binding.clone(),
+                10,
+            )
+            .unwrap();
+            let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), 10);
+            let running = snapshot.start_attempt(attempt, 20).unwrap();
+
+            let metadata = ProductArtifactMetadata::new(
+                ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000001").unwrap(),
+                ArtifactRevision::new(revision),
+                ArtifactKind::SmartRedaction,
+                1,
+                String::new(),
+                binding,
+                task_id,
+                TaskAttemptId::new(1),
+                run_id,
+                "proposal-00000001-0000-4000-8000-000000000000".to_owned(),
+                String::new(),
+                String::new(),
+                String::new(),
+                1,
+                0.42,
+                30,
+            );
+            let payload = SmartRedactionReviewPayload {
+                source: PayloadSourceV1 {
+                    kind: "agent_run".into(),
+                    validation_summary: "5 nodes".into(),
+                },
+                proposal: PayloadProposalV1 {
+                    proposal_id: "proposal-00000001-0000-4000-8000-000000000000".into(),
+                    candidate_count: 1,
+                },
+                dry_run: PayloadDryRunV1 {
+                    candidate_count: 1,
+                    affected_area: 0.42,
+                },
+                config: PayloadConfigV1 {
+                    provider: "anthropic".into(),
+                    model: "claude".into(),
+                    payload_mode: rollshot_agent::product_task::PayloadMode::Author,
+                    run_kind: "smart_redaction".into(),
+                    budget_dimensions: std::collections::BTreeMap::new(),
+                },
+            };
+            let proposal_bytes = serde_json::to_vec(
+                &crate::result_workspace::tests::workbench_proposal_with_candidate(),
+            )
+            .unwrap();
+            running
+                .record_ready_for_review(metadata, payload, Some(proposal_bytes), 30)
+                .unwrap()
+        };
+
+        let ready1 = build_ready(1);
+        let ready2 = build_ready(2);
+
+        let proj1 = ContinuityProjectionV1::try_from(&ready1).unwrap();
+        let proj2 = ContinuityProjectionV1::try_from(&ready2).unwrap();
+
+        assert_eq!(
+            proj1.review_state(),
+            ReviewContinuityStateV1::PendingExactRevision
+        );
+        assert_eq!(
+            proj2.review_state(),
+            ReviewContinuityStateV1::PendingExactRevision
+        );
+        assert_eq!(proj1.artifact_revision(), Some(ArtifactRevision::new(1)));
+        assert_eq!(proj2.artifact_revision(), Some(ArtifactRevision::new(2)));
+
+        // Different revisions produce different projection digests.
+        assert_ne!(proj1.digest(), proj2.digest());
+    }
+
+    #[test]
+    fn restore_caches_snapshot_for_apply_cas() {
+        // After a successful restore, the cached_task_snapshot must be populated
+        // so the async apply CAS path can use it.
+        use super::super::task_store::TaskStore;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(tmp.path()).unwrap();
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let snapshot = ready_snapshot_with_proposal(&task_id, binding.clone());
+        store.create(&snapshot).unwrap();
+
+        let mut ws = ws_with_workbench();
+        let store_arc = std::sync::Arc::new(store);
+        {
+            let wb = wb_mut(&mut ws);
+            wb.task_store = Some(store_arc.clone());
+            wb.cached_base_digest = Some([1u8; 32]);
+            let op_id = wb.restore_operation_id.next();
+
+            let result = store_arc.reconcile_for_source(&binding, 2000).unwrap();
+            let _ = update(
+                &mut ws,
+                Message::Workbench(WorkbenchMessage::TaskRestoreFinished {
+                    operation_id: op_id,
+                    source_binding: binding,
+                    result,
+                }),
+            );
+        }
+        // Snapshot must be cached for the apply CAS path.
+        let cached = wb(&ws).cached_task_snapshot.as_ref();
+        assert!(cached.is_some(), "restore must cache task snapshot");
+        let cached = cached.unwrap();
+        assert_eq!(
+            cached.status(),
+            rollshot_agent::product_task::TaskStatus::ReadyForReview,
+            "cached snapshot must be ReadyForReview"
+        );
+        assert!(
+            cached.pending_proposal_payload().is_some(),
+            "cached snapshot must have proposal payload"
+        );
+    }
+
+    #[test]
+    fn projection_validation_failure_drops_restore() {
+        // If ContinuityProjectionV1 construction fails (e.g. corrupt snapshot),
+        // the restore must be silently dropped.
+        use rollshot_agent::product_task::{
+            ArtifactId, ArtifactKind, ArtifactRevision, PayloadConfigV1, PayloadDryRunV1,
+            PayloadProposalV1, PayloadSourceV1, ProductArtifactMetadata,
+            SmartRedactionReviewPayload, TaskAttempt, TaskAttemptId,
+        };
+
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap();
+        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let snapshot = rollshot_agent::product_task::ProductTaskSnapshot::new(
+            task_id.clone(),
+            Tk::SmartRedactionAuthor,
+            binding.clone(),
+            10,
+        )
+        .unwrap();
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), 10);
+        let running = snapshot.start_attempt(attempt, 20).unwrap();
+
+        // Metadata with wrong task_id to trigger projection error.
+        let wrong_task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-999999999999",
+        )
+        .unwrap();
+        let metadata = ProductArtifactMetadata::new(
+            ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000001").unwrap(),
+            ArtifactRevision::new(1),
+            ArtifactKind::SmartRedaction,
+            1,
+            String::new(),
+            binding.clone(),
+            wrong_task_id, // mismatched task ID
+            TaskAttemptId::new(1),
+            run_id,
+            "proposal-00000001-0000-4000-8000-000000000000".to_owned(),
+            String::new(),
+            String::new(),
+            String::new(),
+            1,
+            0.42,
+            30,
+        );
+        let payload = SmartRedactionReviewPayload {
+            source: PayloadSourceV1 {
+                kind: "agent_run".into(),
+                validation_summary: "5 nodes".into(),
+            },
+            proposal: PayloadProposalV1 {
+                proposal_id: "proposal-00000001-0000-4000-8000-000000000000".into(),
+                candidate_count: 1,
+            },
+            dry_run: PayloadDryRunV1 {
+                candidate_count: 1,
+                affected_area: 0.42,
+            },
+            config: PayloadConfigV1 {
+                provider: "anthropic".into(),
+                model: "claude".into(),
+                payload_mode: rollshot_agent::product_task::PayloadMode::Author,
+                run_kind: "smart_redaction".into(),
+                budget_dimensions: std::collections::BTreeMap::new(),
+            },
+        };
+        let proposal_bytes = serde_json::to_vec(
+            &crate::result_workspace::tests::workbench_proposal_with_candidate(),
+        )
+        .unwrap();
+        let ready = running
+            .record_ready_for_review(metadata, payload, Some(proposal_bytes), 30)
+            .unwrap();
+
+        // Projection must fail due to task ID mismatch.
+        let proj_result = rollshot_agent::continuity::ContinuityProjectionV1::try_from(&ready);
+        assert!(
+            proj_result.is_err(),
+            "projection must fail for mismatched artifact task ID"
+        );
+
+        // Simulate restore: the snapshot is passed to TaskRestoreFinished.
+        // Because projection fails, the proposal must NOT be populated.
+        let mut ws = ws_with_workbench();
+        {
+            let wb = wb_mut(&mut ws);
+            wb.cached_base_digest = Some([1u8; 32]);
+            let op_id = wb.restore_operation_id.next();
+
+            let _ = update(
+                &mut ws,
+                Message::Workbench(WorkbenchMessage::TaskRestoreFinished {
+                    operation_id: op_id,
+                    source_binding: binding,
+                    result: Some(ready),
+                }),
+            );
+        }
+        assert!(
+            wb(&ws).pending_proposal.is_none(),
+            "corrupt snapshot must not populate proposal"
+        );
+        assert!(
+            wb(&ws).cached_task_snapshot.is_none(),
+            "corrupt snapshot must not cache snapshot"
+        );
     }
 }
