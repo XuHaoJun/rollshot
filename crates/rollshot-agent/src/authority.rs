@@ -808,9 +808,12 @@ mod tests {
 
     #[test]
     fn run_mismatch_is_checked_before_the_subject() {
-        // Order matters: authorize_tool checks run_id first (authority.rs:181),
-        // so a wrong run on a matching subject must not read as a subject
-        // mismatch.
+        // Order matters: authorize_tool checks run_id first (authorize_tool line 181),
+        // then checks subject (line 184).
+        //
+        // Case 1 (matching subject, mismatched run): Proves RunMismatch is detected.
+        // Cannot distinguish check order: since subject matches, both orderings would
+        // reach the run_id check and fail.
         let subject = AuthoritySubject::ActionGuideEphemeralGuide {
             guide_digest: "ee".repeat(32),
         };
@@ -827,6 +830,19 @@ mod tests {
 
         assert!(matches!(
             snapshot.authorize_tool(&other_run, &subject, RunOperation::SubmitReviewCandidate),
+            Err(AuthorityError::RunMismatch)
+        ));
+
+        // Case 2 (both run and subject mismatched): Distinguishes check order.
+        // With run_id checked first: must return RunMismatch.
+        // If checks were swapped (subject first): would return DocumentBindingMismatch.
+        let wrong_subject = AuthoritySubject::Document(document_binding());
+        assert!(matches!(
+            snapshot.authorize_tool(
+                &other_run,
+                &wrong_subject,
+                RunOperation::SubmitReviewCandidate
+            ),
             Err(AuthorityError::RunMismatch)
         ));
     }
