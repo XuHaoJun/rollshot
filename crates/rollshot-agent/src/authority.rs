@@ -808,7 +808,7 @@ mod tests {
 
     #[test]
     fn run_mismatch_is_checked_before_the_subject() {
-        // Order matters: authorize_tool checks run_id first (authority.rs:162),
+        // Order matters: authorize_tool checks run_id first (authority.rs:181),
         // so a wrong run on a matching subject must not read as a subject
         // mismatch.
         let subject = AuthoritySubject::ActionGuideEphemeralGuide {
