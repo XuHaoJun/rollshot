@@ -1474,7 +1474,7 @@ the hash formula. No production code changes here.
 - Produces: a recorded finding. If the finding is negative, Task 8 uses the
   fallback described in its Step 3.
 
-- [ ] **Step 1: Search for every persisted-digest comparison**
+- [x] **Step 1: Search for every persisted-digest comparison**
 
 ```bash
 rtk grep -rn "snapshot_digest\|document_binding_digest\|binding_digest_hex" crates/ --include="*.rs"
@@ -1521,14 +1521,17 @@ changed). `product_task.rs` sites, missed by the first pass, are added below.
 substring of a freshly-rebuilt `ContinuityProjectionV1`'s canonical bytes. That
 projection copies `contract.authority.snapshot_digest` verbatim from a
 `ProductTaskSnapshot` reloaded from disk — also never recomputed. Traced to the
-sole production caller (`rollshot-app`'s
+sole caller that constructs `Durable` (`rollshot-app`'s
 `result_workspace/workbench/run.rs:1229`-1334): the `authority`/`skill_use`
 objects are the same live, in-memory instances held for the entire
 `run_with_provider` call, including through in-run overflow-recovery restarts,
 and the run contract they are checked against was written to disk by this same
 run moments earlier. Neither side recomputes a digest from a loaded snapshot;
 the check fails closed (`ContextRecoveryFailure`) on any mismatch rather than
-silently accepting stale data. Safe.
+silently accepting stale data. The other two production callers of
+`run_with_provider` (`result_workspace/workbench/eval/record.rs:382` and
+`result_workspace/workbench/eval/layer1.rs:146`) pass `RunContinuitySource::Unavailable`
+and therefore never reach the digest comparison. Safe.
 
 **Note B — is `ContinuityProjectionV1` ever persisted (§ task instructions
 point 1)?** No. It has no `Deserialize` impl and no on-disk representation;
@@ -1563,7 +1566,7 @@ and compares it against a persisted string. Task 8 may therefore give the
 `Document` arm a `b"rollshot-authority-subject-document-v1\0"` separator. Record
 this verdict in Task 22 Step 2.
 
-- [ ] **Step 2: Write the pinning test**
+- [x] **Step 2: Write the pinning test**
 
 ```rust
     #[test]

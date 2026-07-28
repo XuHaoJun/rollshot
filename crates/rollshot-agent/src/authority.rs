@@ -514,13 +514,21 @@ mod tests {
 
     #[test]
     fn persisted_authority_digest_is_never_recomputed_for_comparison() {
-        // A digest is stable for a given snapshot, so recomputation is
-        // indistinguishable from reuse unless the formula changes. This test
-        // pins the property the migration depends on: nothing outside this
-        // module derives a digest to check against a stored one.
+        // **What this test pins:** `digest()` returns a cached value rather than
+        // recomputing, and `receipt()` reports the same digest string the snapshot
+        // reports. Both are in-memory properties of this module.
         //
-        // Verified by the Step 1 audit. If a future change adds such a
-        // comparison, it must also add a formula-version field.
+        // **What this test cannot pin, and what does:** No code elsewhere recomputes
+        // a digest and compares it to a persisted one. That is established by the
+        // Task 7 audit, whose classification table lives in
+        // `docs/superpowers/plans/2026-07-28-action-guide-agent-foundation-captions.md`
+        // under Task 7 — and structurally by the fact that `AuthoritySnapshot` has
+        // no `Deserialize` impl, so a snapshot cannot be reconstructed from persisted
+        // state at all.
+        //
+        // **Why it matters:** If a future change adds such a comparison, it must also
+        // add a formula-version field, because changing the hash inputs otherwise
+        // invalidates every stored receipt.
         let snapshot = full_snapshot();
         let first = snapshot.digest().to_string();
         let receipt = snapshot.receipt(1_000);
@@ -532,9 +540,8 @@ mod tests {
             "digest must be cached, not recomputed"
         );
 
-        // Two snapshots built from identical inputs agree, so a receipt loaded
-        // from disk is comparable to a freshly built one only while the formula
-        // is unchanged. That is the property the migration relies on.
+        // Two snapshots built from identical inputs produce the same digest,
+        // confirming the in-memory caching and determinism properties.
         assert_eq!(full_snapshot().digest(), first);
     }
 
