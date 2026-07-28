@@ -1661,19 +1661,18 @@ fn update_inner(state: &mut super::ResultWorkspace, message: Message) -> Task<Me
                 if let Ok(cfg) = super::workbench::load_provider_config(&config_dir) {
                     wb.provider_config = cfg;
                 }
-                match super::workbench::task_store::TaskStore::open(&config_dir) {
-                    Ok(store) => wb.task_store = Some(std::sync::Arc::new(store)),
-                    Err(e) => {
-                        // Without a store there is no durable task state and
-                        // no audit journal. Say so instead of silently
-                        // running unpersisted and unaudited.
-                        tracing::error!(
-                            target: "rollshot::app::agent_audit_store",
-                            error = %e,
-                            "task store unavailable: run will not be persisted or audited"
-                        );
+                // Usually already opened once at boot (see `run`). Some
+                // `ResultWorkspace` hosts (e.g. the macOS product embedding)
+                // never go through `run`, so open lazily here exactly once
+                // and cache the outcome for any later re-entry.
+                let result = state
+                    .agent_task_store
+                    .get_or_insert_with(|| super::open_agent_task_store(&config_dir));
+                match result {
+                    Ok(store) => wb.task_store = Some(store.clone()),
+                    Err(message) => {
                         wb.error = Some(super::workbench::WorkbenchError::StorePersist {
-                            message: format!("task store unavailable: {e}"),
+                            message: message.clone(),
                         });
                     }
                 }
@@ -3903,6 +3902,33 @@ mod tests {
             None,
             None,
         )
+    }
+
+    #[test]
+    fn smart_redaction_preserves_store_open_failure_message() {
+        // A store that cannot be opened must still surface the same
+        // `WorkbenchError::StorePersist` message as before the move to
+        // `crate::agent_store`, whether the failure was cached at boot or
+        // discovered lazily here.
+        let mut state = workspace();
+        state.agent_task_store = Some(Err("task store unavailable: lock contention".to_owned()));
+
+        let _ = update(&mut state, Message::SmartRedaction);
+
+        let wb = match &state.mode {
+            super::super::workbench::WorkspaceMode::Workbench(wb) => wb,
+            _ => panic!("SmartRedaction must enter Workbench mode"),
+        };
+        assert!(
+            matches!(
+                &wb.error,
+                Some(super::super::workbench::WorkbenchError::StorePersist { message })
+                    if message == "task store unavailable: lock contention"
+            ),
+            "expected StorePersist error, got {:?}",
+            wb.error
+        );
+        assert!(wb.task_store.is_none());
     }
 
     #[test]

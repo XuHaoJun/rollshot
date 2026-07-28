@@ -754,7 +754,7 @@ pub(crate) fn build_authoring_tool_registry(
 /// Returns silently on success or store error (the store error is not
 /// surfaced to the user — the `RunFailed` message carries the real cause).
 async fn persist_terminal_if_possible(
-    task_store: Option<Arc<super::task_store::TaskStore>>,
+    task_store: Option<Arc<crate::agent_store::TaskStore>>,
     task_id: &rollshot_agent::product_task::ProductTaskId,
     _run_id: &rollshot_agent::domain::RunId,
     error: &WorkbenchError,
@@ -785,7 +785,7 @@ async fn persist_terminal_if_possible(
 /// failed — caller should yield a bounded `StorePersist` error and suppress
 /// the proposal.
 async fn persist_terminal_outcome(
-    task_store: Option<Arc<super::task_store::TaskStore>>,
+    task_store: Option<Arc<crate::agent_store::TaskStore>>,
     task_id: &rollshot_agent::product_task::ProductTaskId,
     _run_id: &rollshot_agent::domain::RunId,
     proposal_id_str: &str,
@@ -972,7 +972,7 @@ pub fn start_agent_run(
     budget: &RunBudget,
     session: rollshot_agent::domain::AgentSession,
     payload_mode: PayloadMode,
-    task_store: Option<Arc<super::task_store::TaskStore>>,
+    task_store: Option<Arc<crate::agent_store::TaskStore>>,
 ) -> Result<
     (
         iced::Task<crate::result_workspace::Message>,
@@ -1267,7 +1267,7 @@ pub fn start_agent_run(
             let bind_result = tokio::task::spawn_blocking(move || {
                 let current = store_clone.load(&task_id_clone)?;
                 let bound = current.bind_run_contract(contract, now)
-                    .map_err(|e| super::task_store::TaskStoreError::PreCommit {
+                    .map_err(|e| crate::agent_store::TaskStoreError::PreCommit {
                         reason: format!("bind run contract: {e}"),
                     })?;
                 store_clone.transition_audited(&current, &bound, event_id, now)
@@ -1329,7 +1329,7 @@ pub fn start_agent_run(
                                 rollshot_agent::continuity::RunContinuitySource::Durable {
                                     expected: Box::new(projection),
                                     source: std::sync::Arc::new(
-                                        super::task_store::TaskStoreContinuitySource::new(store.clone()),
+                                        crate::agent_store::TaskStoreContinuitySource::new(store.clone()),
                                     ),
                                 }
                             }
@@ -1496,9 +1496,9 @@ pub fn start_agent_run(
         let sink = ChannelEventSink { tx };
 
         // Build audit sink from task store if available.
-        let audit_sink: Option<super::audit_store::TaskAuditSink> =
+        let audit_sink: Option<crate::agent_store::TaskAuditSink> =
             task_store.as_ref().map(|store| {
-                super::audit_store::TaskAuditSink::new(store.clone())
+                crate::agent_store::TaskAuditSink::new(store.clone())
             });
 
         // B4: tokio::spawn inside the stream block (runtime context).
@@ -3422,7 +3422,7 @@ mod reducer_tests {
 
     #[test]
     fn running_is_persisted_before_setup() {
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
         use rollshot_agent::product_task::{
             ProductTaskSnapshot, SourceBinding, TaskAttempt, TaskAttemptId, TaskKind,
         };
@@ -3465,7 +3465,7 @@ mod reducer_tests {
 
     #[test]
     fn ready_artifact_precedes_correlated_terminal() {
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
         use rollshot_agent::product_task::{
             ArtifactId, ArtifactKind, ArtifactRevision, PayloadConfigV1, PayloadDryRunV1,
             PayloadProposalV1, PayloadSourceV1, ProductArtifactMetadata, ProductTaskSnapshot,
@@ -3556,7 +3556,7 @@ mod reducer_tests {
 
     #[test]
     fn store_precommit_failure_delivers_no_proposal() {
-        use super::super::task_store::{Failpoint, TaskStore};
+        use crate::agent_store::{Failpoint, TaskStore};
         use rollshot_agent::product_task::{
             ProductTaskSnapshot, SourceBinding, TaskAttempt, TaskAttemptId, TaskKind,
         };
@@ -3608,7 +3608,7 @@ mod reducer_tests {
 
     #[tokio::test]
     async fn setup_failure_persists_terminal() {
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
         use rollshot_agent::product_task::{
             ProductTaskSnapshot, SourceBinding, TaskAttempt, TaskAttemptId, TaskKind, TaskStatus,
             TaskTerminal,
@@ -3886,7 +3886,7 @@ mod reducer_tests {
     #[test]
     fn restore_compatible_review() {
         // 1. matching content restores exact artifact without provider call.
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
 
         let tmp = tempfile::tempdir().unwrap();
         let store = TaskStore::open(tmp.path()).unwrap();
@@ -3933,7 +3933,7 @@ mod reducer_tests {
     fn same_state_different_image_is_ignored() {
         // 2. unrelated image with same state ID is ignored;
         //    its task remains ReadyForReview (not restored, not stale).
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
 
         let tmp = tempfile::tempdir().unwrap();
         let store = TaskStore::open(tmp.path()).unwrap();
@@ -3964,7 +3964,7 @@ mod reducer_tests {
     #[test]
     fn same_image_changed_annotations_marks_stale() {
         // 3. same image, different annotation state → task marked stale.
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
 
         let tmp = tempfile::tempdir().unwrap();
         let store = TaskStore::open(tmp.path()).unwrap();
@@ -3993,7 +3993,7 @@ mod reducer_tests {
     #[test]
     fn running_becomes_interrupted_on_reconcile() {
         // 4. running/applying → interrupted on reconcile_for_source.
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
         use rollshot_agent::product_task::{ProductTaskSnapshot, TaskAttempt, TaskAttemptId};
 
         let tmp = tempfile::tempdir().unwrap();
@@ -4079,7 +4079,7 @@ mod reducer_tests {
         // transaction is aborted and no committed event exists. The run
         // launch path returns before dispatch on this error, so no
         // AttemptStarted evidence can follow it.
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
         use rollshot_agent::audit::AuditEventV1;
         use rollshot_agent::product_task::ProductTaskSnapshot;
 
@@ -4141,7 +4141,7 @@ mod reducer_tests {
         // conflict), the audit transaction is aborted and no ArtifactPromoted
         // event is committed.  We force a CAS conflict by advancing the
         // store via a second handle before the audited transition.
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
         use rollshot_agent::audit::AuditEventV1;
         use rollshot_agent::product_task::{
             ProductTaskSnapshot, TaskAttempt, TaskAttemptId, TaskTerminal,
@@ -4211,7 +4211,7 @@ mod reducer_tests {
         // When the provider returns a failure (e.g. ProviderFailure),
         // the terminal is a failure state, not ReadyForReview.
         // This means no ArtifactPromoted audit event could be committed.
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
         use rollshot_agent::product_task::{
             ProductTaskSnapshot, TaskAttempt, TaskAttemptId, TaskTerminal,
         };
@@ -4664,7 +4664,7 @@ mod reducer_tests {
         // This test exercises both the in-memory reducer and the store-level
         // CAS path to prove that contract binding is a prerequisite for
         // promotion at every level of the run flow.
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
         use rollshot_agent::product_task::{ProductTaskSnapshot, TaskAttempt, TaskAttemptId};
 
         let task_id = rollshot_agent::product_task::ProductTaskId::parse(
@@ -4804,7 +4804,7 @@ mod reducer_tests {
         // Running and no ReadyForReview is produced.  Additionally verifies
         // that promotion is suppressed (no provider could have run) by
         // attempting record_ready_for_review on the CAS-failed store state.
-        use super::super::task_store::{Failpoint, TaskStore};
+        use crate::agent_store::{Failpoint, TaskStore};
         use rollshot_agent::product_task::{ProductTaskSnapshot, TaskAttempt, TaskAttemptId};
 
         let tmp = tempfile::tempdir().unwrap();
@@ -5006,7 +5006,7 @@ mod reducer_tests {
         // in the contract matches.  The store's CAS compares
         // snapshot_revision: a stale snapshot has a lower revision and
         // therefore loses the CAS race.
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
         use rollshot_agent::product_task::{ProductTaskSnapshot, TaskAttempt, TaskAttemptId};
 
         let task_id = rollshot_agent::product_task::ProductTaskId::parse(
@@ -5082,7 +5082,7 @@ mod reducer_tests {
 
     #[test]
     fn continuity_source_loads_exact_snapshot_after_cas_bind() {
-        use super::super::task_store::{TaskStore, TaskStoreContinuitySource};
+        use crate::agent_store::{TaskStore, TaskStoreContinuitySource};
         use rollshot_agent::product_task::{ProductTaskSnapshot, TaskAttempt, TaskAttemptId};
 
         let task_id = rollshot_agent::product_task::ProductTaskId::parse(
@@ -5130,7 +5130,7 @@ mod reducer_tests {
 
     #[test]
     fn continuity_source_reload_reflects_store_changes() {
-        use super::super::task_store::{TaskStore, TaskStoreContinuitySource};
+        use crate::agent_store::{TaskStore, TaskStoreContinuitySource};
         use rollshot_agent::product_task::{ProductTaskSnapshot, TaskAttempt, TaskAttemptId};
 
         let task_id = rollshot_agent::product_task::ProductTaskId::parse(
@@ -5182,7 +5182,7 @@ mod reducer_tests {
 
     #[test]
     fn continuity_source_returns_missing_for_empty_store() {
-        use super::super::task_store::{TaskStore, TaskStoreContinuitySource};
+        use crate::agent_store::{TaskStore, TaskStoreContinuitySource};
 
         let task_id = rollshot_agent::product_task::ProductTaskId::parse(
             "task-00000000-0000-4000-8000-000000000001",
@@ -5208,7 +5208,7 @@ mod reducer_tests {
     fn restore_validates_projection_before_display() {
         // Restored ReadyForReview with valid projection populates proposal and
         // caches the snapshot for the apply CAS path.
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
         use rollshot_agent::continuity::{ContinuityProjectionV1, ReviewContinuityStateV1};
 
         let tmp = tempfile::tempdir().unwrap();
@@ -5374,7 +5374,7 @@ mod reducer_tests {
     fn restore_caches_snapshot_for_apply_cas() {
         // After a successful restore, the cached_task_snapshot must be populated
         // so the async apply CAS path can use it.
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
 
         let tmp = tempfile::tempdir().unwrap();
         let store = TaskStore::open(tmp.path()).unwrap();
@@ -5551,7 +5551,7 @@ mod dropped_display_events {
     //! product must still repair visible state from the authoritative task
     //! snapshot — never from audit history.
 
-    use super::super::task_store::TaskStore;
+    use crate::agent_store::TaskStore;
     use rollshot_agent::audit::AuditEventId;
     use rollshot_agent::continuity::{ContinuityProjectionV1, ReviewContinuityStateV1};
     use rollshot_agent::product_task::{

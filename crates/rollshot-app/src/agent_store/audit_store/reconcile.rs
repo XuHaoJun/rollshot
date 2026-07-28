@@ -124,7 +124,7 @@ mod tests {
     };
     use rollshot_agent::product_task::ProductTaskId;
 
-    use crate::result_workspace::workbench::audit_store::record::{
+    use crate::agent_store::audit_store::record::{
         AuditAbortCategory, AuditTransactionId, PreparedTransactionV1,
     };
 

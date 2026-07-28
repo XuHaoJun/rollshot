@@ -157,6 +157,17 @@ pub struct ResultWorkspace {
     pub(crate) annotation_defaults: AnnotationDefaultsState,
     /// Pixelate preview cache: keys → RGBA handles, LRU eviction.
     pub(crate) pixelate_previews: PixelatePreviewCache,
+    /// Result of opening the process-wide agent task store, cached so
+    /// `Message::SmartRedaction` never opens more than one instance per
+    /// process: `TaskStore::acquire_lock` takes a blocking per-operation file
+    /// lock, and two live instances in one process are unrelated holders to
+    /// flock — they block each other and nested acquisition self-deadlocks.
+    /// `None` means no attempt has been made yet (e.g. `run` hasn't opened it
+    /// — the macOS product embedding constructs `ResultWorkspace` directly —
+    /// or config-dir resolution isn't available); `Message::SmartRedaction`
+    /// opens it lazily exactly once in that case and caches the outcome here.
+    pub(crate) agent_task_store:
+        Option<Result<std::sync::Arc<crate::agent_store::TaskStore>, String>>,
 }
 
 impl ResultWorkspace {
@@ -258,6 +269,7 @@ impl ResultWorkspace {
                 warning_reported: false,
             },
             pixelate_previews: PixelatePreviewCache::new(64 * 1024 * 1024),
+            agent_task_store: None,
             document,
             message,
             image_handle,
@@ -364,6 +376,29 @@ pub(crate) fn build_display_handle(source: &RgbaImage, scale: f32) -> ImageHandl
 }
 
 // ---------------------------------------------------------------------------
+// Agent task store
+// ---------------------------------------------------------------------------
+
+/// Open the process-wide agent task store, formatting the exact user-visible
+/// failure message `Message::SmartRedaction` surfaces as
+/// `WorkbenchError::StorePersist`.
+///
+/// Without a store there is no durable task state and no audit journal, so
+/// failures are logged instead of silently running unpersisted and unaudited.
+fn open_agent_task_store(
+    config_dir: &std::path::Path,
+) -> Result<std::sync::Arc<crate::agent_store::TaskStore>, String> {
+    crate::agent_store::open_process_store(config_dir).map_err(|e| {
+        tracing::error!(
+            target: "rollshot::app::agent_audit_store",
+            error = %e,
+            "task store unavailable: run will not be persisted or audited"
+        );
+        format!("task store unavailable: {e}")
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Runner (Linux standalone window)
 // ---------------------------------------------------------------------------
 
@@ -384,10 +419,14 @@ pub fn run(document: ResultDocument, initial_error: Option<String>) -> Result<()
             .unwrap()
             .take()
             .expect("result workspace boot data already consumed");
-        (
-            ResultWorkspace::new(document, initial_error).with_initial_viewport(INITIAL_VIEWPORT),
-            iced::Task::none(),
-        )
+        let mut ws =
+            ResultWorkspace::new(document, initial_error).with_initial_viewport(INITIAL_VIEWPORT);
+        // Open the process-wide task store exactly once, at boot, so it is
+        // never reopened when the user enters Smart Redaction.
+        if let Ok(config_dir) = crate::daemon::config::rollshot_config_dir() {
+            ws.agent_task_store = Some(open_agent_task_store(&config_dir));
+        }
+        (ws, iced::Task::none())
     };
 
     iced::application(boot, update, view)

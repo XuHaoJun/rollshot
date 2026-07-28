@@ -23,7 +23,7 @@ use rollshot_agent::audit::{
 };
 use rollshot_agent::product_task::{ProductTaskId, ProductTaskSnapshot, SourceBinding, TaskStatus};
 
-use crate::result_workspace::workbench::audit_store::{
+use super::audit_store::{
     reconcile::{classify_unresolved, ReconcileDecision},
     record,
     record::{AuditAbortCategory, AuditTransactionId, JournalPayloadV1, PreparedTransactionV1},
