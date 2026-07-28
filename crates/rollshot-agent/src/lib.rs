@@ -1,6 +1,7 @@
 pub mod authority;
 pub mod domain;
 pub mod driver;
+pub mod jobs;
 pub mod model;
 pub mod product_task;
 pub(crate) mod provider;
