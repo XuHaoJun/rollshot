@@ -974,7 +974,7 @@ mod tests {
         ActionRecorder, CandidateKind, CandidateStep, CaptureRegion, DetectReason, DetectorConfig,
         FrameStore, InputCapability, InputSourceKind, Recording, StoreConfig,
         VisualAnnotationPayload, VisualAnnotationProposal, VisualAnnotationProposalId,
-        VisualAnnotationSuggestionDraft, VisualAnnotationSuggestionId,
+        VisualAnnotationProposalOrigin, VisualAnnotationSuggestionDraft, VisualAnnotationSuggestionId,
     };
 
     fn region_32() -> CaptureRegion {
@@ -1059,10 +1059,15 @@ mod tests {
         VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            VisualAnnotationProposalOrigin::EphemeralGuide {
+                guide_digest: "aa".repeat(32),
+            },
             step,
             doc.document.state_id(),
             image.width(),
             image.height(),
+            [1u8; 32],
+            [2u8; 32],
             vec![
                 VisualAnnotationSuggestionDraft {
                     id: VisualAnnotationSuggestionId(1),
@@ -2867,10 +2872,15 @@ mod tests {
             let proposal = rollshot_action::VisualAnnotationProposal::from_agent_drafts(
                 rollshot_action::VisualAnnotationProposalId(1),
                 1,
+                rollshot_action::VisualAnnotationProposalOrigin::EphemeralGuide {
+                    guide_digest: "aa".repeat(32),
+                },
                 &step,
                 doc.document.state_id(),
                 image.width(),
                 image.height(),
+                [1u8; 32],
+                [2u8; 32],
                 vec![rollshot_action::VisualAnnotationSuggestionDraft {
                     id: suggestion_id,
                     payload: rollshot_action::VisualAnnotationPayload::TextNote {

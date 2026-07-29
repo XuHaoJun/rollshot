@@ -1762,6 +1762,34 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             };
             let document_state_id = doc.document.state_id();
             let image = doc.document.source().clone();
+            let image_width = image.width();
+            let image_height = image.height();
+
+            // Compute keyframe digest: SHA-256("rollshot-action-guide-keyframe-v1\0" || width_le || height_le || raw_rgba)
+            let keyframe_sha256 = {
+                use sha2::{Digest, Sha256};
+                let mut hasher = Sha256::new();
+                hasher.update(b"rollshot-action-guide-keyframe-v1\0");
+                hasher.update(image_width.to_le_bytes());
+                hasher.update(image_height.to_le_bytes());
+                hasher.update(image.as_raw());
+                hasher.finalize().into()
+            };
+
+            // Annotation-state digest: SHA-256("rollshot-action-guide-annotations-v1\0" || annotations_json)
+            let annotation_state_sha256 = {
+                use sha2::{Digest, Sha256};
+                let annotations_json = serde_json::to_vec(doc.document.annotations())
+                    .unwrap_or_default();
+                let mut hasher = Sha256::new();
+                hasher.update(b"rollshot-action-guide-annotations-v1\0");
+                hasher.update(&annotations_json);
+                hasher.finalize().into()
+            };
+
+            let origin = rollshot_action::VisualAnnotationProposalOrigin::EphemeralGuide {
+                guide_digest: "00".repeat(32),
+            };
             let adapter = match crate::result_workspace::workbench::build_adapter(&cfg) {
                 Ok(adapter) => adapter,
                 Err(error) => {
@@ -1787,9 +1815,12 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             );
             let input = super::visual_annotation_agent::VisualAnnotationTaskInput {
                 run_id,
+                origin,
                 step,
                 document_state_id,
                 image,
+                keyframe_sha256,
+                annotation_state_sha256,
             };
             Update::task(Task::perform(
                 super::visual_annotation_agent::suggest_visual_annotation_task(
@@ -6365,10 +6396,15 @@ mod tests {
         VisualAnnotationProposal::from_agent_drafts(
             rollshot_action::VisualAnnotationProposalId(run_id),
             run_id,
+            rollshot_action::VisualAnnotationProposalOrigin::EphemeralGuide {
+                guide_digest: "aa".repeat(32),
+            },
             step,
             doc.document.state_id(),
             image.width(),
             image.height(),
+            [1u8; 32],
+            [2u8; 32],
             vec![
                 rollshot_action::VisualAnnotationSuggestionDraft {
                     id: rollshot_action::VisualAnnotationSuggestionId(1),
@@ -6420,10 +6456,15 @@ mod tests {
         VisualAnnotationProposal::from_agent_drafts(
             rollshot_action::VisualAnnotationProposalId(run_id),
             run_id,
+            rollshot_action::VisualAnnotationProposalOrigin::EphemeralGuide {
+                guide_digest: "aa".repeat(32),
+            },
             step,
             doc.document.state_id(),
             image.width(),
             image.height(),
+            [1u8; 32],
+            [2u8; 32],
             vec![rollshot_action::VisualAnnotationSuggestionDraft {
                 id: rollshot_action::VisualAnnotationSuggestionId(1),
                 payload: rollshot_action::VisualAnnotationPayload::TextNote {
@@ -6442,10 +6483,15 @@ mod tests {
         VisualAnnotationProposal::from_agent_drafts(
             rollshot_action::VisualAnnotationProposalId(1),
             1,
+            rollshot_action::VisualAnnotationProposalOrigin::EphemeralGuide {
+                guide_digest: "aa".repeat(32),
+            },
             step,
             0,
             32,
             32,
+            [1u8; 32],
+            [2u8; 32],
             vec![rollshot_action::VisualAnnotationSuggestionDraft {
                 id: rollshot_action::VisualAnnotationSuggestionId(1),
                 payload: rollshot_action::VisualAnnotationPayload::TextNote {

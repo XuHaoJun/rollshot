@@ -17,7 +17,7 @@
 
 use rollshot_action::{
     GuideStep, VisualAnnotationPayload, VisualAnnotationProposal, VisualAnnotationProposalId,
-    VisualAnnotationSuggestionDraft, VisualAnnotationSuggestionId,
+    VisualAnnotationProposalOrigin, VisualAnnotationSuggestionDraft, VisualAnnotationSuggestionId,
 };
 use rollshot_agent::domain::{AttachmentDescriptor, AuthorizedModelInput, MediaType};
 use rollshot_agent::driver::{AgentConfig, AgentRunner};
@@ -30,9 +30,12 @@ use rollshot_image_document::{ImagePoint, ImageRect};
 /// task can outlive the workspace borrow.
 pub(crate) struct VisualAnnotationTaskInput {
     pub run_id: u64,
+    pub origin: VisualAnnotationProposalOrigin,
     pub step: GuideStep,
     pub document_state_id: u64,
     pub image: image::RgbaImage,
+    pub keyframe_sha256: [u8; 32],
+    pub annotation_state_sha256: [u8; 32],
 }
 
 /// Outcome of one visual annotation run. Returned through `Result` so the
@@ -82,10 +85,13 @@ pub(crate) fn encode_visual_annotation_attachment(
 /// and build a [`VisualAnnotationProposal`].
 pub(crate) fn suggestion_batch_to_proposal(
     run_id: u64,
+    origin: VisualAnnotationProposalOrigin,
     step: &GuideStep,
     document_state_id: u64,
     image_width: u32,
     image_height: u32,
+    keyframe_sha256: [u8; 32],
+    annotation_state_sha256: [u8; 32],
     agent_drafts: Vec<VisualAnnotationDraft>,
 ) -> Result<VisualAnnotationProposal, rollshot_action::VisualAnnotationProposalError> {
     let drafts: Vec<VisualAnnotationSuggestionDraft> = agent_drafts
@@ -95,10 +101,13 @@ pub(crate) fn suggestion_batch_to_proposal(
     VisualAnnotationProposal::from_agent_drafts(
         VisualAnnotationProposalId(run_id),
         run_id,
+        origin,
         step,
         document_state_id,
         image_width,
         image_height,
+        keyframe_sha256,
+        annotation_state_sha256,
         drafts,
     )
 }
@@ -179,9 +188,12 @@ pub(crate) async fn suggest_visual_annotation_task(
 ) -> Result<VisualAnnotationTaskResult, String> {
     let VisualAnnotationTaskInput {
         run_id,
+        origin,
         step,
         document_state_id,
         image,
+        keyframe_sha256,
+        annotation_state_sha256,
     } = input;
     let image_width = image.width();
     let image_height = image.height();
@@ -233,10 +245,13 @@ pub(crate) async fn suggest_visual_annotation_task(
     Ok(map_terminal_to_result(
         terminal,
         run_id,
+        origin,
         &step,
         document_state_id,
         image_width,
         image_height,
+        keyframe_sha256,
+        annotation_state_sha256,
     ))
 }
 
@@ -255,19 +270,25 @@ fn build_visual_annotation_prompt(step: &GuideStep) -> String {
 fn map_terminal_to_result(
     terminal: VisualAnnotationRunTerminal,
     run_id: u64,
+    origin: VisualAnnotationProposalOrigin,
     step: &GuideStep,
     document_state_id: u64,
     image_width: u32,
     image_height: u32,
+    keyframe_sha256: [u8; 32],
+    annotation_state_sha256: [u8; 32],
 ) -> VisualAnnotationTaskResult {
     match terminal {
         VisualAnnotationRunTerminal::Suggested(drafts) => {
             match suggestion_batch_to_proposal(
                 run_id,
+                origin,
                 step,
                 document_state_id,
                 image_width,
                 image_height,
+                keyframe_sha256,
+                annotation_state_sha256,
                 drafts,
             ) {
                 Ok(proposal) => VisualAnnotationTaskResult::Proposal(proposal),
@@ -343,6 +364,20 @@ mod tests {
     use rollshot_agent::NormalizedPoint;
     use rollshot_agent::NormalizedRect;
 
+    fn test_origin() -> VisualAnnotationProposalOrigin {
+        VisualAnnotationProposalOrigin::EphemeralGuide {
+            guide_digest: "aa".repeat(32),
+        }
+    }
+
+    fn test_keyframe_sha() -> [u8; 32] {
+        [1u8; 32]
+    }
+
+    fn test_annotation_sha() -> [u8; 32] {
+        [2u8; 32]
+    }
+
     fn step() -> GuideStep {
         GuideStep {
             index: 1,
@@ -389,7 +424,7 @@ mod tests {
 
     #[test]
     fn normalized_agent_batch_becomes_valid_core_proposal() {
-        let proposal = suggestion_batch_to_proposal(7, &step(), 12, 400, 200, agent_batch())
+        let proposal = suggestion_batch_to_proposal(7, test_origin(), &step(), 12, 400, 200, test_keyframe_sha(), test_annotation_sha(), agent_batch())
             .expect("proposal");
         assert_eq!(proposal.suggestions.len(), 3);
         assert_eq!(proposal.suggestions[0].base.image_width, 400);
@@ -403,7 +438,7 @@ mod tests {
     #[test]
     fn callout_coordinates_are_scaled_to_pixel_space() {
         let proposal =
-            suggestion_batch_to_proposal(1, &step(), 1, 400, 200, agent_batch()).expect("proposal");
+            suggestion_batch_to_proposal(1, test_origin(), &step(), 1, 400, 200, test_keyframe_sha(), test_annotation_sha(), agent_batch()).expect("proposal");
         let callout = match &proposal.suggestions[0].payload {
             VisualAnnotationPayload::NumberCallout { tip, bubble } => (tip, bubble),
             other => panic!("expected NumberCallout, got {other:?}"),
@@ -417,7 +452,7 @@ mod tests {
     #[test]
     fn note_coordinates_are_scaled_to_pixel_space() {
         let proposal =
-            suggestion_batch_to_proposal(1, &step(), 1, 400, 200, agent_batch()).expect("proposal");
+            suggestion_batch_to_proposal(1, test_origin(), &step(), 1, 400, 200, test_keyframe_sha(), test_annotation_sha(), agent_batch()).expect("proposal");
         let note = match &proposal.suggestions[1].payload {
             VisualAnnotationPayload::TextNote { position, text } => (position, text),
             other => panic!("expected TextNote, got {other:?}"),
@@ -430,7 +465,7 @@ mod tests {
     #[test]
     fn redaction_coordinates_are_scaled_to_pixel_space() {
         let proposal =
-            suggestion_batch_to_proposal(1, &step(), 1, 400, 200, agent_batch()).expect("proposal");
+            suggestion_batch_to_proposal(1, test_origin(), &step(), 1, 400, 200, test_keyframe_sha(), test_annotation_sha(), agent_batch()).expect("proposal");
         let rect = match &proposal.suggestions[2].payload {
             VisualAnnotationPayload::OpaqueRedaction { bounds } => bounds,
             other => panic!("expected OpaqueRedaction, got {other:?}"),
@@ -451,7 +486,7 @@ mod tests {
             rationale: None,
         }];
         let proposal =
-            suggestion_batch_to_proposal(3, &step(), 5, 800, 600, single).expect("proposal");
+            suggestion_batch_to_proposal(3, test_origin(), &step(), 5, 800, 600, test_keyframe_sha(), test_annotation_sha(), single).expect("proposal");
         assert_eq!(proposal.suggestions.len(), 1);
         assert_eq!(proposal.suggestions[0].base.image_width, 800);
         assert_eq!(proposal.suggestions[0].base.image_height, 600);
@@ -511,10 +546,13 @@ mod tests {
                 dimension: BudgetDimension::WallTime,
             },
             7,
+            test_origin(),
             &step(),
             0,
             100,
             80,
+            test_keyframe_sha(),
+            test_annotation_sha(),
         );
         let VisualAnnotationTaskResult::NoSuggestion { reason } = result else {
             panic!("expected no-suggestion result");
@@ -530,10 +568,13 @@ mod tests {
         let result = map_terminal_to_result(
             VisualAnnotationRunTerminal::ProviderFailure,
             7,
+            test_origin(),
             &step(),
             0,
             100,
             80,
+            test_keyframe_sha(),
+            test_annotation_sha(),
         );
         let VisualAnnotationTaskResult::NoSuggestion { reason } = result else {
             panic!("expected no-suggestion result");
@@ -549,10 +590,13 @@ mod tests {
         let result = map_terminal_to_result(
             VisualAnnotationRunTerminal::ProtocolFailure,
             7,
+            test_origin(),
             &step(),
             0,
             100,
             80,
+            test_keyframe_sha(),
+            test_annotation_sha(),
         );
         let VisualAnnotationTaskResult::NoSuggestion { reason } = result else {
             panic!("expected no-suggestion result");
@@ -568,10 +612,13 @@ mod tests {
         let result = map_terminal_to_result(
             VisualAnnotationRunTerminal::Cancelled,
             7,
+            test_origin(),
             &step(),
             0,
             100,
             80,
+            test_keyframe_sha(),
+            test_annotation_sha(),
         );
         let VisualAnnotationTaskResult::NoSuggestion { reason } = result else {
             panic!("expected no-suggestion result");
@@ -588,10 +635,13 @@ mod tests {
                 },
             ),
             7,
+            test_origin(),
             &step(),
             0,
             100,
             80,
+            test_keyframe_sha(),
+            test_annotation_sha(),
         );
         let VisualAnnotationTaskResult::NoSuggestion { reason } = result else {
             panic!("expected no-suggestion result");

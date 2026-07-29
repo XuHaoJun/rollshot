@@ -3,18 +3,30 @@ use rollshot_image_document::{EditOp, ImagePoint, ImageRect};
 
 pub const MAX_VISUAL_SUGGESTIONS: usize = 20;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct VisualAnnotationProposalId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct VisualAnnotationSuggestionId(pub u64);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VisualAnnotationProvenance {
     Agent { run_id: u64 },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// The origin of a visual annotation proposal: either from a durable project
+/// revision (revision-bound) or from an ephemeral in-memory guide.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum VisualAnnotationProposalOrigin {
+    DurableProject { revision: u64, projection_digest: String },
+    EphemeralGuide { guide_digest: String },
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum VisualAnnotationPayload {
     NumberCallout { tip: ImagePoint, bubble: ImagePoint },
     TextNote { position: ImagePoint, text: String },
@@ -29,16 +41,18 @@ pub struct VisualAnnotationSuggestionDraft {
     pub rationale: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct VisualAnnotationBase {
     pub step_source: CandidateId,
     pub keyframe: FrameId,
     pub document_state_id: u64,
     pub image_width: u32,
     pub image_height: u32,
+    pub keyframe_sha256: [u8; 32],
+    pub annotation_state_sha256: [u8; 32],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VisualAnnotationSuggestionStatus {
     Pending,
     Accepted,
@@ -46,7 +60,7 @@ pub enum VisualAnnotationSuggestionStatus {
     Stale,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VisualAnnotationSuggestion {
     pub id: VisualAnnotationSuggestionId,
     pub base: VisualAnnotationBase,
@@ -57,15 +71,15 @@ pub struct VisualAnnotationSuggestion {
     pub status: VisualAnnotationSuggestionStatus,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VisualAnnotationProposal {
     pub id: VisualAnnotationProposalId,
     pub run_id: u64,
-    pub origin: GuideStep,
+    pub origin: VisualAnnotationProposalOrigin,
     pub suggestions: Vec<VisualAnnotationSuggestion>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VisualAnnotationApplyOutcome {
     Ready,
     Missing,
@@ -117,10 +131,13 @@ impl VisualAnnotationProposal {
     pub fn from_agent_drafts(
         id: VisualAnnotationProposalId,
         run_id: u64,
+        origin: VisualAnnotationProposalOrigin,
         step: &GuideStep,
         document_state_id: u64,
         image_width: u32,
         image_height: u32,
+        keyframe_sha256: [u8; 32],
+        annotation_state_sha256: [u8; 32],
         drafts: Vec<VisualAnnotationSuggestionDraft>,
     ) -> Result<Self, VisualAnnotationProposalError> {
         if drafts.is_empty() {
@@ -146,6 +163,8 @@ impl VisualAnnotationProposal {
             document_state_id,
             image_width,
             image_height,
+            keyframe_sha256,
+            annotation_state_sha256,
         };
 
         let mut suggestions = Vec::with_capacity(drafts.len());
@@ -180,7 +199,7 @@ impl VisualAnnotationProposal {
         Ok(Self {
             id,
             run_id,
-            origin: step.clone(),
+            origin,
             suggestions,
         })
     }
@@ -260,6 +279,57 @@ impl VisualAnnotationProposal {
                 suggestion.base.document_state_id = new_document_state_id;
             }
         }
+    }
+
+    /// Rebase a restored proposal against the current document state.
+    ///
+    /// On a digest match (both keyframe and annotation-state digests agree),
+    /// rebase only pending suggestions to the given `document_state_id` and
+    /// return [`VisualAnnotationApplyOutcome::Ready`]. On any mismatch, mark
+    /// all pending suggestions stale and return
+    /// [`VisualAnnotationApplyOutcome::Stale`].
+    pub fn rebase_restored(
+        &mut self,
+        step: &GuideStep,
+        document_state_id: u64,
+        image_width: u32,
+        image_height: u32,
+        keyframe_sha256: [u8; 32],
+        annotation_state_sha256: [u8; 32],
+    ) -> VisualAnnotationApplyOutcome {
+        // Check that at least one suggestion is still pending.
+        let has_pending = self
+            .suggestions
+            .iter()
+            .any(|s| s.status == VisualAnnotationSuggestionStatus::Pending);
+        if !has_pending {
+            return VisualAnnotationApplyOutcome::NotPending;
+        }
+
+        // Verify digests against the stored base.
+        let base = &self.suggestions[0].base;
+        if base.step_source != step.source
+            || base.keyframe != step.keyframe
+            || base.image_width != image_width
+            || base.image_height != image_height
+            || base.keyframe_sha256 != keyframe_sha256
+            || base.annotation_state_sha256 != annotation_state_sha256
+        {
+            for suggestion in &mut self.suggestions {
+                if suggestion.status == VisualAnnotationSuggestionStatus::Pending {
+                    suggestion.status = VisualAnnotationSuggestionStatus::Stale;
+                }
+            }
+            return VisualAnnotationApplyOutcome::Stale;
+        }
+
+        // Digests match: rebase pending suggestions to the current document state.
+        for suggestion in &mut self.suggestions {
+            if suggestion.status == VisualAnnotationSuggestionStatus::Pending {
+                suggestion.base.document_state_id = document_state_id;
+            }
+        }
+        VisualAnnotationApplyOutcome::Ready
     }
 }
 
@@ -356,6 +426,27 @@ mod tests {
     use crate::guide::Guide;
     use crate::models::{CandidateKind, CandidateStep, DetectReason};
 
+    fn ephemeral_origin() -> VisualAnnotationProposalOrigin {
+        VisualAnnotationProposalOrigin::EphemeralGuide {
+            guide_digest: "aa".repeat(32),
+        }
+    }
+
+    fn durable_proposal_origin() -> VisualAnnotationProposalOrigin {
+        VisualAnnotationProposalOrigin::DurableProject {
+            revision: 1,
+            projection_digest: "bb".repeat(32),
+        }
+    }
+
+    fn keyframe_sha() -> [u8; 32] {
+        [1u8; 32]
+    }
+
+    fn annotation_sha() -> [u8; 32] {
+        [2u8; 32]
+    }
+
     fn guide() -> Guide {
         Guide::from_candidates(vec![CandidateStep {
             id: 10,
@@ -420,10 +511,13 @@ mod tests {
         let proposal = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(9),
             9,
+            ephemeral_origin(),
             &step(),
             41,
             320,
             240,
+            keyframe_sha(),
+            annotation_sha(),
             vec![
                 draft_callout(1, (16.0, 20.0), (80.0, 30.0)),
                 draft_note(2, (24.0, 40.0), "Click Save"),
@@ -439,10 +533,13 @@ mod tests {
         let result = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             100,
             100,
+            keyframe_sha(),
+            annotation_sha(),
             vec![VisualAnnotationSuggestionDraft {
                 id: VisualAnnotationSuggestionId(1),
                 payload: VisualAnnotationPayload::NumberCallout {
@@ -464,10 +561,13 @@ mod tests {
         let result = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             100,
             100,
+            keyframe_sha(),
+            annotation_sha(),
             vec![VisualAnnotationSuggestionDraft {
                 id: VisualAnnotationSuggestionId(1),
                 payload: VisualAnnotationPayload::NumberCallout {
@@ -489,10 +589,13 @@ mod tests {
         let result = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             100,
             100,
+            keyframe_sha(),
+            annotation_sha(),
             vec![VisualAnnotationSuggestionDraft {
                 id: VisualAnnotationSuggestionId(1),
                 payload: VisualAnnotationPayload::NumberCallout {
@@ -514,10 +617,13 @@ mod tests {
         let result = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             100,
             100,
+            keyframe_sha(),
+            annotation_sha(),
             vec![VisualAnnotationSuggestionDraft {
                 id: VisualAnnotationSuggestionId(1),
                 payload: VisualAnnotationPayload::NumberCallout {
@@ -539,10 +645,13 @@ mod tests {
         let result = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             100,
             100,
+            keyframe_sha(),
+            annotation_sha(),
             vec![VisualAnnotationSuggestionDraft {
                 id: VisualAnnotationSuggestionId(1),
                 payload: VisualAnnotationPayload::TextNote {
@@ -564,10 +673,13 @@ mod tests {
         let result = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             100,
             100,
+            keyframe_sha(),
+            annotation_sha(),
             vec![VisualAnnotationSuggestionDraft {
                 id: VisualAnnotationSuggestionId(1),
                 payload: VisualAnnotationPayload::TextNote {
@@ -589,10 +701,13 @@ mod tests {
         let result = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             100,
             100,
+            keyframe_sha(),
+            annotation_sha(),
             vec![VisualAnnotationSuggestionDraft {
                 id: VisualAnnotationSuggestionId(1),
                 payload: VisualAnnotationPayload::TextNote {
@@ -614,10 +729,13 @@ mod tests {
         let result = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             100,
             100,
+            keyframe_sha(),
+            annotation_sha(),
             vec![VisualAnnotationSuggestionDraft {
                 id: VisualAnnotationSuggestionId(1),
                 payload: VisualAnnotationPayload::TextNote {
@@ -639,10 +757,13 @@ mod tests {
         let result = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             100,
             100,
+            keyframe_sha(),
+            annotation_sha(),
             vec![VisualAnnotationSuggestionDraft {
                 id: VisualAnnotationSuggestionId(1),
                 payload: VisualAnnotationPayload::OpaqueRedaction {
@@ -668,10 +789,13 @@ mod tests {
         let result = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             100,
             100,
+            keyframe_sha(),
+            annotation_sha(),
             vec![VisualAnnotationSuggestionDraft {
                 id: VisualAnnotationSuggestionId(1),
                 payload: VisualAnnotationPayload::OpaqueRedaction {
@@ -697,10 +821,13 @@ mod tests {
         let result = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             100,
             100,
+            keyframe_sha(),
+            annotation_sha(),
             vec![VisualAnnotationSuggestionDraft {
                 id: VisualAnnotationSuggestionId(1),
                 payload: VisualAnnotationPayload::OpaqueRedaction {
@@ -726,10 +853,13 @@ mod tests {
         let result = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             100,
             100,
+            keyframe_sha(),
+            annotation_sha(),
             vec![VisualAnnotationSuggestionDraft {
                 id: VisualAnnotationSuggestionId(1),
                 payload: VisualAnnotationPayload::TextNote {
@@ -751,10 +881,13 @@ mod tests {
         let result = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             100,
             100,
+            keyframe_sha(),
+            annotation_sha(),
             vec![
                 draft_note(1, (10.0, 10.0), "first"),
                 draft_note(1, (20.0, 20.0), "second"),
@@ -775,10 +908,13 @@ mod tests {
         let result = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             100,
             100,
+            keyframe_sha(),
+            annotation_sha(),
             drafts,
         );
         assert_eq!(
@@ -792,10 +928,13 @@ mod tests {
         let result = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             100,
             100,
+            keyframe_sha(),
+            annotation_sha(),
             vec![
                 draft_note(1, (10.0, 10.0), "good"),
                 draft_note(2, (10.0, 10.0), ""),
@@ -812,10 +951,13 @@ mod tests {
         let mut proposal = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             55,
             200,
             300,
+            keyframe_sha(),
+            annotation_sha(),
             vec![draft_callout(1, (10.0, 20.0), (50.0, 50.0))],
         )
         .expect("valid");
@@ -833,10 +975,13 @@ mod tests {
         let mut proposal = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             55,
             200,
             300,
+            keyframe_sha(),
+            annotation_sha(),
             vec![draft_callout(1, (10.0, 20.0), (50.0, 50.0))],
         )
         .expect("valid");
@@ -862,10 +1007,13 @@ mod tests {
         let mut proposal = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             55,
             200,
             300,
+            keyframe_sha(),
+            annotation_sha(),
             vec![draft_callout(1, (10.0, 20.0), (50.0, 50.0))],
         )
         .expect("valid");
@@ -887,10 +1035,13 @@ mod tests {
         let mut proposal = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             55,
             200,
             300,
+            keyframe_sha(),
+            annotation_sha(),
             vec![draft_callout(1, (10.0, 20.0), (50.0, 50.0))],
         )
         .expect("valid");
@@ -905,10 +1056,13 @@ mod tests {
         let mut proposal = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             55,
             200,
             300,
+            keyframe_sha(),
+            annotation_sha(),
             vec![draft_callout(1, (10.0, 20.0), (50.0, 50.0))],
         )
         .expect("valid");
@@ -923,10 +1077,13 @@ mod tests {
         let mut proposal = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             55,
             200,
             300,
+            keyframe_sha(),
+            annotation_sha(),
             vec![draft_callout(1, (10.0, 20.0), (50.0, 50.0))],
         )
         .expect("valid");
@@ -945,10 +1102,13 @@ mod tests {
         let mut proposal = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             55,
             200,
             300,
+            keyframe_sha(),
+            annotation_sha(),
             vec![draft_callout(1, (10.0, 20.0), (50.0, 50.0))],
         )
         .expect("valid");
@@ -964,10 +1124,13 @@ mod tests {
         let mut proposal = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             100,
             100,
+            keyframe_sha(),
+            annotation_sha(),
             vec![draft_callout(1, (10.0, 20.0), (50.0, 50.0))],
         )
         .expect("valid");
@@ -985,10 +1148,13 @@ mod tests {
         let mut proposal = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             100,
             100,
+            keyframe_sha(),
+            annotation_sha(),
             vec![draft_callout(1, (10.0, 20.0), (50.0, 50.0))],
         )
         .expect("valid");
@@ -1005,10 +1171,13 @@ mod tests {
         let mut proposal = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             100,
             100,
+            keyframe_sha(),
+            annotation_sha(),
             vec![
                 draft_callout(1, (10.0, 20.0), (50.0, 50.0)),
                 draft_note(2, (20.0, 30.0), "note"),
@@ -1027,10 +1196,13 @@ mod tests {
         let mut proposal = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             55,
             200,
             300,
+            keyframe_sha(),
+            annotation_sha(),
             vec![draft_callout(1, (10.0, 20.0), (50.0, 50.0))],
         )
         .expect("valid");
@@ -1047,10 +1219,13 @@ mod tests {
         let proposal = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             320,
             240,
+            keyframe_sha(),
+            annotation_sha(),
             vec![draft_callout(1, (16.0, 20.0), (80.0, 30.0))],
         )
         .expect("valid");
@@ -1072,10 +1247,13 @@ mod tests {
         let proposal = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             320,
             240,
+            keyframe_sha(),
+            annotation_sha(),
             vec![draft_note(1, (24.0, 40.0), "Click Save")],
         )
         .expect("valid");
@@ -1097,10 +1275,13 @@ mod tests {
         let proposal = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             320,
             240,
+            keyframe_sha(),
+            annotation_sha(),
             vec![draft_redaction(1, 100.0, 50.0, 80.0, 30.0)],
         )
         .expect("valid");
@@ -1125,10 +1306,13 @@ mod tests {
         let result = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             100,
             100,
+            keyframe_sha(),
+            annotation_sha(),
             vec![],
         );
         assert_eq!(
@@ -1142,10 +1326,13 @@ mod tests {
         let mut proposal = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             100,
             100,
+            keyframe_sha(),
+            annotation_sha(),
             vec![
                 draft_callout(1, (10.0, 20.0), (50.0, 50.0)),
                 draft_note(2, (20.0, 30.0), "note"),
@@ -1170,10 +1357,13 @@ mod tests {
         let mut proposal = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             100,
             100,
+            keyframe_sha(),
+            annotation_sha(),
             vec![draft_callout(1, (10.0, 20.0), (50.0, 50.0))],
         )
         .expect("valid");
@@ -1202,10 +1392,13 @@ mod tests {
         let proposal = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             100,
             100,
+            keyframe_sha(),
+            annotation_sha(),
             vec![VisualAnnotationSuggestionDraft {
                 id: VisualAnnotationSuggestionId(1),
                 payload: VisualAnnotationPayload::TextNote {
@@ -1229,10 +1422,13 @@ mod tests {
         let proposal = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             100,
             100,
+            keyframe_sha(),
+            annotation_sha(),
             vec![VisualAnnotationSuggestionDraft {
                 id: VisualAnnotationSuggestionId(1),
                 payload: VisualAnnotationPayload::TextNote {
@@ -1253,10 +1449,13 @@ mod tests {
         let proposal = VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            ephemeral_origin(),
             &step(),
             1,
             100,
             100,
+            keyframe_sha(),
+            annotation_sha(),
             vec![
                 draft_callout(1, (10.0, 20.0), (50.0, 50.0)),
                 draft_note(2, (20.0, 30.0), "note"),
@@ -1269,5 +1468,119 @@ mod tests {
             .suggestions
             .iter()
             .all(|s| s.status == VisualAnnotationSuggestionStatus::Pending));
+    }
+
+    fn durable_proposal_fixture() -> VisualAnnotationProposal {
+        VisualAnnotationProposal::from_agent_drafts(
+            VisualAnnotationProposalId(42),
+            7,
+            durable_proposal_origin(),
+            &step(),
+            0,
+            100,
+            80,
+            keyframe_sha(),
+            annotation_sha(),
+            vec![draft_callout(1, (10.0, 20.0), (50.0, 50.0))],
+        )
+        .expect("valid fixture")
+    }
+
+    #[test]
+    fn proposal_round_trips_without_a_guide_step_wire_shape() {
+        let proposal = durable_proposal_fixture();
+        let bytes = serde_json::to_vec(&proposal).unwrap();
+        let json = String::from_utf8(bytes.clone()).unwrap();
+        assert!(!json.contains("nearby"));
+        assert!(!json.contains("at_ms"));
+        assert_eq!(
+            serde_json::from_slice::<VisualAnnotationProposal>(&bytes).unwrap(),
+            proposal,
+        );
+    }
+
+    #[test]
+    fn restore_rebase_requires_both_durable_content_digests() {
+        let mut proposal = durable_proposal_fixture();
+        assert_eq!(
+            proposal.rebase_restored(&step(), 0, 100, 80, [1; 32], [2; 32]),
+            VisualAnnotationApplyOutcome::Ready,
+        );
+        assert!(proposal
+            .suggestions
+            .iter()
+            .all(|item| item.base.document_state_id == 0));
+
+        let mut wrong_image = durable_proposal_fixture();
+        assert_eq!(
+            wrong_image.rebase_restored(&step(), 0, 100, 80, [9; 32], [2; 32]),
+            VisualAnnotationApplyOutcome::Stale,
+        );
+    }
+
+    #[test]
+    fn restore_rebase_stale_on_wrong_annotation_digest() {
+        let mut proposal = durable_proposal_fixture();
+        assert_eq!(
+            proposal.rebase_restored(&step(), 0, 100, 80, [1; 32], [9; 32]),
+            VisualAnnotationApplyOutcome::Stale,
+        );
+        assert!(proposal
+            .suggestions
+            .iter()
+            .all(|s| s.status == VisualAnnotationSuggestionStatus::Stale));
+    }
+
+    #[test]
+    fn restore_rebase_stale_on_wrong_source() {
+        let mut proposal = durable_proposal_fixture();
+        let mut changed = step();
+        changed.source = step().source + 1;
+        assert_eq!(
+            proposal.rebase_restored(&changed, 0, 100, 80, [1; 32], [2; 32]),
+            VisualAnnotationApplyOutcome::Stale,
+        );
+    }
+
+    #[test]
+    fn restore_rebase_stale_on_wrong_keyframe() {
+        let mut proposal = durable_proposal_fixture();
+        let mut changed = step();
+        changed.keyframe = step().keyframe + 1;
+        assert_eq!(
+            proposal.rebase_restored(&changed, 0, 100, 80, [1; 32], [2; 32]),
+            VisualAnnotationApplyOutcome::Stale,
+        );
+    }
+
+    #[test]
+    fn restore_rebase_stale_on_wrong_width() {
+        let mut proposal = durable_proposal_fixture();
+        assert_eq!(
+            proposal.rebase_restored(&step(), 0, 999, 80, [1; 32], [2; 32]),
+            VisualAnnotationApplyOutcome::Stale,
+        );
+    }
+
+    #[test]
+    fn restore_rebase_stale_on_wrong_height() {
+        let mut proposal = durable_proposal_fixture();
+        assert_eq!(
+            proposal.rebase_restored(&step(), 0, 100, 999, [1; 32], [2; 32]),
+            VisualAnnotationApplyOutcome::Stale,
+        );
+    }
+
+    #[test]
+    fn restore_rebase_updates_document_state_id_on_success() {
+        let mut proposal = durable_proposal_fixture();
+        assert_eq!(
+            proposal.rebase_restored(&step(), 42, 100, 80, [1; 32], [2; 32]),
+            VisualAnnotationApplyOutcome::Ready,
+        );
+        assert!(proposal
+            .suggestions
+            .iter()
+            .all(|item| item.base.document_state_id == 42));
     }
 }
