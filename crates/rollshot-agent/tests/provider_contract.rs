@@ -1064,7 +1064,9 @@ async fn openai_stream_consumes_at_least_two_chunks() {
 
 mod visual_annotation {
     use super::*;
+    use rollshot_agent::driver::VisualAnnotationProfile;
     use rollshot_agent::runtime::BudgetDimension;
+    use rollshot_agent::skills::bundled_action_guide_visual_annotations_use;
     use std::sync::Arc;
 
     struct ScriptedProvider {
@@ -1248,6 +1250,7 @@ mod visual_annotation {
                 ..AgentConfig::default()
             })
             .run_visual_annotation_with_provider(
+                va_profile(),
                 authorized_input_with_one_png(),
                 &provider,
                 budget,
@@ -1306,6 +1309,14 @@ mod visual_annotation {
         })
     }
 
+    fn va_profile() -> VisualAnnotationProfile<'static> {
+        let skill = bundled_action_guide_visual_annotations_use()
+            .expect("bundled visual skill must resolve");
+        let skill: &'static rollshot_agent::skills::SkillUse = Box::leak(Box::new(skill));
+        VisualAnnotationProfile::from_skill(skill)
+            .expect("bundled visual skill must be accepted")
+    }
+
     // ---- One attachment ----
 
     #[tokio::test]
@@ -1328,6 +1339,7 @@ mod visual_annotation {
 
         let _ = runner
             .run_visual_annotation_with_provider(
+                va_profile(),
                 input,
                 &provider,
                 visual_annotation_run_budget(),
@@ -1368,7 +1380,7 @@ mod visual_annotation {
         let cancel = RunCancellation::new();
 
         let _ = runner
-            .run_visual_annotation_with_provider(input, &provider, budget, &cancel)
+            .run_visual_annotation_with_provider(va_profile(), input, &provider, budget, &cancel)
             .await;
 
         let requests = provider.requests.lock().unwrap();
@@ -1404,7 +1416,7 @@ mod visual_annotation {
         let cancel = RunCancellation::new();
 
         let result = runner
-            .run_visual_annotation_with_provider(input, &provider, budget, &cancel)
+            .run_visual_annotation_with_provider(va_profile(), input, &provider, budget, &cancel)
             .await;
 
         match result {
@@ -1463,6 +1475,7 @@ mod visual_annotation {
 
         let result = runner
             .run_visual_annotation_with_provider(
+                va_profile(),
                 input,
                 &provider,
                 visual_annotation_run_budget(),
@@ -1512,6 +1525,7 @@ mod visual_annotation {
 
         let result = runner
             .run_visual_annotation_with_provider(
+                va_profile(),
                 input,
                 &provider,
                 visual_annotation_run_budget(),
@@ -1675,6 +1689,7 @@ mod visual_annotation {
 
         let result = runner
             .run_visual_annotation_with_provider(
+                va_profile(),
                 input,
                 &provider,
                 visual_annotation_run_budget(),

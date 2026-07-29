@@ -20,8 +20,9 @@ use rollshot_action::{
     VisualAnnotationProposalOrigin, VisualAnnotationSuggestionDraft, VisualAnnotationSuggestionId,
 };
 use rollshot_agent::domain::{AttachmentDescriptor, AuthorizedModelInput, MediaType};
-use rollshot_agent::driver::{AgentConfig, AgentRunner};
+use rollshot_agent::driver::{AgentConfig, AgentRunner, VisualAnnotationProfile};
 use rollshot_agent::runtime::RunCancellation;
+use rollshot_agent::skills::bundled_action_guide_visual_annotations_use;
 use rollshot_agent::{ProviderAdapter, VisualAnnotationDraft, VisualAnnotationRunTerminal};
 use rollshot_image_document::{ImagePoint, ImageRect};
 use sha2::{Digest, Sha256};
@@ -391,8 +392,34 @@ pub(crate) async fn suggest_visual_annotation_task(
         max_turns: 2,
         ..AgentConfig::default()
     });
+    let skill = match bundled_action_guide_visual_annotations_use() {
+        Some(s) => s,
+        None => {
+            tracing::error!(
+                target: "rollshot::action::visual_annotation_agent",
+                "bundled visual annotations skill failed to load"
+            );
+            return Ok(VisualAnnotationTaskResult::NoSuggestion {
+                reason: Some("skill unavailable".to_owned()),
+            });
+        }
+    };
+    let profile = match VisualAnnotationProfile::from_skill(&skill) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(
+                target: "rollshot::action::visual_annotation_agent",
+                error = ?e,
+                "visual annotation profile rejected the bundled skill"
+            );
+            return Ok(VisualAnnotationTaskResult::NoSuggestion {
+                reason: Some("skill unavailable".to_owned()),
+            });
+        }
+    };
     let terminal = runner
         .run_visual_annotation_with_provider(
+            profile,
             authorized,
             &*adapter,
             rollshot_agent::visual_annotation_run_budget(),

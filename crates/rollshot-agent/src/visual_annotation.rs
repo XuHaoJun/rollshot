@@ -1013,6 +1013,15 @@ pub(crate) mod tests {
             })
         }
 
+        pub(crate) fn va_profile() -> crate::driver::VisualAnnotationProfile<'static> {
+            let skill = crate::skills::bundled_action_guide_visual_annotations_use()
+                .expect("bundled visual skill must resolve");
+            // Leak the SkillUse so the profile can borrow it with 'static.
+            let skill: &'static crate::skills::SkillUse = Box::leak(Box::new(skill));
+            crate::driver::VisualAnnotationProfile::from_skill(skill)
+                .expect("bundled visual skill must be accepted")
+        }
+
         #[tokio::test]
         async fn one_tool_call_returns_suggested() {
             let args = serde_json::json!({
@@ -1033,6 +1042,7 @@ pub(crate) mod tests {
 
             let result = runner
                 .run_visual_annotation_with_provider(
+                    va_profile(),
                     input,
                     &provider,
                     visual_annotation_run_budget(),
@@ -1080,6 +1090,7 @@ pub(crate) mod tests {
 
             let result = runner
                 .run_visual_annotation_with_provider(
+                    va_profile(),
                     input,
                     &provider,
                     visual_annotation_run_budget(),
@@ -1106,6 +1117,7 @@ pub(crate) mod tests {
 
             let result = runner
                 .run_visual_annotation_with_provider(
+                    va_profile(),
                     input,
                     &provider,
                     visual_annotation_run_budget(),
@@ -1137,6 +1149,7 @@ pub(crate) mod tests {
 
             let result = runner
                 .run_visual_annotation_with_provider(
+                    va_profile(),
                     input,
                     &provider,
                     visual_annotation_run_budget(),
@@ -1168,7 +1181,7 @@ pub(crate) mod tests {
             let cancel = RunCancellation::new();
 
             let result = runner
-                .run_visual_annotation_with_provider(input, &provider, budget, &cancel)
+                .run_visual_annotation_with_provider(va_profile(), input, &provider, budget, &cancel)
                 .await;
 
             match result {
@@ -1198,6 +1211,7 @@ pub(crate) mod tests {
 
             let _ = runner
                 .run_visual_annotation_with_provider(
+                    va_profile(),
                     input,
                     &provider,
                     visual_annotation_run_budget(),
@@ -1216,6 +1230,11 @@ pub(crate) mod tests {
             assert!(
                 system_prompt.contains("submit_visual_annotation_suggestions"),
                 "first request system prompt must reference the tool, got: {system_prompt}"
+            );
+            assert_eq!(
+                system_prompt,
+                crate::driver::VISUAL_ANNOTATION_SYSTEM_PROMPT_BASELINE,
+                "model request system prompt must be byte-identical to the baseline"
             );
             assert_eq!(first.tool_definitions.len(), 1);
             assert_eq!(
@@ -1248,6 +1267,7 @@ pub(crate) mod tests {
 
             let result = runner
                 .run_visual_annotation_with_provider(
+                    va_profile(),
                     input,
                     &provider,
                     visual_annotation_run_budget(),

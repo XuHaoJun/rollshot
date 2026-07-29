@@ -56,7 +56,10 @@ use crate::runtime::{
     BudgetDimension, BudgetError, BudgetTracker, NullEventSink, RunBudget, RunCancellation,
     RunEvent, RunEventSink, UsageSnapshot,
 };
-use crate::skills::{ACTION_GUIDE_CAPTIONS_PACKAGE_ID, SMART_REDACTION_PACKAGE_ID};
+use crate::skills::{
+    ACTION_GUIDE_CAPTIONS_PACKAGE_ID, ACTION_GUIDE_VISUAL_ANNOTATIONS_PACKAGE_ID,
+    SMART_REDACTION_PACKAGE_ID,
+};
 use crate::tools::{ToolCall, ToolContext, ToolOutcome, ToolRegistry};
 
 // ---------- Configuration ----------
@@ -203,6 +206,37 @@ pub(crate) fn compose_caption_prompt(
 /// `caption_agent::suggest_captions_with_timeout` before the skill move.
 pub const CAPTION_SYSTEM_ENVELOPE: &str =
     "You produce compact structured suggestions for Rollshot Action Guide captions.";
+
+/// Frozen profile for a visual annotation run.
+///
+/// Wraps the resolved bundled skill and exposes the exact system prompt
+/// without accepting an arbitrary string. The `from_skill` constructor
+/// rejects any skill that is not the bundled visual-annotations package
+/// from the `rollshot.bundled` authority.
+pub struct VisualAnnotationProfile<'a> {
+    skill_use: &'a crate::skills::SkillUse,
+}
+
+impl<'a> VisualAnnotationProfile<'a> {
+    /// The only constructor. Rejects skills whose package ID or source
+    /// authority do not match the bundled visual-annotations contract.
+    pub fn from_skill(skill_use: &'a crate::skills::SkillUse) -> Result<Self, DriverError> {
+        if skill_use.package_id().as_str() != ACTION_GUIDE_VISUAL_ANNOTATIONS_PACKAGE_ID
+            || skill_use.source_authority().as_str() != "rollshot.bundled"
+        {
+            return Err(DriverError::AgentProtocolFailure(
+                "unexpected visual annotation skill".to_owned(),
+            ));
+        }
+        Ok(Self { skill_use })
+    }
+
+    /// The exact system prompt for the visual annotation run.
+    /// Byte-identical to the bundled SKILL.md body.
+    pub fn system_prompt(&self) -> &str {
+        self.skill_use.body()
+    }
+}
 
 pub(crate) enum AgentTaskProfile {
     #[allow(dead_code)]
@@ -1814,6 +1848,7 @@ impl AgentRunner {
     #[allow(clippy::too_many_lines)]
     pub async fn run_visual_annotation_with_provider(
         &self,
+        profile: VisualAnnotationProfile<'_>,
         mut input: crate::domain::AuthorizedModelInput,
         provider: &dyn ProviderAdapter,
         budget: RunBudget,
@@ -1925,11 +1960,7 @@ impl AgentRunner {
                         history: history_msgs,
                         turn: rig_run.turn(),
                         tool_definitions: tool_definitions.clone(),
-                        system_prompt: Some(
-                            AgentTaskProfile::VisualAnnotation
-                                .system_prompt()
-                                .to_string(),
-                        ),
+                        system_prompt: Some(profile.system_prompt().to_owned()),
                         max_tokens: None,
                         attachments: turn_attachments,
                     };
@@ -2544,6 +2575,65 @@ pub(crate) mod tests {
             AgentTaskProfile::Captions.system_prompt(),
             CAPTION_SYSTEM_ENVELOPE,
         );
+    }
+
+    // ---- VisualAnnotationProfile ----
+
+    #[test]
+    fn visual_profile_derives_the_exact_prompt_from_the_skill() {
+        let skill = crate::skills::bundled_action_guide_visual_annotations_use().unwrap();
+        let profile = VisualAnnotationProfile::from_skill(&skill).unwrap();
+        assert_eq!(profile.system_prompt(), VISUAL_ANNOTATION_SYSTEM_PROMPT_BASELINE);
+    }
+
+    #[test]
+    fn visual_profile_rejects_the_wrong_package() {
+        let caption = crate::skills::bundled_action_guide_captions_use().unwrap();
+        assert!(VisualAnnotationProfile::from_skill(&caption).is_err());
+    }
+
+    #[test]
+    fn visual_profile_rejects_a_host_authority_skill() {
+        use crate::skills::{HostSkillRoot, SkillCatalogLimits, SkillInvocationKind,
+            SkillInvocationRequest, SkillPackageId, SkillSource, SkillAuthorityId,
+            StaticSkillCatalog};
+        use std::time::Instant;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg_dir = tmp.path().join(ACTION_GUIDE_VISUAL_ANNOTATIONS_PACKAGE_ID);
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        let manifest = format!(
+            r#"schema_version = 1
+package_id = "{pkg}"
+name = "Host Visual"
+description = "A host skill."
+main = "SKILL.md"
+"#,
+            pkg = ACTION_GUIDE_VISUAL_ANNOTATIONS_PACKAGE_ID,
+        );
+        std::fs::write(pkg_dir.join("skill.toml"), manifest.as_bytes()).unwrap();
+        std::fs::write(pkg_dir.join("SKILL.md"), b"host body").unwrap();
+
+        let root = HostSkillRoot::open(tmp.path().to_str().unwrap()).unwrap();
+        let limits = SkillCatalogLimits::v1();
+        let report = StaticSkillCatalog::build(vec![SkillSource::HostRoot(root)], &limits);
+        assert_eq!(report.omitted_count, 0);
+
+        let skill = report
+            .catalog
+            .invoke(
+                &SkillInvocationRequest {
+                    source_authority: SkillAuthorityId::parse("rollshot.host").unwrap(),
+                    package_id: SkillPackageId::parse(ACTION_GUIDE_VISUAL_ANNOTATIONS_PACKAGE_ID)
+                        .unwrap(),
+                    expected_digest: None,
+                    invocation_kind: SkillInvocationKind::HostExplicit,
+                },
+                100,
+            )
+            .unwrap();
+        assert_eq!(skill.source_authority().as_str(), "rollshot.host");
+        assert!(VisualAnnotationProfile::from_skill(&skill).is_err());
     }
 
     // ---- Stream item builders ----
