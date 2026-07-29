@@ -1480,7 +1480,7 @@ fn map_store_error(e: TaskStoreError) -> rollshot_agent::continuity::ContextReco
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rollshot_agent::audit::{AuditEventV1, AuditTaskTerminalV1};
+    use rollshot_agent::audit::{AuditEventKindV1, AuditEventV1, AuditTaskTerminalV1};
     use rollshot_agent::authority::{
         AuthoritySnapshotReceiptV1, DisclosureCeiling, PreparedCapability, RunOperation,
     };
@@ -3348,5 +3348,74 @@ mod tests {
             audit_result.is_err(),
             "corrupt journal must fail audit read"
         );
+    }
+
+    #[test]
+    fn concurrent_audited_creates_from_two_domains_both_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+
+        // Distinct deterministic ids; the tempdir is fresh so no uniqueness
+        // across runs is needed. `ProductTaskId::new_v4()` does not exist.
+        let smart_task_id =
+            ProductTaskId::parse("task-00000000-0000-4000-8000-00000000000a").unwrap();
+        let caption_task_id =
+            ProductTaskId::parse("task-00000000-0000-4000-8000-00000000000b").unwrap();
+
+        let smart = ProductTaskSnapshot::new_v3(
+            smart_task_id,
+            TaskKind::SmartRedactionAuthor,
+            SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None),
+            1_000,
+        )
+        .unwrap();
+        let captions = ProductTaskSnapshot::new_v3(
+            caption_task_id,
+            TaskKind::ActionGuideCaptions,
+            SourceBinding::ActionGuideProject {
+                project_root_sha256: [3u8; 32],
+                revision: 1,
+                projection_digest: "ab".repeat(32),
+            },
+            1_000,
+        )
+        .unwrap();
+
+        let a = store.clone();
+        let b = store.clone();
+        let smart_id = smart.task_id().clone();
+        let captions_id = captions.task_id().clone();
+
+        let ha = std::thread::spawn(move || {
+            a.create_audited(&smart, AuditEventId::new_v4(), 1_000)
+        });
+        let hb = std::thread::spawn(move || {
+            b.create_audited(&captions, AuditEventId::new_v4(), 1_000)
+        });
+
+        ha.join().unwrap().expect("smart redaction create failed");
+        hb.join().unwrap().expect("caption create failed");
+
+        // Both files exist AND both survived the schema-3 load guard relaxed in
+        // Task 4, with their own domains intact.
+        let smart_loaded = store.load(&smart_id).expect("smart redaction load failed");
+        let caption_loaded = store.load(&captions_id).expect("caption load failed");
+        assert_eq!(smart_loaded.store_schema_version(), 3);
+        assert_eq!(caption_loaded.kind(), TaskKind::ActionGuideCaptions);
+        assert!(matches!(
+            caption_loaded.source_binding(),
+            SourceBinding::ActionGuideProject { revision: 1, .. }
+        ));
+
+        // Two audited creates means two journals, each with its own TaskCreated.
+        for id in [&smart_id, &captions_id] {
+            let kinds: Vec<_> = store
+                .committed_audit_events(id)
+                .unwrap()
+                .into_iter()
+                .map(|e| e.event().kind())
+                .collect();
+            assert_eq!(kinds, vec![AuditEventKindV1::TaskCreated], "{id:?}");
+        }
     }
 }
