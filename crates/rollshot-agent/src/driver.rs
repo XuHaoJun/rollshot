@@ -1829,6 +1829,9 @@ impl AgentRunner {
         provider: &dyn ProviderAdapter,
         budget: RunBudget,
         cancellation: &RunCancellation,
+        authority: &crate::authority::AuthoritySnapshot,
+        subject: &crate::authority::AuthoritySubject,
+        audit_sink: Option<&dyn crate::audit::AuditAppendSink>,
     ) -> crate::visual_annotation::VisualAnnotationRunTerminal {
         use crate::tools::ToolRegistryLimits;
         use crate::visual_annotation::{
@@ -1841,6 +1844,28 @@ impl AgentRunner {
 
         if cancellation.is_cancelled() {
             return VisualAnnotationRunTerminal::Cancelled;
+        }
+
+        // Authorize attachment disclosure before dispatching to provider.
+        if let Err(terminal) = authorize_visual_operation(
+            authority,
+            subject,
+            crate::authority::RunOperation::DiscloseScreenshotAttachment,
+            "DiscloseScreenshotAttachment",
+            audit_sink,
+        )
+        .await
+        {
+            return terminal;
+        }
+
+        // Validate disclosure ceiling against attachments.
+        if let Err(_err) = authority.validate_model_input(&input) {
+            tracing::debug!(
+                target: "rollshot::agent::visual_annotation",
+                "visual annotation attachment disclosure exceeded"
+            );
+            return VisualAnnotationRunTerminal::ProtocolFailure;
         }
 
         let attachments = input.take_model_attachments();
@@ -1996,6 +2021,19 @@ impl AgentRunner {
                     tracker.apply_turn();
                 }
                 rig_core::agent::run::AgentRunStep::CallTools { calls } => {
+                    // Authorize submit before accepting the terminal tool call.
+                    if let Err(terminal) = authorize_visual_operation(
+                        authority,
+                        subject,
+                        crate::authority::RunOperation::SubmitReviewCandidate,
+                        "SubmitReviewCandidate",
+                        audit_sink,
+                    )
+                    .await
+                    {
+                        return terminal;
+                    }
+
                     if calls.len() != 1
                         || calls[0].tool_call.function.name != SUBMIT_VISUAL_ANNOTATION_SUGGESTIONS
                     {

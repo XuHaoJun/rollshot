@@ -1764,6 +1764,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             let image = doc.document.source().clone();
             let image_width = image.width();
             let image_height = image.height();
+            let annotations = doc.document.annotations().to_vec();
 
             // Compute keyframe digest: SHA-256("rollshot-action-guide-keyframe-v1\0" || width_le || height_le || raw_rgba)
             let keyframe_sha256 = {
@@ -1779,7 +1780,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             // Annotation-state digest: SHA-256("rollshot-action-guide-annotations-v1\0" || annotations_json)
             let annotation_state_sha256 = {
                 use sha2::{Digest, Sha256};
-                let annotations_json = serde_json::to_vec(doc.document.annotations())
+                let annotations_json = serde_json::to_vec(&annotations)
                     .unwrap_or_default();
                 let mut hasher = Sha256::new();
                 hasher.update(b"rollshot-action-guide-annotations-v1\0");
@@ -1787,9 +1788,16 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                 hasher.finalize().into()
             };
 
-            let origin = rollshot_action::VisualAnnotationProposalOrigin::EphemeralGuide {
-                guide_digest: "00".repeat(32),
+            // Require task store for durable task lifecycle.
+            let Some(store) = state.task_store.clone() else {
+                state.visual_annotation_suggestion =
+                    super::VisualAnnotationSuggestionState::Idle;
+                state.message = Some(
+                    "Visual annotation suggestions require a saved project.".to_string(),
+                );
+                return Update::none();
             };
+            let context_request = super::visual_annotation_context_request(state);
             let adapter = match crate::result_workspace::workbench::build_adapter(&cfg) {
                 Ok(adapter) => adapter,
                 Err(error) => {
@@ -1815,7 +1823,9 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             );
             let input = super::visual_annotation_agent::VisualAnnotationTaskInput {
                 run_id,
-                origin,
+                origin: rollshot_action::VisualAnnotationProposalOrigin::EphemeralGuide {
+                    guide_digest: "00".repeat(32),
+                },
                 step,
                 document_state_id,
                 image,
@@ -1825,6 +1835,8 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             Update::task(Task::perform(
                 super::visual_annotation_agent::suggest_visual_annotation_task(
                     input,
+                    context_request,
+                    store,
                     format!("{}", cfg.provider),
                     cfg.model.clone(),
                     adapter,
@@ -1848,16 +1860,20 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                 return Update::none();
             }
             match result {
-                Ok(super::visual_annotation_agent::VisualAnnotationTaskResult::Proposal(
-                    proposal,
+                Ok(super::visual_annotation_agent::VisualAnnotationTaskResult::Success(
+                    success,
                 )) => {
                     tracing::info!(
                         target: "rollshot::action::visual_annotation_agent",
                         run_id,
+                        task_id = success.task_id.as_str(),
                         "visual annotation suggestion ready for review"
                     );
+                    // Store task ID and snapshot before showing PendingReview.
+                    state.visual_annotation_task_id = Some(success.task_id);
+                    state.visual_annotation_review_snapshot = Some(success.snapshot);
                     state.visual_annotation_suggestion =
-                        super::VisualAnnotationSuggestionState::PendingReview(proposal);
+                        super::VisualAnnotationSuggestionState::PendingReview(success.proposal);
                     state.message =
                         Some(VISUAL_ANNOTATION_STATUS_READY.to_string());
                 }
@@ -1879,6 +1895,8 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                         error = %message,
                         "visual annotation suggestion failed"
                     );
+                    state.visual_annotation_task_id = None;
+                    state.visual_annotation_review_snapshot = None;
                     state.visual_annotation_suggestion =
                         super::VisualAnnotationSuggestionState::Failed { message };
                     state.message = Some(
@@ -5999,13 +6017,13 @@ mod tests {
             other => panic!("expected Running, got {other:?}"),
         };
 
-        let proposal = visual_proposal_for_first_step(&mut state, run_id);
+        let success = visual_success_for_first_step(&mut state, run_id);
         let _ = update(
             &mut state,
             Message::VisualAnnotationProposalLoaded {
                 run_id,
                 result: Ok(
-                    crate::timeline_workspace::visual_annotation_agent::VisualAnnotationTaskResult::Proposal(proposal),
+                    crate::timeline_workspace::visual_annotation_agent::VisualAnnotationTaskResult::Success(success),
                 ),
             },
         );
@@ -6014,6 +6032,8 @@ mod tests {
             state.visual_annotation_suggestion,
             crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(_)
         ));
+        assert!(state.visual_annotation_task_id.is_some());
+        assert!(state.visual_annotation_review_snapshot.is_some());
     }
 
     #[test]
@@ -6030,13 +6050,13 @@ mod tests {
                 cancellation: rollshot_agent::runtime::RunCancellation::new(),
             };
 
-        let old_proposal = visual_proposal_for_first_step(&mut state, 1);
+        let old_success = visual_success_for_first_step(&mut state, 1);
         let _ = update(
             &mut state,
             Message::VisualAnnotationProposalLoaded {
                 run_id: 1,
                 result: Ok(
-                    crate::timeline_workspace::visual_annotation_agent::VisualAnnotationTaskResult::Proposal(old_proposal),
+                    crate::timeline_workspace::visual_annotation_agent::VisualAnnotationTaskResult::Success(old_success),
                 ),
             },
         );
@@ -6476,6 +6496,42 @@ mod tests {
             }],
         )
         .expect("valid proposal")
+    }
+
+    /// Helper: build a `VisualAnnotationRunSuccess` wrapping a proposal with a minimal snapshot.
+    fn visual_success_for_first_step(
+        state: &mut TimelineWorkspace,
+        run_id: u64,
+    ) -> crate::timeline_workspace::visual_annotation_agent::VisualAnnotationRunSuccess {
+        use rollshot_agent::product_task::{
+            ProductTaskSnapshot, SourceBinding, TaskKind,
+        };
+        let proposal = visual_proposal_for_first_step(state, run_id);
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            &format!("task-00000000-0000-4000-8000-{run_id:012x}"),
+        )
+        .unwrap();
+        let now = 1000;
+        let snapshot = ProductTaskSnapshot::new_v3(
+            task_id.clone(),
+            TaskKind::ActionGuideVisualAnnotation,
+            SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
+                guide_digest: "aa".repeat(32),
+                step_source: 10,
+                keyframe: 7,
+                keyframe_sha256: [1u8; 32],
+                annotation_state_sha256: [2u8; 32],
+            },
+            now,
+        )
+        .unwrap();
+        crate::timeline_workspace::visual_annotation_agent::VisualAnnotationRunSuccess {
+            task_id,
+            proposal,
+            snapshot,
+            provider_id: "test-provider".to_string(),
+            model_id: "test-model".to_string(),
+        }
     }
 
     fn proposal_for_synthetic_step(state: &TimelineWorkspace) -> VisualAnnotationProposal {

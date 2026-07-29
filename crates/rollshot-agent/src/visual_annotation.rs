@@ -1021,6 +1021,38 @@ pub(crate) mod tests {
             })
         }
 
+        /// Permissive authority for visual annotation tests — grants both
+        /// `DiscloseScreenshotAttachment` and `SubmitReviewCandidate`.
+        pub(crate) fn va_authority() -> (crate::authority::AuthoritySnapshot, crate::authority::AuthoritySubject) {
+            use crate::authority::{
+                AuthorityBinding, AuthoritySnapshot, AuthoritySubject, DisclosureCeiling,
+                RunOperation,
+            };
+            use crate::product_task::{ProductTaskId, TaskAttemptId};
+            use crate::domain::RunId;
+            use std::collections::BTreeSet;
+
+            let task_id = ProductTaskId::parse("task-00000000-0000-4000-8000-000000000001").unwrap();
+            let run_id = RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap();
+            let subject = AuthoritySubject::ActionGuideEphemeralGuide {
+                guide_digest: "aa".repeat(32),
+            };
+            let mut grants = BTreeSet::new();
+            grants.insert(RunOperation::DiscloseScreenshotAttachment);
+            grants.insert(RunOperation::SubmitReviewCandidate);
+            let binding = AuthorityBinding::new(task_id, TaskAttemptId::new(1), run_id, subject.clone());
+            let authority = AuthoritySnapshot::new(
+                binding,
+                "rollshot-v1".to_owned(),
+                DisclosureCeiling::FullScreenshot,
+                true,
+                BTreeSet::new(),
+                grants,
+            )
+            .unwrap();
+            (authority, subject)
+        }
+
         pub(crate) fn va_profile() -> crate::driver::VisualAnnotationProfile<'static> {
             let skill = crate::skills::bundled_action_guide_visual_annotations_use()
                 .expect("bundled visual skill must resolve");
@@ -1048,6 +1080,7 @@ pub(crate) mod tests {
             let input = authorized_input_with_one_png();
             let cancel = RunCancellation::new();
 
+            let (authority, subject) = va_authority();
             let result = runner
                 .run_visual_annotation_with_provider(
                     va_profile(),
@@ -1055,6 +1088,9 @@ pub(crate) mod tests {
                     &provider,
                     visual_annotation_run_budget(),
                     &cancel,
+                    &authority,
+                    &subject,
+                    None,
                 )
                 .await;
 
@@ -1096,6 +1132,7 @@ pub(crate) mod tests {
             let input = authorized_input_with_one_png();
             let cancel = RunCancellation::new();
 
+            let (authority, subject) = va_authority();
             let result = runner
                 .run_visual_annotation_with_provider(
                     va_profile(),
@@ -1103,6 +1140,9 @@ pub(crate) mod tests {
                     &provider,
                     visual_annotation_run_budget(),
                     &cancel,
+                    &authority,
+                    &subject,
+                    None,
                 )
                 .await;
 
@@ -1123,6 +1163,7 @@ pub(crate) mod tests {
             let input = authorized_input_with_one_png();
             let cancel = RunCancellation::new();
 
+            let (authority, subject) = va_authority();
             let result = runner
                 .run_visual_annotation_with_provider(
                     va_profile(),
@@ -1130,6 +1171,9 @@ pub(crate) mod tests {
                     &provider,
                     visual_annotation_run_budget(),
                     &cancel,
+                    &authority,
+                    &subject,
+                    None,
                 )
                 .await;
 
@@ -1155,6 +1199,7 @@ pub(crate) mod tests {
             let cancel = RunCancellation::new();
             cancel.cancel();
 
+            let (authority, subject) = va_authority();
             let result = runner
                 .run_visual_annotation_with_provider(
                     va_profile(),
@@ -1162,6 +1207,9 @@ pub(crate) mod tests {
                     &provider,
                     visual_annotation_run_budget(),
                     &cancel,
+                    &authority,
+                    &subject,
+                    None,
                 )
                 .await;
 
@@ -1188,8 +1236,9 @@ pub(crate) mod tests {
             let input = authorized_input_with_one_png();
             let cancel = RunCancellation::new();
 
+            let (authority, subject) = va_authority();
             let result = runner
-                .run_visual_annotation_with_provider(va_profile(), input, &provider, budget, &cancel)
+                .run_visual_annotation_with_provider(va_profile(), input, &provider, budget, &cancel, &authority, &subject, None)
                 .await;
 
             match result {
@@ -1217,6 +1266,7 @@ pub(crate) mod tests {
             let input = authorized_input_with_one_png();
             let cancel = RunCancellation::new();
 
+            let (authority, subject) = va_authority();
             let _ = runner
                 .run_visual_annotation_with_provider(
                     va_profile(),
@@ -1224,6 +1274,9 @@ pub(crate) mod tests {
                     &provider,
                     visual_annotation_run_budget(),
                     &cancel,
+                    &authority,
+                    &subject,
+                    None,
                 )
                 .await;
 
@@ -1273,6 +1326,7 @@ pub(crate) mod tests {
             let input = authorized_input_with_one_png();
             let cancel = RunCancellation::new();
 
+            let (authority, subject) = va_authority();
             let result = runner
                 .run_visual_annotation_with_provider(
                     va_profile(),
@@ -1280,6 +1334,9 @@ pub(crate) mod tests {
                     &provider,
                     visual_annotation_run_budget(),
                     &cancel,
+                    &authority,
+                    &subject,
+                    None,
                 )
                 .await;
 

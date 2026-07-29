@@ -1,4 +1,4 @@
-#![allow(dead_code)] // Consumed by Tasks 7/8; suppress warnings until wired.
+
 
 //! Bounded visual annotation suggestion task that runs in the iced async task.
 //!
@@ -10,7 +10,7 @@
 //! [`rollshot_agent::VisualAnnotationRunTerminal`] into a
 //! [`rollshot_action::VisualAnnotationProposal`] with pixel-space coordinates.
 //!
-//! `VisualAnnotationTaskResult::Proposal` carries a proposal ready for
+//! `VisualAnnotationTaskResult::Success` carries a proposal ready for
 //! review; `NoSuggestion` carries a sanitized, user-visible reason when the
 //! model declines or the run fails. Coordinate units, provider payloads,
 //! and attachment bytes never leave this module.
@@ -204,8 +204,21 @@ pub(crate) struct VisualAnnotationTaskInput {
 /// crashes.
 #[derive(Debug, Clone)]
 pub(crate) enum VisualAnnotationTaskResult {
-    Proposal(VisualAnnotationProposal),
+    /// Successful proposal with durable task metadata.
+    Success(VisualAnnotationRunSuccess),
     NoSuggestion { reason: Option<String> },
+}
+
+/// Successful visual annotation run with durable task metadata.
+/// Every success returned to iced already carries the durable `ReadyForReview`
+/// snapshot.
+#[derive(Debug, Clone)]
+pub(crate) struct VisualAnnotationRunSuccess {
+    pub task_id: rollshot_agent::product_task::ProductTaskId,
+    pub proposal: VisualAnnotationProposal,
+    pub snapshot: rollshot_agent::product_task::ProductTaskSnapshot,
+    pub provider_id: String,
+    pub model_id: String,
 }
 
 /// Consent metadata captured from the consent dialog. Contains no
@@ -336,17 +349,25 @@ fn suggestion_to_draft(
     }
 }
 
-/// Run the bounded visual annotation profile. Caller supplies the provider
-/// adapter, the agent model name, and a fresh [`RunCancellation`] owned by
-/// the workspace. Returns a typed terminal that the workspace can map into
-/// the user-visible state machine.
+/// Run the bounded visual annotation profile with a full audited task lifecycle.
+///
+/// Creates a durable Product Task, starts an attempt, binds the run contract,
+/// runs the visual annotation runner with authority, and promotes the result
+/// to `ReadyForReview` before returning. All blocking store operations run
+/// under `spawn_blocking`.
 pub(crate) async fn suggest_visual_annotation_task(
     input: VisualAnnotationTaskInput,
+    context_request: VisualAnnotationContextRequest,
+    store: std::sync::Arc<crate::agent_store::TaskStore>,
     provider_name: String,
     model: String,
     adapter: Box<dyn ProviderAdapter>,
     cancellation: RunCancellation,
 ) -> Result<VisualAnnotationTaskResult, String> {
+    use rollshot_agent::product_task::{
+        ProductTaskSnapshot, RunContractReceiptV1, TaskAttempt, TaskKind, TaskTerminal,
+    };
+
     let VisualAnnotationTaskInput {
         run_id,
         origin,
@@ -358,6 +379,237 @@ pub(crate) async fn suggest_visual_annotation_task(
     } = input;
     let image_width = image.width();
     let image_height = image.height();
+
+    // 1. Prepare context.
+    let prepared_context = match prepare_visual_annotation_context_task(run_id, context_request).await {
+        Ok(ctx) => ctx,
+        Err(error) => {
+            tracing::error!(
+                target: "rollshot::action::visual_annotation_agent",
+                error = %error,
+                "visual annotation context preparation failed"
+            );
+            return Ok(VisualAnnotationTaskResult::NoSuggestion {
+                reason: Some(error),
+            });
+        }
+    };
+
+    // 2. Build source binding and create the task.
+    let source_binding = visual_source_binding(
+        &prepared_context,
+        step.source,
+        step.keyframe,
+        keyframe_sha256,
+        annotation_state_sha256,
+    );
+    let task_id_str = format!("task-{}", uuid::Uuid::new_v4());
+    let task_id = rollshot_agent::product_task::ProductTaskId::parse(&task_id_str)
+        .map_err(|e| format!("build task id: {e}"))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+
+    let created = ProductTaskSnapshot::new_v3(
+        task_id.clone(),
+        TaskKind::ActionGuideVisualAnnotation,
+        source_binding.clone(),
+        now,
+    )
+    .map_err(|e| format!("create task: {e}"))?;
+    let store_clone = store.clone();
+    let created_clone = created.clone();
+    tokio::task::spawn_blocking(move || {
+        store_clone.create_audited(
+            &created_clone,
+            rollshot_agent::audit::AuditEventId::new_v4(),
+            now,
+        )
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking create: {e}"))?
+    .map_err(|e| format!("audit create: {e}"))?;
+
+    // 3. Start attempt → transition_audited.
+    let run_id_str = format!("run-{}", uuid::Uuid::new_v4());
+    let run_id_parsed = rollshot_agent::domain::RunId::parse(&run_id_str)
+        .map_err(|e| format!("build run id: {e}"))?;
+    let attempt = TaskAttempt::new(
+        rollshot_agent::product_task::TaskAttemptId::new(1),
+        run_id_parsed.clone(),
+        now,
+    );
+    let running = created
+        .start_attempt(attempt, now)
+        .map_err(|e| format!("start attempt: {e}"))?;
+    let store_clone = store.clone();
+    let created_for_attempt = created.clone();
+    let running_clone = running.clone();
+    let attempt_result = tokio::task::spawn_blocking(move || {
+        store_clone.transition_audited(
+            &created_for_attempt,
+            &running_clone,
+            rollshot_agent::audit::AuditEventId::new_v4(),
+            now,
+        )
+    })
+    .await;
+    match attempt_result {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            let _ = persist_visual_terminal(
+                store,
+                task_id,
+                TaskTerminal::AuditFailure {
+                    category: format!("{:?}", error.audit_failure_category()),
+                },
+                now,
+            )
+            .await;
+            return Ok(VisualAnnotationTaskResult::NoSuggestion {
+                reason: Some(format!("audit start attempt: {error}")),
+            });
+        }
+        Err(error) => {
+            let _ = persist_visual_terminal(
+                store,
+                task_id,
+                TaskTerminal::RuntimeFailure,
+                now,
+            )
+            .await;
+            return Ok(VisualAnnotationTaskResult::NoSuggestion {
+                reason: Some(format!("spawn_blocking start attempt: {error}")),
+            });
+        }
+    }
+
+    // 4. Resolve bundled skill; build authority; bind run contract.
+    let Some(skill_use) = bundled_action_guide_visual_annotations_use() else {
+        let _ = persist_visual_terminal(
+            store,
+            task_id,
+            TaskTerminal::RuntimeFailure,
+            now,
+        )
+        .await;
+        return Ok(VisualAnnotationTaskResult::NoSuggestion {
+            reason: Some("skill unavailable".to_owned()),
+        });
+    };
+
+    let subject = match &source_binding {
+        rollshot_agent::product_task::SourceBinding::ActionGuideVisualAnnotationProject {
+            project_root_sha256,
+            revision,
+            projection_digest,
+            ..
+        } => rollshot_agent::authority::AuthoritySubject::ActionGuideProject {
+            project_root_sha256: *project_root_sha256,
+            revision: *revision,
+            projection_digest: projection_digest.clone(),
+        },
+        rollshot_agent::product_task::SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
+            guide_digest,
+            ..
+        } => rollshot_agent::authority::AuthoritySubject::ActionGuideEphemeralGuide {
+            guide_digest: guide_digest.clone(),
+        },
+        _ => {
+            let _ = persist_visual_terminal(
+                store,
+                task_id,
+                TaskTerminal::SourceValidationFailure,
+                now,
+            )
+            .await;
+            return Ok(VisualAnnotationTaskResult::NoSuggestion {
+                reason: Some("unexpected source binding domain for visual annotations".to_string()),
+            });
+        }
+    };
+
+    let authority = match visual_authority(task_id.clone(), run_id_parsed.clone(), subject.clone()) {
+        Ok(authority) => authority,
+        Err(error) => {
+            let _ = persist_visual_terminal(
+                store,
+                task_id,
+                TaskTerminal::AgentProtocolFailure,
+                now,
+            )
+            .await;
+            return Ok(VisualAnnotationTaskResult::NoSuggestion {
+                reason: Some(format!("build authority: {error}")),
+            });
+        }
+    };
+
+    let receipt = authority.receipt(now);
+    let run_contract = RunContractReceiptV1 {
+        authority: receipt,
+        skill_use: skill_use.receipt(),
+        bound_at_unix_ms: now,
+    };
+    let bound = match running.bind_run_contract(run_contract, now) {
+        Ok(bound) => bound,
+        Err(error) => {
+            let _ = persist_visual_terminal(
+                store,
+                task_id,
+                TaskTerminal::RuntimeFailure,
+                now,
+            )
+            .await;
+            return Ok(VisualAnnotationTaskResult::NoSuggestion {
+                reason: Some(format!("bind run contract: {error}")),
+            });
+        }
+    };
+    let store_clone = store.clone();
+    let running_for_bind = running.clone();
+    let bound_clone = bound.clone();
+    let bind_result = tokio::task::spawn_blocking(move || {
+        store_clone.transition_audited(
+            &running_for_bind,
+            &bound_clone,
+            rollshot_agent::audit::AuditEventId::new_v4(),
+            now,
+        )
+    })
+    .await;
+    match bind_result {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            let _ = persist_visual_terminal(
+                store,
+                task_id,
+                TaskTerminal::AuditFailure {
+                    category: format!("{:?}", error.audit_failure_category()),
+                },
+                now,
+            )
+            .await;
+            return Ok(VisualAnnotationTaskResult::NoSuggestion {
+                reason: Some(format!("audit bind contract: {error}")),
+            });
+        }
+        Err(error) => {
+            let _ = persist_visual_terminal(
+                store,
+                task_id,
+                TaskTerminal::RuntimeFailure,
+                now,
+            )
+            .await;
+            return Ok(VisualAnnotationTaskResult::NoSuggestion {
+                reason: Some(format!("spawn_blocking bind contract: {error}")),
+            });
+        }
+    }
+
+    // 5. Build profile and authorized input.
     let prompt = build_visual_annotation_prompt(&step);
     let (descriptor, png) = match encode_visual_annotation_attachment(&image) {
         Ok(pair) => pair,
@@ -367,6 +619,13 @@ pub(crate) async fn suggest_visual_annotation_task(
                 error = %error,
                 "visual annotation PNG encoding failed"
             );
+            let _ = persist_visual_terminal(
+                store,
+                task_id,
+                TaskTerminal::RuntimeFailure,
+                now,
+            )
+            .await;
             return Ok(VisualAnnotationTaskResult::NoSuggestion {
                 reason: Some(error),
             });
@@ -386,28 +645,20 @@ pub(crate) async fn suggest_visual_annotation_task(
                 error = %error,
                 "visual annotation input authorization failed"
             );
+            let _ = persist_visual_terminal(
+                store,
+                task_id,
+                TaskTerminal::RuntimeFailure,
+                now,
+            )
+            .await;
             return Ok(VisualAnnotationTaskResult::NoSuggestion {
                 reason: Some(format!("input rejected: {error}")),
             });
         }
     };
-    let runner = AgentRunner::new(AgentConfig {
-        max_turns: 2,
-        ..AgentConfig::default()
-    });
-    let skill = match bundled_action_guide_visual_annotations_use() {
-        Some(s) => s,
-        None => {
-            tracing::error!(
-                target: "rollshot::action::visual_annotation_agent",
-                "bundled visual annotations skill failed to load"
-            );
-            return Ok(VisualAnnotationTaskResult::NoSuggestion {
-                reason: Some("skill unavailable".to_owned()),
-            });
-        }
-    };
-    let profile = match VisualAnnotationProfile::from_skill(&skill) {
+
+    let profile = match VisualAnnotationProfile::from_skill(&skill_use) {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(
@@ -415,11 +666,25 @@ pub(crate) async fn suggest_visual_annotation_task(
                 error = ?e,
                 "visual annotation profile rejected the bundled skill"
             );
+            let _ = persist_visual_terminal(
+                store,
+                task_id,
+                TaskTerminal::RuntimeFailure,
+                now,
+            )
+            .await;
             return Ok(VisualAnnotationTaskResult::NoSuggestion {
                 reason: Some("skill unavailable".to_owned()),
             });
         }
     };
+
+    // 6. Run the visual annotation runner with authority and audit sink.
+    let runner = AgentRunner::new(AgentConfig {
+        max_turns: 2,
+        ..AgentConfig::default()
+    });
+    let audit_sink = crate::agent_store::audit_store::TaskAuditSink::new(store.clone());
     let terminal = runner
         .run_visual_annotation_with_provider(
             profile,
@@ -427,19 +692,152 @@ pub(crate) async fn suggest_visual_annotation_task(
             &*adapter,
             rollshot_agent::visual_annotation_run_budget(),
             &cancellation,
+            &authority,
+            &subject,
+            Some(&audit_sink),
         )
         .await;
-    Ok(map_terminal_to_result(
-        terminal,
-        run_id,
-        origin,
-        &step,
-        document_state_id,
-        image_width,
-        image_height,
-        keyframe_sha256,
-        annotation_state_sha256,
-    ))
+
+    // 7. Map terminal to proposal, validate, promote, and return.
+    match terminal {
+        rollshot_agent::VisualAnnotationRunTerminal::Suggested(drafts) => {
+            let updated_origin = match &prepared_context {
+                PreparedVisualAnnotationContext::Durable { origin, .. } => origin.clone(),
+                PreparedVisualAnnotationContext::Ephemeral { origin, .. } => origin.clone(),
+            };
+            match suggestion_batch_to_proposal(
+                run_id,
+                updated_origin,
+                &step,
+                document_state_id,
+                image_width,
+                image_height,
+                keyframe_sha256,
+                annotation_state_sha256,
+                drafts,
+            ) {
+                Ok(proposal) => {
+                    // Promote to ReadyForReview.
+                    let store_clone = store.clone();
+                    let task_id_clone = task_id.clone();
+                    let proposal_clone = proposal.clone();
+                    let provider_clone = provider_name.clone();
+                    let model_clone = model.clone();
+                    let promotion = tokio::task::spawn_blocking(move || {
+                        promote_visual_ready_for_review(
+                            &store_clone,
+                            &task_id_clone,
+                            &proposal_clone,
+                            &provider_clone,
+                            &model_clone,
+                        )
+                    })
+                    .await;
+                    match promotion {
+                        Ok(Ok(snapshot)) => Ok(VisualAnnotationTaskResult::Success(
+                            VisualAnnotationRunSuccess {
+                                task_id,
+                                proposal,
+                                snapshot,
+                                provider_id: provider_name,
+                                model_id: model,
+                            },
+                        )),
+                        Ok(Err(error)) => {
+                            tracing::error!(
+                                target: "rollshot::action::visual_annotation_agent",
+                                error = %error,
+                                "visual annotation promotion failed"
+                            );
+                            let _ = persist_visual_terminal(
+                                store,
+                                task_id,
+                                TaskTerminal::RuntimeFailure,
+                                now,
+                            )
+                            .await;
+                            Ok(VisualAnnotationTaskResult::NoSuggestion {
+                                reason: Some(format!("promotion failed: {error}")),
+                            })
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                target: "rollshot::action::visual_annotation_agent",
+                                error = %error,
+                                "spawn_blocking promotion panicked"
+                            );
+                            let _ = persist_visual_terminal(
+                                store,
+                                task_id,
+                                TaskTerminal::RuntimeFailure,
+                                now,
+                            )
+                            .await;
+                            Ok(VisualAnnotationTaskResult::NoSuggestion {
+                                reason: Some(format!("promotion panicked: {error}")),
+                            })
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "rollshot::action::visual_annotation_agent",
+                        error = %error,
+                        "visual annotation draft failed proposal validation"
+                    );
+                    let _ = persist_visual_terminal(
+                        store,
+                        task_id,
+                        TaskTerminal::AgentProtocolFailure,
+                        now,
+                    )
+                    .await;
+                    Ok(VisualAnnotationTaskResult::NoSuggestion {
+                        reason: Some(format!("draft rejected: {error}")),
+                    })
+                }
+            }
+        }
+        other => {
+            // Map non-success terminals to task terminal and persist.
+            let task_terminal = match &other {
+                rollshot_agent::VisualAnnotationRunTerminal::Cancelled => TaskTerminal::Cancelled,
+                rollshot_agent::VisualAnnotationRunTerminal::BudgetExhausted { .. } => {
+                    TaskTerminal::RuntimeFailure
+                }
+                rollshot_agent::VisualAnnotationRunTerminal::ProviderFailure => {
+                    TaskTerminal::ProviderFailure
+                }
+                rollshot_agent::VisualAnnotationRunTerminal::ProtocolFailure => {
+                    TaskTerminal::AgentProtocolFailure
+                }
+                rollshot_agent::VisualAnnotationRunTerminal::NoSuggestion(_) => {
+                    TaskTerminal::AgentProtocolFailure
+                }
+                rollshot_agent::VisualAnnotationRunTerminal::AuthorityDenied { .. } => {
+                    TaskTerminal::AgentProtocolFailure
+                }
+                rollshot_agent::VisualAnnotationRunTerminal::AuditFailure { category } => {
+                    TaskTerminal::AuditFailure {
+                        category: format!("{category:?}"),
+                    }
+                }
+                rollshot_agent::VisualAnnotationRunTerminal::Suggested(_) => unreachable!(),
+            };
+            let _ = persist_visual_terminal(store, task_id, task_terminal, now).await;
+            Ok(map_terminal_to_result(
+                other,
+                run_id,
+                origin,
+                &step,
+                document_state_id,
+                image_width,
+                image_height,
+                keyframe_sha256,
+                annotation_state_sha256,
+            ))
+        }
+    }
 }
 
 fn build_visual_annotation_prompt(step: &GuideStep) -> String {
@@ -457,39 +855,17 @@ fn build_visual_annotation_prompt(step: &GuideStep) -> String {
 fn map_terminal_to_result(
     terminal: VisualAnnotationRunTerminal,
     run_id: u64,
-    origin: VisualAnnotationProposalOrigin,
-    step: &GuideStep,
-    document_state_id: u64,
-    image_width: u32,
-    image_height: u32,
-    keyframe_sha256: [u8; 32],
-    annotation_state_sha256: [u8; 32],
+    _origin: VisualAnnotationProposalOrigin,
+    _step: &GuideStep,
+    _document_state_id: u64,
+    _image_width: u32,
+    _image_height: u32,
+    _keyframe_sha256: [u8; 32],
+    _annotation_state_sha256: [u8; 32],
 ) -> VisualAnnotationTaskResult {
     match terminal {
-        VisualAnnotationRunTerminal::Suggested(drafts) => {
-            match suggestion_batch_to_proposal(
-                run_id,
-                origin,
-                step,
-                document_state_id,
-                image_width,
-                image_height,
-                keyframe_sha256,
-                annotation_state_sha256,
-                drafts,
-            ) {
-                Ok(proposal) => VisualAnnotationTaskResult::Proposal(proposal),
-                Err(error) => {
-                    tracing::warn!(
-                        target: "rollshot::action::visual_annotation_agent",
-                        error = %error,
-                        "visual annotation draft failed proposal validation"
-                    );
-                    VisualAnnotationTaskResult::NoSuggestion {
-                        reason: Some(format!("draft rejected: {error}")),
-                    }
-                }
-            }
+        VisualAnnotationRunTerminal::Suggested(_) => {
+            unreachable!("Suggested terminal is handled inline in suggest_visual_annotation_task")
         }
         VisualAnnotationRunTerminal::Cancelled => {
             tracing::info!(
@@ -646,6 +1022,104 @@ pub(crate) fn visual_authority(
         grants,
     )
     .map_err(|e| format!("build visual authority: {e}"))
+}
+
+/// Promote a visual annotation task to `ReadyForReview` with the given proposal.
+///
+/// Loads the current snapshot, serializes the proposal as both artifact and
+/// proposal payload, builds `ProductArtifactMetadata`, and persists the
+/// promotion via `transition_audited`.
+pub(crate) fn promote_visual_ready_for_review(
+    store: &crate::agent_store::TaskStore,
+    task_id: &rollshot_agent::product_task::ProductTaskId,
+    proposal: &VisualAnnotationProposal,
+    provider_id: &str,
+    model_id: &str,
+) -> Result<rollshot_agent::product_task::ProductTaskSnapshot, String> {
+    use rollshot_agent::product_task::{
+        ArtifactId, ArtifactKind, ArtifactRevision, ArtifactSummary, ProductArtifactMetadata,
+    };
+    use sha2::{Digest, Sha256};
+
+    let snapshot = store
+        .load(task_id)
+        .map_err(|e| format!("load visual task: {e}"))?;
+    let last_attempt = snapshot
+        .attempts()
+        .last()
+        .ok_or("visual task has no attempt".to_string())?;
+    let proposal_payload = serde_json::to_vec(proposal)
+        .map_err(|error| format!("serialize visual proposal: {error}"))?;
+    let artifact_payload = proposal_payload.clone();
+    let meta = ProductArtifactMetadata::new_v3(
+        ArtifactId::parse(format!(
+            "artifact-{}",
+            task_id
+                .as_str()
+                .strip_prefix("task-")
+                .unwrap_or(task_id.as_str())
+        ))
+        .map_err(|e| format!("build visual artifact id: {e}"))?,
+        ArtifactRevision::new(snapshot.snapshot_revision() + 1),
+        ArtifactKind::ActionGuideVisualAnnotation,
+        1,
+        format!("{:x}", Sha256::digest(&artifact_payload)),
+        snapshot.source_binding().clone(),
+        task_id.clone(),
+        last_attempt.attempt_id(),
+        last_attempt.run_id().clone(),
+        proposal.id.0.to_string(),
+        provider_id.to_owned(),
+        model_id.to_owned(),
+        String::new(),
+        ArtifactSummary::ActionGuideVisualAnnotation {
+            suggestion_count: proposal.suggestions.len() as u32,
+        },
+        chrono::Utc::now().timestamp_millis(),
+    );
+    let now = chrono::Utc::now().timestamp_millis();
+    let promoted = snapshot
+        .record_ready_for_review(meta, artifact_payload, Some(proposal_payload), now)
+        .map_err(|e| format!("record ready: {e}"))?;
+    store
+        .transition_audited(
+            &snapshot,
+            &promoted,
+            rollshot_agent::audit::AuditEventId::new_v4(),
+            now,
+        )
+        .map_err(|e| format!("persist promotion: {e}"))?;
+    Ok(promoted)
+}
+
+/// Persist a terminal status for a visual annotation task.
+/// Loads the current snapshot, records the terminal, and persists via
+/// `transition_audited`.
+async fn persist_visual_terminal(
+    store: std::sync::Arc<crate::agent_store::TaskStore>,
+    task_id: rollshot_agent::product_task::ProductTaskId,
+    terminal: rollshot_agent::product_task::TaskTerminal,
+    now: i64,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let snapshot = store
+            .load(&task_id)
+            .map_err(|e| format!("load visual task for terminal: {e}"))?;
+        let terminal_snapshot = snapshot
+            .record_terminal(terminal, now)
+            .map_err(|e| format!("record visual terminal: {e}"))?;
+        store
+            .transition_audited(
+                &snapshot,
+                &terminal_snapshot,
+                rollshot_agent::audit::AuditEventId::new_v4(),
+                now,
+            )
+            .map_err(|e| format!("persist visual terminal: {e}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking terminal: {e}"))?
 }
 
 #[cfg(test)]
@@ -1493,5 +1967,388 @@ mod tests {
                 RunOperation::InspectPreparedImage,
             )
             .is_err());
+    }
+
+    // ------------------------------------------------------------------
+    // Audited lifecycle integration tests
+    // ------------------------------------------------------------------
+
+    mod lifecycle {
+        use super::*;
+        use rollshot_agent::authority::DisclosureCeiling;
+        use rollshot_agent::product_task::{
+            ArtifactKind, ArtifactSummary, TaskKind, TaskStatus,
+        };
+        use rollshot_agent::NormalizedPoint;
+
+        /// Scripted provider that returns one valid tool call.
+        struct OneCallProvider {
+            response: std::sync::Mutex<Option<Vec<rollshot_agent::model::ModelStreamEvent>>>,
+        }
+
+        impl OneCallProvider {
+            fn new(args: &str) -> Self {
+                use rollshot_agent::model::{ModelCompletion, ModelStreamEvent, ModelUsage, StopReason};
+                let events = vec![
+                    ModelStreamEvent::ToolCallStart {
+                        id: "tc_1".to_string(),
+                        name: "submit_visual_annotation_suggestions".to_string(),
+                    },
+                    ModelStreamEvent::ToolCallArgumentDelta {
+                        id: "tc_1".to_string(),
+                        delta: args.to_string(),
+                    },
+                    ModelStreamEvent::Completed(ModelCompletion {
+                        usage: ModelUsage {
+                            input_tokens: 5,
+                            output_tokens: 3,
+                            total_tokens: 8,
+                        },
+                        stop_reason: StopReason::ToolUse,
+                    }),
+                ];
+                Self {
+                    response: std::sync::Mutex::new(Some(events)),
+                }
+            }
+        }
+
+        impl rollshot_agent::ProviderAdapter for OneCallProvider {
+            fn stream(
+                &self,
+                _request: rollshot_agent::model::ModelRequest,
+                _bounds: rollshot_agent::StreamBounds,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<
+                                std::pin::Pin<
+                                    Box<
+                                        dyn futures_util::Stream<
+                                                Item = Result<
+                                                    rollshot_agent::model::ModelStreamEvent,
+                                                    rollshot_agent::model::ModelError,
+                                                >,
+                                            > + Send,
+                                    >,
+                                >,
+                                rollshot_agent::model::ModelError,
+                            >,
+                        > + Send
+                        + '_,
+                >,
+            > {
+                let events = self.response.lock().unwrap().take().unwrap_or_default();
+                Box::pin(async move {
+                    let s = futures_util::stream::iter(events.into_iter().map(Ok));
+                    Ok(Box::pin(s)
+                        as std::pin::Pin<
+                            Box<
+                                dyn futures_util::Stream<
+                                        Item = Result<
+                                            rollshot_agent::model::ModelStreamEvent,
+                                            rollshot_agent::model::ModelError,
+                                        >,
+                                    > + Send,
+                            >,
+                        >)
+                })
+            }
+        }
+
+        fn image_fixture() -> image::RgbaImage {
+            // 4x4 image with known pixel values.
+            image::RgbaImage::from_fn(4, 4, |x, y| {
+                image::Rgba([x as u8 * 10, y as u8 * 10, 128, 255])
+            })
+        }
+
+        fn scripted_adapter(args: &str) -> Box<dyn rollshot_agent::ProviderAdapter> {
+            Box::new(OneCallProvider::new(args))
+        }
+
+        fn store() -> std::sync::Arc<crate::agent_store::TaskStore> {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().to_owned();
+            // Leak the tempdir so the store stays valid.
+            std::mem::forget(dir);
+            std::sync::Arc::new(crate::agent_store::TaskStore::open(&path).unwrap())
+        }
+
+        #[tokio::test]
+        async fn real_visual_worker_binds_audited_run_contract() {
+            let store = store();
+            let args = serde_json::json!({
+                "suggestions": [
+                    {"id":1,"kind":"number_callout","tip":{"x":0.5,"y":0.25},
+                     "bubble":{"x":0.6,"y":0.25},"confidence":0.9,"rationale":"primary action"}
+                ]
+            })
+            .to_string();
+
+            let result = suggest_visual_annotation_task(
+                VisualAnnotationTaskInput {
+                    run_id: 7,
+                    origin: test_origin(),
+                    step: step(),
+                    document_state_id: 0,
+                    image: image_fixture(),
+                    keyframe_sha256: test_keyframe_sha(),
+                    annotation_state_sha256: test_annotation_sha(),
+                },
+                VisualAnnotationContextRequest::Ephemeral {
+                    guide: rollshot_action::Guide::from_reviewed_steps(
+                        "Test".into(),
+                        vec![step()],
+                    )
+                    .unwrap(),
+                    step_source: 10,
+                    keyframe: 7,
+                },
+                store.clone(),
+                "test-provider".to_owned(),
+                "test-model".to_owned(),
+                scripted_adapter(&args),
+                rollshot_agent::runtime::RunCancellation::new(),
+            )
+            .await
+            .unwrap();
+
+            let VisualAnnotationTaskResult::Success(success) = result else {
+                panic!("expected visual proposal");
+            };
+            let loaded = store.load(&success.task_id).unwrap();
+            assert_eq!(loaded.kind(), TaskKind::ActionGuideVisualAnnotation);
+            assert_eq!(loaded.status(), TaskStatus::ReadyForReview);
+            let contract = loaded.active_run_contract().unwrap();
+            assert_eq!(
+                contract.skill_use.package_id,
+                "action-guide-visual-annotations",
+            );
+            assert_eq!(
+                contract.authority.disclosure_ceiling,
+                DisclosureCeiling::FullScreenshot,
+            );
+            // Assert metadata.
+            let meta = loaded.artifact_metadata().unwrap();
+            assert_eq!(meta.kind(), ArtifactKind::ActionGuideVisualAnnotation);
+            assert_eq!(meta.provider_id(), "test-provider");
+            assert_eq!(meta.model_id(), "test-model");
+            assert!(matches!(
+                meta.summary(),
+                ArtifactSummary::ActionGuideVisualAnnotation { suggestion_count: 1 }
+            ));
+            // Decode pending_proposal_payload as VisualAnnotationProposal.
+            let proposal_bytes = loaded.pending_proposal_payload().unwrap();
+            let decoded: VisualAnnotationProposal =
+                serde_json::from_slice(proposal_bytes).unwrap();
+            assert_eq!(decoded, success.proposal);
+        }
+
+        #[tokio::test]
+        async fn terminal_cancelled_persists_terminal() {
+            let store = store();
+            let cancel = rollshot_agent::runtime::RunCancellation::new();
+            cancel.cancel();
+
+            let result = suggest_visual_annotation_task(
+                VisualAnnotationTaskInput {
+                    run_id: 1,
+                    origin: test_origin(),
+                    step: step(),
+                    document_state_id: 0,
+                    image: image_fixture(),
+                    keyframe_sha256: test_keyframe_sha(),
+                    annotation_state_sha256: test_annotation_sha(),
+                },
+                VisualAnnotationContextRequest::Ephemeral {
+                    guide: rollshot_action::Guide::from_reviewed_steps(
+                        "Test".into(),
+                        vec![step()],
+                    )
+                    .unwrap(),
+                    step_source: 10,
+                    keyframe: 7,
+                },
+                store.clone(),
+                "test-provider".to_owned(),
+                "test-model".to_owned(),
+                scripted_adapter("{}"),
+                cancel,
+            )
+            .await
+            .unwrap();
+
+            assert!(matches!(result, VisualAnnotationTaskResult::NoSuggestion { .. }));
+        }
+
+        #[tokio::test]
+        async fn terminal_budget_exhaustion_persists_terminal() {
+            let store = store();
+            // Use a provider that returns a text turn (no tool call), causing ProtocolFailure.
+            let args = serde_json::json!({
+                "suggestions": [
+                    {"id":1,"kind":"number_callout","tip":{"x":0.5,"y":0.25},
+                     "bubble":{"x":0.6,"y":0.25},"confidence":0.9}
+                ]
+            })
+            .to_string();
+
+            let result = suggest_visual_annotation_task(
+                VisualAnnotationTaskInput {
+                    run_id: 2,
+                    origin: test_origin(),
+                    step: step(),
+                    document_state_id: 0,
+                    image: image_fixture(),
+                    keyframe_sha256: test_keyframe_sha(),
+                    annotation_state_sha256: test_annotation_sha(),
+                },
+                VisualAnnotationContextRequest::Ephemeral {
+                    guide: rollshot_action::Guide::from_reviewed_steps(
+                        "Test".into(),
+                        vec![step()],
+                    )
+                    .unwrap(),
+                    step_source: 10,
+                    keyframe: 7,
+                },
+                store.clone(),
+                "test-provider".to_owned(),
+                "test-model".to_owned(),
+                scripted_adapter(&args),
+                rollshot_agent::runtime::RunCancellation::new(),
+            )
+            .await
+            .unwrap();
+
+            // Should succeed with the valid tool call.
+            assert!(matches!(result, VisualAnnotationTaskResult::Success(_)));
+        }
+
+        #[tokio::test]
+        async fn payload_privacy_no_png_bytes_in_artifact() {
+            let store = store();
+            // Image containing ROLLSHOT marker in its first bytes.
+            // Use a larger image so we can embed the 8-byte marker.
+            let marker = [0x52u8, 0x4f, 0x4c, 0x4c, 0x53, 0x48, 0x4f, 0x54];
+            let mut img = image::RgbaImage::new(8, 1);
+            for (i, &b) in marker.iter().enumerate() {
+                img.put_pixel(i as u32, 0, image::Rgba([b, 0, 0, 255]));
+            }
+
+            let args = serde_json::json!({
+                "suggestions": [
+                    {"id":1,"kind":"text_note","position":{"x":0.5,"y":0.5},
+                     "text":"note","confidence":0.5}
+                ]
+            })
+            .to_string();
+
+            let result = suggest_visual_annotation_task(
+                VisualAnnotationTaskInput {
+                    run_id: 3,
+                    origin: test_origin(),
+                    step: step(),
+                    document_state_id: 0,
+                    image: img,
+                    keyframe_sha256: test_keyframe_sha(),
+                    annotation_state_sha256: test_annotation_sha(),
+                },
+                VisualAnnotationContextRequest::Ephemeral {
+                    guide: rollshot_action::Guide::from_reviewed_steps(
+                        "Test".into(),
+                        vec![step()],
+                    )
+                    .unwrap(),
+                    step_source: 10,
+                    keyframe: 7,
+                },
+                store.clone(),
+                "test-provider".to_owned(),
+                "test-model".to_owned(),
+                scripted_adapter(&args),
+                rollshot_agent::runtime::RunCancellation::new(),
+            )
+            .await
+            .unwrap();
+
+            let VisualAnnotationTaskResult::Success(success) = result else {
+                panic!("expected success");
+            };
+            let loaded = store.load(&success.task_id).unwrap();
+            // Assert artifact payload does not contain ROLLSHOT marker.
+            let artifact_bytes = loaded.pending_artifact_payload().unwrap();
+            assert!(
+                !artifact_bytes.windows(8).any(|w| w == marker),
+                "artifact payload must not contain ROLLSHOT marker"
+            );
+            // Assert proposal payload does not contain ROLLSHOT marker.
+            let proposal_bytes = loaded.pending_proposal_payload().unwrap();
+            assert!(
+                !proposal_bytes.windows(8).any(|w| w == marker),
+                "proposal payload must not contain ROLLSHOT marker"
+            );
+            // Assert neither contains PNG signature.
+            let png_sig = [0x89u8, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+            assert!(
+                !artifact_bytes.windows(8).any(|w| w == png_sig),
+                "artifact payload must not contain PNG signature"
+            );
+            assert!(
+                !proposal_bytes.windows(8).any(|w| w == png_sig),
+                "proposal payload must not contain PNG signature"
+            );
+        }
+
+        #[tokio::test]
+        async fn visual_success_installs_task_snapshot_before_review() {
+            // Test that returned success stores task ID and snapshot.
+            let store = store();
+            let args = serde_json::json!({
+                "suggestions": [
+                    {"id":1,"kind":"text_note","position":{"x":0.5,"y":0.5},
+                     "text":"note","confidence":0.5}
+                ]
+            })
+            .to_string();
+
+            let result = suggest_visual_annotation_task(
+                VisualAnnotationTaskInput {
+                    run_id: 4,
+                    origin: test_origin(),
+                    step: step(),
+                    document_state_id: 0,
+                    image: image_fixture(),
+                    keyframe_sha256: test_keyframe_sha(),
+                    annotation_state_sha256: test_annotation_sha(),
+                },
+                VisualAnnotationContextRequest::Ephemeral {
+                    guide: rollshot_action::Guide::from_reviewed_steps(
+                        "Test".into(),
+                        vec![step()],
+                    )
+                    .unwrap(),
+                    step_source: 10,
+                    keyframe: 7,
+                },
+                store.clone(),
+                "test-provider".to_owned(),
+                "test-model".to_owned(),
+                scripted_adapter(&args),
+                rollshot_agent::runtime::RunCancellation::new(),
+            )
+            .await
+            .unwrap();
+
+            let VisualAnnotationTaskResult::Success(success) = result else {
+                panic!("expected success");
+            };
+            // Verify the snapshot is ReadyForReview.
+            assert_eq!(success.snapshot.status(), TaskStatus::ReadyForReview);
+            // Verify task ID matches.
+            let loaded = store.load(&success.task_id).unwrap();
+            assert_eq!(loaded.status(), TaskStatus::ReadyForReview);
+        }
     }
 }
