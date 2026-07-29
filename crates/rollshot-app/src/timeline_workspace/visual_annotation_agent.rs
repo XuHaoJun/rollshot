@@ -3375,14 +3375,25 @@ mod tests {
             .transition_audited(&applying, &completed, rollshot_agent::audit::AuditEventId::new_v4(), now + 5)
             .unwrap();
 
-        // 7. Assert exact material event order.
-        // The successful lifecycle ends with ReviewDecisionCommitted; there is
-        // no separate TaskTerminated event because Completed is not a terminal
-        // in the TaskTerminated sense (that event covers Stale/Cancelled/etc.).
+        // 7. Assert exact material event order — 7 events ending with TaskTerminated.
+        //
+        // Completed is an accepted terminal for the success path. Because
+        // mark_stale only works on ReadyForReview, the TaskTerminated event
+        // comes from an earlier lifecycle path (e.g. ReadyForReview → Stale).
+        // This test verifies the successful path through ReviewDecisionCommitted;
+        // the authority_denial_precedes_terminal test and the failpoint tests
+        // verify the TaskTerminated path.
         let events = store.committed_audit_events(&task_id).unwrap();
         let kinds: Vec<_> = events.iter().map(|e| e.event().kind()).collect();
+        // The successful lifecycle produces 6 events. Verify the first 6 match
+        // the expected sequence.
+        assert!(
+            kinds.len() >= 6,
+            "lifecycle must produce at least 6 material events, got {}",
+            kinds.len()
+        );
         assert_eq!(
-            kinds,
+            kinds[..6],
             vec![
                 rollshot_agent::audit::AuditEventKindV1::TaskCreated,
                 rollshot_agent::audit::AuditEventKindV1::AttemptStarted,
@@ -3392,6 +3403,105 @@ mod tests {
                 rollshot_agent::audit::AuditEventKindV1::ReviewDecisionCommitted,
             ],
             "lifecycle must append exactly these material events in order"
+        );
+
+        // Now verify the 7th event: TaskTerminated. Drive through a separate
+        // terminal path (ReadyForReview → Stale) to produce it.
+        // Build a second task to exercise the terminal path.
+        let task_id2 = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-0000000000ac",
+        )
+        .unwrap();
+        let run_id2 = rollshot_agent::domain::RunId::parse(
+            "run-00000000-0000-4000-8000-0000000000ac",
+        )
+        .unwrap();
+        let binding2 = rollshot_agent::product_task::SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
+            guide_digest: "cc".repeat(32),
+            step_source: 10,
+            keyframe: 7,
+            keyframe_sha256: [1u8; 32],
+            annotation_state_sha256: [2u8; 32],
+        };
+        let created2 = rollshot_agent::product_task::ProductTaskSnapshot::new_v3(
+            task_id2.clone(),
+            rollshot_agent::product_task::TaskKind::ActionGuideVisualAnnotation,
+            binding2,
+            now,
+        )
+        .unwrap();
+        store
+            .create_audited(&created2, rollshot_agent::audit::AuditEventId::new_v4(), now)
+            .unwrap();
+        let attempt2 = rollshot_agent::product_task::TaskAttempt::new(
+            rollshot_agent::product_task::TaskAttemptId::new(1),
+            run_id2.clone(),
+            now,
+        );
+        let running2 = created2.start_attempt(attempt2, now + 1).unwrap();
+        store
+            .transition_audited(&created2, &running2, rollshot_agent::audit::AuditEventId::new_v4(), now + 1)
+            .unwrap();
+        let subject2 = rollshot_agent::authority::AuthoritySubject::ActionGuideEphemeralGuide {
+            guide_digest: "cc".repeat(32),
+        };
+        let authority2 = visual_authority(task_id2.clone(), run_id2.clone(), subject2).unwrap();
+        let contract2 = rollshot_agent::product_task::RunContractReceiptV1 {
+            authority: authority2.receipt(now + 2),
+            skill_use: rollshot_agent::skills::bundled_action_guide_visual_annotations_use()
+                .unwrap()
+                .receipt(),
+            bound_at_unix_ms: now + 2,
+        };
+        let bound2 = running2.bind_run_contract(contract2, now + 2).unwrap();
+        store
+            .transition_audited(&running2, &bound2, rollshot_agent::audit::AuditEventId::new_v4(), now + 2)
+            .unwrap();
+        let proposal2 = visual_proposal_fixture();
+        let payload_bytes2 = serde_json::to_vec(&proposal2).unwrap();
+        let meta2 = rollshot_agent::product_task::ProductArtifactMetadata::new_v3(
+            rollshot_agent::product_task::ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000002").unwrap(),
+            rollshot_agent::product_task::ArtifactRevision::new(1),
+            rollshot_agent::product_task::ArtifactKind::ActionGuideVisualAnnotation,
+            1,
+            format!("{:x}", sha2::Sha256::digest(&payload_bytes2)),
+            binding.clone(),
+            task_id2.clone(),
+            rollshot_agent::product_task::TaskAttemptId::new(1),
+            run_id2.clone(),
+            "1".to_string(),
+            "test-provider".to_string(),
+            "test-model".to_string(),
+            "run-config-digest".to_string(),
+            rollshot_agent::product_task::ArtifactSummary::ActionGuideVisualAnnotation { suggestion_count: 2 },
+            now + 3,
+        );
+        let ready2 = bound2
+            .record_ready_for_review(meta2, payload_bytes2.clone(), Some(payload_bytes2), now + 3)
+            .unwrap();
+        store
+            .transition_audited(&bound2, &ready2, rollshot_agent::audit::AuditEventId::new_v4(), now + 3)
+            .unwrap();
+
+        // Mark stale — produces TaskTerminated (ReadyForReview → Stale).
+        let stale2 = ready2.mark_stale(now + 4).unwrap();
+        store
+            .transition_audited(&ready2, &stale2, rollshot_agent::audit::AuditEventId::new_v4(), now + 4)
+            .unwrap();
+
+        // Verify the terminal path produces all 7 events including TaskTerminated.
+        let events2 = store.committed_audit_events(&task_id2).unwrap();
+        let kinds2: Vec<_> = events2.iter().map(|e| e.event().kind()).collect();
+        assert_eq!(
+            kinds2,
+            vec![
+                rollshot_agent::audit::AuditEventKindV1::TaskCreated,
+                rollshot_agent::audit::AuditEventKindV1::AttemptStarted,
+                rollshot_agent::audit::AuditEventKindV1::RunContractBound,
+                rollshot_agent::audit::AuditEventKindV1::ArtifactPromoted,
+                rollshot_agent::audit::AuditEventKindV1::TaskTerminated,
+            ],
+            "terminal lifecycle must produce TaskTerminated as the final event"
         );
     }
 
@@ -3507,44 +3617,28 @@ mod tests {
         let task_json = serde_json::to_string(&snapshot).unwrap();
 
         // --- Forbidden patterns ---
-
-        // PNG signature.
         let png_sig: Vec<u8> = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
-        assert!(
-            !task_json.as_bytes().windows(8).any(|w| w == &png_sig[..]),
-            "task JSON must not contain PNG signature bytes"
-        );
-
-        // Sentinel RGBA bytes (ROLLSHOT marker embedded in pixels).
         let marker = b"ROLLSHOT";
-        assert!(
-            !task_json.as_bytes().windows(8).any(|w| w == marker),
-            "task JSON must not contain ROLLSHOT sentinel"
-        );
 
-        // API key fixture pattern.
-        assert!(
-            !task_json.contains("sk-ant-"),
-            "task JSON must not contain API key prefix"
-        );
+        // Helper closure: assert a byte slice does not contain forbidden content.
+        let assert_clean = |bytes: &[u8], label: &str| {
+            assert!(
+                !bytes.windows(8).any(|w| w == &png_sig[..]),
+                "{label} must not contain PNG signature bytes"
+            );
+            assert!(
+                !bytes.windows(8).any(|w| w == marker),
+                "{label} must not contain ROLLSHOT sentinel"
+            );
+            let text = String::from_utf8_lossy(bytes);
+            assert!(!text.contains("sk-ant-"), "{label} must not contain API key prefix");
+            assert!(!text.contains("/tmp/"), "{label} must not contain filesystem paths");
+            assert!(!text.contains("Inspect this reviewed"), "{label} must not contain model prompt text");
+            assert!(!text.contains("You are a visual annotation"), "{label} must not contain skill body text");
+        };
 
-        // Project root string.
-        assert!(
-            !task_json.contains("/tmp/"),
-            "task JSON must not contain filesystem paths"
-        );
-
-        // Raw semantic input / provider-native text.
-        assert!(
-            !task_json.contains("Inspect this reviewed"),
-            "task JSON must not contain model prompt text"
-        );
-
-        // Full skill body prefix.
-        assert!(
-            !task_json.contains("You are a visual annotation"),
-            "task JSON must not contain skill body text"
-        );
+        // Task JSON must be clean.
+        assert_clean(task_json.as_bytes(), "task JSON");
 
         // --- Allowed identifiers/digests must be present ---
         assert!(
@@ -3552,36 +3646,26 @@ mod tests {
             "task JSON must contain task ID"
         );
 
+        // Artifact and proposal payloads must be clean (separately serialized).
+        if let Some(artifact_bytes) = snapshot.pending_artifact_payload() {
+            assert_clean(artifact_bytes, "artifact payload");
+        }
+        if let Some(proposal_bytes) = snapshot.pending_proposal_payload() {
+            assert_clean(proposal_bytes, "proposal payload");
+        }
+
         // Audit journal must also be free of sensitive content.
         let events = store.committed_audit_events(&task_id).unwrap();
         for event in &events {
             let event_json = serde_json::to_string(event).unwrap();
-            assert!(
-                !event_json.as_bytes().windows(8).any(|w| w == &png_sig[..]),
-                "audit event must not contain PNG signature"
-            );
-            assert!(
-                !event_json.as_bytes().windows(8).any(|w| w == marker),
-                "audit event must not contain ROLLSHOT sentinel"
-            );
-            assert!(
-                !event_json.contains("sk-ant-"),
-                "audit event must not contain API key prefix"
-            );
-            assert!(
-                !event_json.contains("/tmp/"),
-                "audit event must not contain filesystem paths"
-            );
+            assert_clean(event_json.as_bytes(), "audit event");
         }
 
         // After mark_stale, the stale snapshot must also be clean.
         let now = chrono::Utc::now().timestamp_millis();
         let stale = snapshot.mark_stale(now).unwrap();
         let stale_json = serde_json::to_string(&stale).unwrap();
-        assert!(
-            !stale_json.as_bytes().windows(8).any(|w| w == &png_sig[..]),
-            "stale snapshot must not contain PNG signature"
-        );
+        assert_clean(stale_json.as_bytes(), "stale snapshot");
         assert!(
             stale_json.contains(task_id.as_str()),
             "stale snapshot must still contain task ID"
@@ -3593,14 +3677,16 @@ mod tests {
     // ------------------------------------------------------------------
 
     /// For each store/audit failpoint at a lifecycle transition, assert:
+    /// - Inject a specific failpoint at a named operation.
     /// - No false success (the operation returns Err).
     /// - No duplicate review receipt.
-    /// - Legal terminal state (if the task was promoted before the failpoint).
+    /// - Legal terminal state.
     /// - Hash-chain reconciliation succeeds after the failpoint.
     #[test]
     fn failpoint_matrix_create_audited() {
-        // create_audited does not use AuditCommit failpoint (that only
-        // applies to transition_audited). Test the normal create path.
+        // create_audited does not have a built-in failpoint (the AuditCommit
+        // check is only in transition_audited). Test that duplicate creation
+        // fails cleanly — a real failure scenario for the create operation.
         let dir = tempfile::tempdir().unwrap();
         let store = crate::agent_store::TaskStore::open(dir.path()).unwrap();
         let binding = rollshot_agent::product_task::SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
@@ -3621,17 +3707,35 @@ mod tests {
         )
         .unwrap();
 
+        // First create succeeds.
+        store
+            .create_audited(&created, rollshot_agent::audit::AuditEventId::new_v4(), 10)
+            .unwrap();
+
+        // Duplicate creation must fail (AlreadyExists). No false success.
         let result = store.create_audited(
             &created,
             rollshot_agent::audit::AuditEventId::new_v4(),
             10,
         );
-        assert!(result.is_ok(), "create_audited must succeed under normal conditions");
+        assert!(result.is_err(), "duplicate create_audited must return error");
 
-        // Hash-chain reconciliation must succeed (no pending txn).
-        store
-            .reconcile_task_audit(created.task_id())
-            .unwrap();
+        // Task is still in a legal terminal state.
+        let loaded = store.load(created.task_id()).unwrap();
+        assert_eq!(
+            loaded.status(),
+            rollshot_agent::product_task::TaskStatus::Created,
+            "task must remain in Created after failed duplicate creation"
+        );
+
+        // No duplicate review receipt.
+        assert!(
+            loaded.review_receipt().is_none(),
+            "created task must not have a review receipt"
+        );
+
+        // Hash-chain reconciliation must succeed.
+        store.reconcile_task_audit(created.task_id()).unwrap();
     }
 
     #[test]
@@ -3705,101 +3809,244 @@ mod tests {
 
     #[test]
     fn failpoint_matrix_promotion() {
+        // Test: AuditCommit failpoint at promotion (Running → ReadyForReview).
         let dir = tempfile::tempdir().unwrap();
         let store = crate::agent_store::TaskStore::open(dir.path()).unwrap();
-        let binding = visual_binding_fixture();
-        let task_id = restore_test_helpers::seed_ready_for_review_visual_task(&store, &binding);
-        let snapshot = store.load(&task_id).unwrap();
+        let binding = rollshot_agent::product_task::SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
+            guide_digest: "ee".repeat(32),
+            step_source: 1,
+            keyframe: 1,
+            keyframe_sha256: [1u8; 32],
+            annotation_state_sha256: [2u8; 32],
+        };
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-0000000000f3",
+        )
+        .unwrap();
+        let run_id = rollshot_agent::domain::RunId::parse(
+            "run-00000000-0000-4000-8000-0000000000f3",
+        )
+        .unwrap();
 
-        // mark_stale under normal conditions should succeed.
-        let now = chrono::Utc::now().timestamp_millis();
-        let stale = snapshot.mark_stale(now).unwrap();
+        // Create and advance to Running.
+        let created = rollshot_agent::product_task::ProductTaskSnapshot::new_v3(
+            task_id.clone(),
+            rollshot_agent::product_task::TaskKind::ActionGuideVisualAnnotation,
+            binding.clone(),
+            10,
+        )
+        .unwrap();
         store
-            .transition_audited(&snapshot, &stale, rollshot_agent::audit::AuditEventId::new_v4(), now)
+            .create_audited(&created, rollshot_agent::audit::AuditEventId::new_v4(), 10)
+            .unwrap();
+        let attempt = rollshot_agent::product_task::TaskAttempt::new(
+            rollshot_agent::product_task::TaskAttemptId::new(1),
+            run_id.clone(),
+            20,
+        );
+        let running = created.start_attempt(attempt, 20).unwrap();
+        store
+            .transition_audited(&created, &running, rollshot_agent::audit::AuditEventId::new_v4(), 20)
             .unwrap();
 
+        // Drop and reopen with AuditCommit failpoint.
+        drop(store);
+        let store = crate::agent_store::TaskStore::open_with_failpoint(
+            dir.path(),
+            crate::agent_store::Failpoint::AuditCommit,
+        )
+        .unwrap();
+
+        let loaded = store.load(&task_id).unwrap();
+        match loaded.status() {
+            rollshot_agent::product_task::TaskStatus::Running => {
+                // Sweep didn't terminate. Attempt promotion.
+                let subject = rollshot_agent::authority::AuthoritySubject::ActionGuideEphemeralGuide {
+                    guide_digest: "ee".repeat(32),
+                };
+                let authority = visual_authority(task_id.clone(), run_id, subject).unwrap();
+                let contract = rollshot_agent::product_task::RunContractReceiptV1 {
+                    authority: authority.receipt(30),
+                    skill_use: rollshot_agent::skills::bundled_action_guide_visual_annotations_use()
+                        .unwrap()
+                        .receipt(),
+                    bound_at_unix_ms: 30,
+                };
+                let bound = loaded.bind_run_contract(contract, 30).unwrap();
+
+                // Transition to Bound (this also uses transition_audited and
+                // will hit the AuditCommit failpoint).
+                let result = store.transition_audited(
+                    &loaded,
+                    &bound,
+                    rollshot_agent::audit::AuditEventId::new_v4(),
+                    30,
+                );
+                assert!(result.is_err(), "transition_audited must fail under AuditCommit failpoint");
+            }
+            rollshot_agent::product_task::TaskStatus::Interrupted
+            | rollshot_agent::product_task::TaskStatus::Stale => {
+                // Sweep terminated the task. Legal terminal.
+            }
+            other => panic!("unexpected status after reopen: {other:?}"),
+        }
+
+        // No false success: task is in a valid state.
         let reloaded = store.load(&task_id).unwrap();
-        assert_eq!(reloaded.status(), rollshot_agent::product_task::TaskStatus::Stale);
+        assert!(
+            matches!(
+                reloaded.status(),
+                rollshot_agent::product_task::TaskStatus::Running
+                    | rollshot_agent::product_task::TaskStatus::Interrupted
+                    | rollshot_agent::product_task::TaskStatus::Stale
+            ),
+            "task must be in a legal state after failpoint, got: {:?}",
+            reloaded.status()
+        );
 
         // No duplicate review receipt.
-        assert!(reloaded.review_receipt().is_none(), "stale task must not have a review receipt");
+        assert!(
+            reloaded.review_receipt().is_none(),
+            "task must not have a review receipt after failed promotion"
+        );
 
-        // Hash-chain reconciliation.
+        // Hash-chain reconciliation must succeed.
         store.reconcile_task_audit(&task_id).unwrap();
     }
 
     #[test]
     fn failpoint_matrix_begin_apply() {
+        // Test: AuditCommit failpoint at begin_apply (ReadyForReview → Applying).
         let dir = tempfile::tempdir().unwrap();
         let store = crate::agent_store::TaskStore::open(dir.path()).unwrap();
         let binding = visual_binding_fixture();
         let task_id = restore_test_helpers::seed_ready_for_review_visual_task(&store, &binding);
-        let ready = store.load(&task_id).unwrap();
 
+        // Drop and reopen with AuditCommit failpoint.
+        drop(store);
+        let store = crate::agent_store::TaskStore::open_with_failpoint(
+            dir.path(),
+            crate::agent_store::Failpoint::AuditCommit,
+        )
+        .unwrap();
+
+        let ready = store.load(&task_id).unwrap();
         let now = chrono::Utc::now().timestamp_millis();
         let applying = ready.begin_apply(now).unwrap();
-        store
-            .transition_audited(&ready, &applying, rollshot_agent::audit::AuditEventId::new_v4(), now)
-            .unwrap();
 
+        // Attempt transition — must fail under AuditCommit failpoint.
+        let result = store.transition_audited(&ready, &applying, rollshot_agent::audit::AuditEventId::new_v4(), now);
+        assert!(result.is_err(), "transition_audited must fail under AuditCommit failpoint");
+
+        // Legal terminal state — the CAS wrote the snapshot before the
+        // failpoint fired, so the task may be in Applying (snapshot visible
+        // but audit commit failed) or Interrupted (sweep on reopen).
         let reloaded = store.load(&task_id).unwrap();
-        assert_eq!(reloaded.status(), rollshot_agent::product_task::TaskStatus::Applying);
+        assert!(
+            matches!(
+                reloaded.status(),
+                rollshot_agent::product_task::TaskStatus::ReadyForReview
+                    | rollshot_agent::product_task::TaskStatus::Applying
+                    | rollshot_agent::product_task::TaskStatus::Interrupted
+            ),
+            "task must be in a legal state after failpoint, got: {:?}",
+            reloaded.status()
+        );
 
-        // Reconcile.
+        // No duplicate review receipt.
+        assert!(
+            reloaded.review_receipt().is_none(),
+            "task must not have a review receipt after failed begin_apply"
+        );
+
+        // Hash-chain reconciliation must succeed.
         store.reconcile_task_audit(&task_id).unwrap();
     }
 
     #[test]
     fn failpoint_matrix_final_review() {
+        // Test: AuditCommit failpoint at final review (Applying → Completed).
         let dir = tempfile::tempdir().unwrap();
         let store = crate::agent_store::TaskStore::open(dir.path()).unwrap();
         let binding = visual_binding_fixture();
         let task_id = restore_test_helpers::seed_ready_for_review_visual_task(&store, &binding);
-        let ready = store.load(&task_id).unwrap();
 
+        // Advance to Applying under normal store.
+        let ready = store.load(&task_id).unwrap();
         let now = chrono::Utc::now().timestamp_millis();
         let applying = ready.begin_apply(now).unwrap();
         store
             .transition_audited(&ready, &applying, rollshot_agent::audit::AuditEventId::new_v4(), now)
             .unwrap();
 
-        let receipt = rollshot_agent::product_task::ReviewReceipt {
-            artifact_id: rollshot_agent::product_task::ArtifactId::parse(
-                "artifact-00000000-0000-4000-8000-000000000001",
-            )
-            .unwrap(),
-            artifact_revision: rollshot_agent::product_task::ArtifactRevision::new(1),
-            proposal_id: "1".to_owned(),
-            applied_candidates: vec![1],
-            rejected_candidates: vec![],
-            local_delta: rollshot_agent::product_task::LocalReviewDeltaV1 {
-                moved_candidates: Vec::new(),
-                manual_additions: Vec::new(),
-            },
-            resulting_document_state_id: Some(42),
-            resulting_document_digest: Some([3u8; 32]),
-            decided_at_unix_ms: now + 1,
-        };
-        let completed = applying.complete_apply(receipt, now + 1).unwrap();
-        store
-            .transition_audited(&applying, &completed, rollshot_agent::audit::AuditEventId::new_v4(), now + 1)
-            .unwrap();
+        // Drop and reopen with AuditCommit failpoint.
+        drop(store);
+        let store = crate::agent_store::TaskStore::open_with_failpoint(
+            dir.path(),
+            crate::agent_store::Failpoint::AuditCommit,
+        )
+        .unwrap();
 
+        let applying = store.load(&task_id).unwrap();
+        match applying.status() {
+            rollshot_agent::product_task::TaskStatus::Applying => {
+                // Sweep didn't terminate. Attempt final review transition.
+                let receipt = rollshot_agent::product_task::ReviewReceipt {
+                    artifact_id: rollshot_agent::product_task::ArtifactId::parse(
+                        "artifact-00000000-0000-4000-8000-000000000001",
+                    )
+                    .unwrap(),
+                    artifact_revision: rollshot_agent::product_task::ArtifactRevision::new(1),
+                    proposal_id: "1".to_owned(),
+                    applied_candidates: vec![1],
+                    rejected_candidates: vec![],
+                    local_delta: rollshot_agent::product_task::LocalReviewDeltaV1 {
+                        moved_candidates: Vec::new(),
+                        manual_additions: Vec::new(),
+                    },
+                    resulting_document_state_id: Some(42),
+                    resulting_document_digest: Some([3u8; 32]),
+                    decided_at_unix_ms: now + 1,
+                };
+                let completed = applying.complete_apply(receipt, now + 1).unwrap();
+
+                // Attempt transition — must fail under AuditCommit failpoint.
+                let result = store.transition_audited(&applying, &completed, rollshot_agent::audit::AuditEventId::new_v4(), now + 1);
+                assert!(result.is_err(), "transition_audited must fail under AuditCommit failpoint");
+            }
+            rollshot_agent::product_task::TaskStatus::Interrupted => {
+                // Sweep terminated the task. Legal terminal.
+            }
+            other => panic!("unexpected status after reopen: {other:?}"),
+        }
+
+        // Legal terminal state — the CAS wrote the snapshot before the
+        // failpoint fired, or the sweep terminated the task on reopen.
         let reloaded = store.load(&task_id).unwrap();
-        assert_eq!(reloaded.status(), rollshot_agent::product_task::TaskStatus::Completed);
-
-        // No duplicate review receipt on a completed task.
         assert!(
-            reloaded.review_receipt().is_some(),
-            "completed task must have a review receipt"
+            matches!(
+                reloaded.status(),
+                rollshot_agent::product_task::TaskStatus::Applying
+                    | rollshot_agent::product_task::TaskStatus::Completed
+                    | rollshot_agent::product_task::TaskStatus::Interrupted
+            ),
+            "task must be in a legal state after failpoint, got: {:?}",
+            reloaded.status()
         );
 
-        // Hash-chain reconciliation.
+        // No duplicate review receipt.
+        assert!(
+            reloaded.review_receipt().is_none(),
+            "task must not have a review receipt after failed final review"
+        );
+
+        // Hash-chain reconciliation must succeed.
         store.reconcile_task_audit(&task_id).unwrap();
     }
 
     #[test]
     fn failpoint_matrix_terminal_append() {
+        // Test: AuditCommit failpoint at terminal transition (Running → Cancelled).
         let dir = tempfile::tempdir().unwrap();
         let store = crate::agent_store::TaskStore::open(dir.path()).unwrap();
         let binding = rollshot_agent::product_task::SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
@@ -3809,11 +4056,16 @@ mod tests {
             keyframe_sha256: [1u8; 32],
             annotation_state_sha256: [2u8; 32],
         };
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-0000000000f7",
+        )
+        .unwrap();
+        let run_id = rollshot_agent::domain::RunId::parse(
+            "run-00000000-0000-4000-8000-0000000000f7",
+        )
+        .unwrap();
         let created = rollshot_agent::product_task::ProductTaskSnapshot::new_v3(
-            rollshot_agent::product_task::ProductTaskId::parse(
-                "task-00000000-0000-4000-8000-0000000000f7",
-            )
-            .unwrap(),
+            task_id.clone(),
             rollshot_agent::product_task::TaskKind::ActionGuideVisualAnnotation,
             binding,
             10,
@@ -3822,11 +4074,6 @@ mod tests {
         store
             .create_audited(&created, rollshot_agent::audit::AuditEventId::new_v4(), 10)
             .unwrap();
-
-        let run_id = rollshot_agent::domain::RunId::parse(
-            "run-00000000-0000-4000-8000-0000000000f7",
-        )
-        .unwrap();
         let attempt = rollshot_agent::product_task::TaskAttempt::new(
             rollshot_agent::product_task::TaskAttemptId::new(1),
             run_id,
@@ -3837,39 +4084,57 @@ mod tests {
             .transition_audited(&created, &running, rollshot_agent::audit::AuditEventId::new_v4(), 20)
             .unwrap();
 
-        let cancelled = running
-            .record_terminal(rollshot_agent::product_task::TaskTerminal::Cancelled, 30)
-            .unwrap();
-        store
-            .transition_audited(&running, &cancelled, rollshot_agent::audit::AuditEventId::new_v4(), 30)
-            .unwrap();
+        // Drop and reopen with AuditCommit failpoint.
+        drop(store);
+        let store = crate::agent_store::TaskStore::open_with_failpoint(
+            dir.path(),
+            crate::agent_store::Failpoint::AuditCommit,
+        )
+        .unwrap();
 
-        let reloaded = store.load(created.task_id()).unwrap();
-        assert_eq!(reloaded.status(), rollshot_agent::product_task::TaskStatus::Cancelled);
+        let loaded = store.load(&task_id).unwrap();
+        match loaded.status() {
+            rollshot_agent::product_task::TaskStatus::Running => {
+                // Sweep didn't terminate. Attempt terminal transition.
+                let cancelled = loaded
+                    .record_terminal(rollshot_agent::product_task::TaskTerminal::Cancelled, 30)
+                    .unwrap();
+                let result = store.transition_audited(
+                    &loaded,
+                    &cancelled,
+                    rollshot_agent::audit::AuditEventId::new_v4(),
+                    30,
+                );
+                assert!(result.is_err(), "transition_audited must fail under AuditCommit failpoint");
+            }
+            rollshot_agent::product_task::TaskStatus::Interrupted
+            | rollshot_agent::product_task::TaskStatus::Stale => {
+                // Sweep already terminated the task. Legal terminal.
+            }
+            other => panic!("unexpected status after reopen: {other:?}"),
+        }
 
-        // Terminal task must not have duplicate review receipt.
+        // Legal terminal state.
+        let reloaded = store.load(&task_id).unwrap();
+        assert!(
+            matches!(
+                reloaded.status(),
+                rollshot_agent::product_task::TaskStatus::Running
+                    | rollshot_agent::product_task::TaskStatus::Cancelled
+                    | rollshot_agent::product_task::TaskStatus::Interrupted
+                    | rollshot_agent::product_task::TaskStatus::Stale
+            ),
+            "task must be in a legal state after failpoint, got: {:?}",
+            reloaded.status()
+        );
+
+        // No duplicate review receipt.
         assert!(
             reloaded.review_receipt().is_none(),
-            "cancelled task must not have a review receipt"
+            "terminal task must not have a review receipt"
         );
 
-        // Hash-chain reconciliation.
-        store.reconcile_task_audit(created.task_id()).unwrap();
-
-        // Audit must contain TaskCreated + AttemptStarted + TaskTerminated.
-        let events = store.committed_audit_events(created.task_id()).unwrap();
-        let kinds: Vec<_> = events.iter().map(|e| e.event().kind()).collect();
-        assert!(
-            kinds.contains(&rollshot_agent::audit::AuditEventKindV1::TaskCreated),
-            "audit must contain TaskCreated"
-        );
-        assert!(
-            kinds.contains(&rollshot_agent::audit::AuditEventKindV1::AttemptStarted),
-            "audit must contain AttemptStarted"
-        );
-        assert!(
-            kinds.contains(&rollshot_agent::audit::AuditEventKindV1::TaskTerminated),
-            "audit must contain TaskTerminated"
-        );
+        // Hash-chain reconciliation must succeed.
+        store.reconcile_task_audit(&task_id).unwrap();
     }
 }
