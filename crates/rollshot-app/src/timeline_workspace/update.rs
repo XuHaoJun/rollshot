@@ -3565,6 +3565,11 @@ fn handle_frame_load_completed(
         }
     }
 
+    // Check if the keyframe was loaded in this batch OR is already cached
+    // from a prior session (e.g., step was previously viewed and only nearby
+    // frames needed async decode).
+    let keyframe_available = keyframe_loaded || source.cached(keyframe).is_some();
+
     // Release the mutable borrow on frame_source before attempting restore.
     drop(source);
 
@@ -3581,7 +3586,7 @@ fn handle_frame_load_completed(
     }
 
     // Attempt visual annotation restore now that the keyframe is hydrated.
-    if keyframe_loaded {
+    if keyframe_available {
         restore_visual_annotation_proposal_for_selected_step(state);
     }
 
@@ -8313,5 +8318,233 @@ key_source = { Env = "OPENAI_API_KEY" }
             state.visual_annotation_suggestion,
             crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(_)
         ));
+    }
+
+    /// When the keyframe is already cached from a prior session but nearby
+    /// frames need async decode, `handle_frame_load_completed` must still
+    /// trigger visual annotation restore. This covers the path where
+    /// `keyframe_loaded` is false (no keyframe decoded this batch) but the
+    /// keyframe IS available in cache.
+    #[test]
+    fn handle_frame_load_completed_restores_when_keyframe_cached_from_prior_session() {
+        use crate::timeline_workspace::project::{
+            from_loaded_project_with_task_store, ProjectAccess, ProjectWriterGuard,
+        };
+        use image::{Rgba, RgbaImage};
+        use rollshot_action::project::{
+            EnabledOutputs, ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
+        };
+        use rollshot_action::{
+            CandidateKind, DetectReason, InputCapability, InputSourceKind, LoadedStepFrame,
+        };
+        use rollshot_agent::product_task::SourceBinding;
+
+        // --- Set up a real project on disk so load_project() works ---
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::create_dir_all(root.join("assets/frames")).unwrap();
+
+        let mut frames = Vec::new();
+        for i in 1..=3u64 {
+            let image = RgbaImage::from_pixel(8, 8, Rgba([i as u8, 0, 0, 255]));
+            let sha256 = {
+                use sha2::Digest;
+                use std::io::Write;
+                let mut png_buf = Vec::new();
+                image
+                    .write_to(
+                        &mut std::io::Cursor::new(&mut png_buf),
+                        image::ImageFormat::Png,
+                    )
+                    .expect("encode PNG");
+                let mut hasher = sha2::Sha256::new();
+                hasher.write_all(&png_buf).expect("hash");
+                let sha256 = format!("{:x}", hasher.finalize());
+                let dest = root.join("assets/frames").join(format!("{sha256}.png"));
+                std::fs::write(&dest, &png_buf).unwrap();
+                sha256
+            };
+            frames.push(ProjectFrame {
+                id: i,
+                at_ms: (i - 1) * 100,
+                sha256,
+                width: 8,
+                height: 8,
+            });
+        }
+
+        let manifest = ProjectManifestV1 {
+            schema_version: 1,
+            revision: 3,
+            title: "Test Guide".into(),
+            capture_region: CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            input_source: InputSourceKind::LinuxEvdev,
+            input_capability: InputCapability::SemanticEvents,
+            enabled_outputs: EnabledOutputs::default(),
+            frames,
+            steps: vec![ProjectStep {
+                id: ProjectStepId(1),
+                order: 1,
+                title: "Step 1".into(),
+                caption: None,
+                kind: CandidateKind::Click,
+                reason: DetectReason::ClickConfirmed,
+                at_ms: 200,
+                keyframe: 1,
+                nearby: vec![1, 2, 3],
+                annotations: None,
+            }],
+        };
+        let loaded = rollshot_action::project::LoadedProject {
+            root: root.clone(),
+            manifest: manifest.into(),
+        };
+
+        // Write manifest to disk so load_project() can read it.
+        let manifest_json = serde_json::to_string_pretty(&loaded.manifest).unwrap();
+        std::fs::write(root.join("project.json"), &manifest_json).unwrap();
+
+        // Open task store and create workspace.
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::open_process_store(store_dir.path()).unwrap();
+        let guard = ProjectWriterGuard::for_test();
+        let mut ws = from_loaded_project_with_task_store(
+            loaded.clone(),
+            ProjectAccess::Writable(guard),
+            store.clone(),
+        )
+        .expect("workspace");
+        ws.save_state = crate::timeline_workspace::ProjectSaveState::Clean;
+
+        // --- Pre-cache the keyframe (frame 1) in the frame source ---
+        // This simulates a prior session that decoded and cached frame 1.
+        {
+            let source = ws.frame_source.as_mut().unwrap();
+            let req = source.load_request(1).expect("frame 1 in catalog");
+            let decoded = rollshot_action::load_step_frame(req).expect("decode frame 1");
+            source.insert_loaded(decoded);
+        }
+
+        // --- Compute the binding that restore would compute ---
+        let step = ws.selected_step().cloned().expect("step 1 selected");
+        let keyframe_sha = {
+            let mut src = ws.frame_source.take().unwrap();
+            let img = src.cached(step.keyframe).expect("keyframe cached");
+            let sha = crate::timeline_workspace::visual_annotation_agent::visual_keyframe_digest(&img);
+            ws.frame_source = Some(src);
+            sha
+        };
+        let annotations: Vec<_> = ws
+            .presentation
+            .document_for_step(&step, &ws.store)
+            .map(|d| d.document.annotations().to_vec())
+            .unwrap_or_default();
+        let annotation_sha =
+            crate::timeline_workspace::visual_annotation_agent::visual_annotation_state_digest(
+                &annotations,
+            )
+            .expect("digest");
+        let projection =
+            rollshot_action::project::ActionGuideContextProjectionV1::from_loaded_project(&loaded)
+                .expect("projection");
+        let project_root_sha = crate::timeline_workspace::caption_agent::project_root_digest(&root);
+        let binding = SourceBinding::ActionGuideVisualAnnotationProject {
+            project_root_sha256: project_root_sha,
+            revision: projection.revision(),
+            projection_digest: projection.digest().to_owned(),
+            step_source: step.source,
+            keyframe: step.keyframe,
+            keyframe_sha256: keyframe_sha,
+            annotation_state_sha256: annotation_sha,
+        };
+
+        // --- Seed a matching visual task in the store ---
+        // The proposal's base values must match the workspace's actual
+        // step, keyframe digest, annotation digest, and image dimensions
+        // for rebase_restored to return Ready.
+        use crate::timeline_workspace::visual_annotation_agent::
+            suggestion_batch_to_proposal;
+        use rollshot_action::VisualAnnotationProposalOrigin;
+        let proposal = suggestion_batch_to_proposal(
+            42,
+            VisualAnnotationProposalOrigin::DurableProject {
+                revision: projection.revision(),
+                projection_digest: projection.digest().to_owned(),
+            },
+            &step,
+            0, // document_state_id (rebased inside restore)
+            8, // image_width matches the 8x8 test image
+            8, // image_height
+            keyframe_sha,
+            annotation_sha,
+            vec![
+                rollshot_agent::VisualAnnotationDraft::NumberCallout {
+                    id: 1,
+                    tip: rollshot_agent::NormalizedPoint { x: 0.5, y: 0.5 },
+                    bubble: rollshot_agent::NormalizedPoint { x: 0.2, y: 0.3 },
+                    confidence: 0.9,
+                    rationale: Some("button center".into()),
+                },
+            ],
+        )
+        .expect("proposal");
+        let proposal_payload = serde_json::to_vec(&proposal).unwrap();
+        crate::timeline_workspace::visual_annotation_agent::restore_test_helpers::seed_ready_for_review_visual_task_with_payload(
+            &store,
+            &binding,
+            proposal_payload,
+        );
+
+        // --- Verify initial state is Idle ---
+        assert!(matches!(
+            ws.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
+        ));
+
+        // --- Simulate frame load completion with only nearby frames ---
+        // The keyframe (frame 1) is already cached; only frames 2 and 3 are
+        // decoded asynchronously. This is the exact scenario the fix covers.
+        let gen = ws.frame_coordinator.current_generation();
+        let nearby_results: Vec<Result<LoadedStepFrame, String>> = vec![2u64, 3]
+            .into_iter()
+            .map(|id| {
+                let source = ws.frame_source.as_mut().unwrap();
+                let req = source.load_request(id).expect("frame in catalog");
+                let decoded = rollshot_action::load_step_frame(req).expect("decode");
+                Ok(decoded)
+            })
+            .collect();
+        let _ = update(
+            &mut ws,
+            Message::FrameLoadCompleted {
+                generation: gen,
+                results: nearby_results,
+                remaining: Vec::new(),
+            },
+        );
+
+        // --- Assert restore fired: state is PendingReview ---
+        assert!(
+            matches!(
+                ws.visual_annotation_suggestion,
+                crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(_)
+            ),
+            "restore must fire when keyframe is cached from prior session, \
+             got {:?}",
+            ws.visual_annotation_suggestion,
+        );
+        assert!(
+            ws.visual_annotation_task_id.is_some(),
+            "task ID must be installed after restore"
+        );
+        assert!(
+            ws.visual_annotation_review_snapshot.is_some(),
+            "snapshot must be installed after restore"
+        );
     }
 }
