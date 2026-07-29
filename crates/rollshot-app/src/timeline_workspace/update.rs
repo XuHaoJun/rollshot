@@ -1295,6 +1295,17 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                 is_durable = prepared.is_durable(),
                 "caption suggestion run started"
             );
+
+            // Extract the project root for durable source binding. The root is
+            // only available when the workspace is saved+clean.
+            let caption_project_root = match (&state.project_session, state.save_state) {
+                (
+                    Some(super::project::ProjectSession::Saved { root, .. }),
+                    super::ProjectSaveState::Clean,
+                ) if prepared.is_durable() => Some(root.clone()),
+                _ => None,
+            };
+
             Update::task(Task::perform(
                 super::caption_agent::suggest_captions_task(
                     run_id,
@@ -1304,6 +1315,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                     provider,
                     adapter,
                     prepared,
+                    caption_project_root,
                 ),
                 Message::CaptionProposalLoaded,
             ))

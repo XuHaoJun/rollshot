@@ -408,15 +408,8 @@ pub(crate) async fn suggest_captions_task(
     provider: String,
     adapter: Box<dyn rollshot_agent::ProviderAdapter>,
     context: PreparedCaptionContext,
+    project_root: Option<PathBuf>,
 ) -> Result<rollshot_action::CaptionProposal, String> {
-    let project_root = match &context {
-        PreparedCaptionContext::Durable { .. } => {
-            // The project root is only known to the caller; we extract it from
-            // the source binding once the context is prepared.
-            None
-        }
-        PreparedCaptionContext::Ephemeral { .. } => None,
-    };
     suggest_captions_with_store(
         run_id,
         store,
