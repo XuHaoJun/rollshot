@@ -127,6 +127,7 @@ pub enum TaskKind {
     SmartRedactionAuthor,
     SmartRedactionImprove,
     ActionGuideCaptions,
+    ActionGuideVisualAnnotation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -170,6 +171,7 @@ pub enum TaskTerminal {
 pub enum ArtifactKind {
     SmartRedaction,
     ActionGuideCaptions,
+    ActionGuideVisualAnnotation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -578,6 +580,9 @@ pub enum ArtifactSummary {
         dry_run_affected_area: f32,
     },
     ActionGuideCaptions {
+        suggestion_count: u32,
+    },
+    ActionGuideVisualAnnotation {
         suggestion_count: u32,
     },
 }
@@ -3611,6 +3616,25 @@ mod tests {
         assert!(
             ephemeral.contains("action_guide_visual_annotation_ephemeral_guide"),
             "unexpected wire name: {ephemeral}"
+        );
+    }
+
+    #[test]
+    fn visual_contract_variants_have_stable_wire_names() {
+        assert_eq!(
+            serde_json::to_string(&TaskKind::ActionGuideVisualAnnotation).unwrap(),
+            "\"action_guide_visual_annotation\"",
+        );
+        assert_eq!(
+            serde_json::to_string(&ArtifactKind::ActionGuideVisualAnnotation).unwrap(),
+            "\"action_guide_visual_annotation\"",
+        );
+        let summary = ArtifactSummary::ActionGuideVisualAnnotation {
+            suggestion_count: 3,
+        };
+        assert_eq!(
+            serde_json::to_string(&summary).unwrap(),
+            "{\"kind\":\"action_guide_visual_annotation\",\"suggestion_count\":3}",
         );
     }
 }

@@ -407,6 +407,7 @@ impl TaskStore {
             let ephemeral = matches!(
                 snapshot.source_binding(),
                 SourceBinding::ActionGuideEphemeralGuide { .. }
+                    | SourceBinding::ActionGuideVisualAnnotationEphemeralGuide { .. }
             );
 
             let next = match (snapshot.status(), ephemeral) {
@@ -4051,6 +4052,286 @@ mod tests {
         assert!(
             kinds.contains(&AuditEventKindV1::TaskTerminated),
             "sweep must be audited, got {kinds:?}"
+        );
+    }
+
+    /// Seed a visual-annotation ephemeral guide in `ReadyForReview` — must
+    /// become `Stale` on reopen.
+    fn seed_visual_ephemeral_ready_for_review(store: &TaskStore) -> ProductTaskId {
+        let id = ProductTaskId::parse("task-00000000-0000-4000-8000-0000000000d1").unwrap();
+        let binding = SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
+            guide_digest: "dd".repeat(32),
+            step_source: 5,
+            keyframe: 3,
+            keyframe_sha256: [0xAA; 32],
+            annotation_state_sha256: [0xBB; 32],
+        };
+        let created = ProductTaskSnapshot::new(
+            id.clone(),
+            TaskKind::ActionGuideVisualAnnotation,
+            binding,
+            now_ms(),
+        )
+        .unwrap();
+        store
+            .create_audited(&created, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        let run_id = RunId::parse("run-00000000-0000-4000-8000-0000000000d1").unwrap();
+        let running = created
+            .start_attempt(
+                TaskAttempt::new(TaskAttemptId::new(1), run_id, now_ms()),
+                now_ms(),
+            )
+            .unwrap();
+        store
+            .transition_audited(&created, &running, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        let meta = metadata_fixture(
+            RunId::parse("run-00000000-0000-4000-8000-0000000000d1").unwrap(),
+            TaskAttemptId::new(1),
+        );
+        let ready = running
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, now_ms())
+            .unwrap();
+        store
+            .transition_audited(&running, &ready, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        id
+    }
+
+    /// Seed a visual-annotation ephemeral guide in `Created` (past grace
+    /// window) — must become `Interrupted` on reopen.
+    fn seed_visual_ephemeral_created(store: &TaskStore) -> ProductTaskId {
+        let id = ProductTaskId::parse("task-00000000-0000-4000-8000-0000000000d2").unwrap();
+        let binding = SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
+            guide_digest: "ee".repeat(32),
+            step_source: 1,
+            keyframe: 0,
+            keyframe_sha256: [0xCC; 32],
+            annotation_state_sha256: [0xDD; 32],
+        };
+        let created = ProductTaskSnapshot::new(
+            id.clone(),
+            TaskKind::ActionGuideVisualAnnotation,
+            binding,
+            now_ms() - CREATED_INTERRUPT_GRACE_MS - 1,
+        )
+        .unwrap();
+        store
+            .create_audited(&created, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        id
+    }
+
+    /// Seed a visual-annotation ephemeral guide in `Running` — must become
+    /// `Interrupted` on reopen.
+    fn seed_visual_ephemeral_running(store: &TaskStore) -> ProductTaskId {
+        let id = ProductTaskId::parse("task-00000000-0000-4000-8000-0000000000d3").unwrap();
+        let binding = SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
+            guide_digest: "ff".repeat(32),
+            step_source: 2,
+            keyframe: 1,
+            keyframe_sha256: [0xEE; 32],
+            annotation_state_sha256: [0xFF; 32],
+        };
+        let created = ProductTaskSnapshot::new(
+            id.clone(),
+            TaskKind::ActionGuideVisualAnnotation,
+            binding,
+            now_ms(),
+        )
+        .unwrap();
+        store
+            .create_audited(&created, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        let run_id = RunId::parse("run-00000000-0000-4000-8000-0000000000d3").unwrap();
+        let running = created
+            .start_attempt(
+                TaskAttempt::new(TaskAttemptId::new(1), run_id, now_ms()),
+                now_ms(),
+            )
+            .unwrap();
+        store
+            .transition_audited(&created, &running, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        id
+    }
+
+    /// Seed a visual-annotation ephemeral guide in `Applying` — must become
+    /// `Interrupted` on reopen.
+    fn seed_visual_ephemeral_applying(store: &TaskStore) -> ProductTaskId {
+        let id = ProductTaskId::parse("task-00000000-0000-4000-8000-0000000000d4").unwrap();
+        let binding = SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
+            guide_digest: "ab".repeat(32),
+            step_source: 3,
+            keyframe: 2,
+            keyframe_sha256: [0x11; 32],
+            annotation_state_sha256: [0x22; 32],
+        };
+        let created = ProductTaskSnapshot::new(
+            id.clone(),
+            TaskKind::ActionGuideVisualAnnotation,
+            binding,
+            now_ms(),
+        )
+        .unwrap();
+        store
+            .create_audited(&created, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        let run_id = RunId::parse("run-00000000-0000-4000-8000-0000000000d4").unwrap();
+        let running = created
+            .start_attempt(
+                TaskAttempt::new(TaskAttemptId::new(1), run_id, now_ms()),
+                now_ms(),
+            )
+            .unwrap();
+        store
+            .transition_audited(&created, &running, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        let meta = metadata_fixture(
+            RunId::parse("run-00000000-0000-4000-8000-0000000000d4").unwrap(),
+            TaskAttemptId::new(1),
+        );
+        let ready = running
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, now_ms())
+            .unwrap();
+        store
+            .transition_audited(&running, &ready, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        let applying = ready
+            .begin_apply(now_ms())
+            .unwrap();
+        store
+            .transition_audited(&ready, &applying, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        id
+    }
+
+    #[test]
+    fn visual_ephemeral_review_stales_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let task_id = {
+            let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+            seed_visual_ephemeral_ready_for_review(&store)
+        };
+
+        let reopened = crate::agent_store::open_process_store(dir.path()).unwrap();
+
+        assert_eq!(
+            reopened.load(&task_id).unwrap().status(),
+            TaskStatus::Stale,
+            "a visual ephemeral guide has no durable target to apply to"
+        );
+    }
+
+    #[test]
+    fn visual_ephemeral_created_interrupted_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let task_id = {
+            let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+            seed_visual_ephemeral_created(&store)
+        };
+
+        let reopened = crate::agent_store::open_process_store(dir.path()).unwrap();
+
+        assert_eq!(
+            reopened.load(&task_id).unwrap().status(),
+            TaskStatus::Interrupted,
+            "an abandoned visual ephemeral created task becomes interrupted"
+        );
+    }
+
+    #[test]
+    fn visual_ephemeral_running_interrupted_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let task_id = {
+            let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+            seed_visual_ephemeral_running(&store)
+        };
+
+        let reopened = crate::agent_store::open_process_store(dir.path()).unwrap();
+
+        assert_eq!(
+            reopened.load(&task_id).unwrap().status(),
+            TaskStatus::Interrupted,
+            "an abandoned visual ephemeral running task becomes interrupted"
+        );
+    }
+
+    #[test]
+    fn visual_ephemeral_applying_interrupted_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let task_id = {
+            let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+            seed_visual_ephemeral_applying(&store)
+        };
+
+        let reopened = crate::agent_store::open_process_store(dir.path()).unwrap();
+
+        assert_eq!(
+            reopened.load(&task_id).unwrap().status(),
+            TaskStatus::Interrupted,
+            "an abandoned visual ephemeral applying task becomes interrupted"
+        );
+    }
+
+    #[test]
+    fn second_live_store_does_not_stale_visual_ephemeral_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let task_id = seed_visual_ephemeral_ready_for_review(&first);
+
+        let second = crate::agent_store::open_process_store(dir.path()).unwrap();
+
+        assert_eq!(
+            second.load(&task_id).unwrap().status(),
+            TaskStatus::ReadyForReview,
+            "a visual ephemeral review remains usable while its owning process is live"
+        );
+    }
+
+    #[test]
+    fn second_live_store_does_not_interrupt_visual_ephemeral_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let task_id = seed_visual_ephemeral_created(&first);
+
+        let second = crate::agent_store::open_process_store(dir.path()).unwrap();
+
+        assert_eq!(
+            second.load(&task_id).unwrap().status(),
+            TaskStatus::Created,
+            "a visual ephemeral created task is left alone while its owning process is live"
+        );
+    }
+
+    #[test]
+    fn second_live_store_does_not_interrupt_visual_ephemeral_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let task_id = seed_visual_ephemeral_running(&first);
+
+        let second = crate::agent_store::open_process_store(dir.path()).unwrap();
+
+        assert_eq!(
+            second.load(&task_id).unwrap().status(),
+            TaskStatus::Running,
+            "a visual ephemeral running task is left alone while its owning process is live"
+        );
+    }
+
+    #[test]
+    fn second_live_store_does_not_interrupt_visual_ephemeral_applying() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let task_id = seed_visual_ephemeral_applying(&first);
+
+        let second = crate::agent_store::open_process_store(dir.path()).unwrap();
+
+        assert_eq!(
+            second.load(&task_id).unwrap().status(),
+            TaskStatus::Applying,
+            "a visual ephemeral applying task is left alone while its owning process is live"
         );
     }
 }

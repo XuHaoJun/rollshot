@@ -66,6 +66,7 @@ pub enum RunOperation {
     ExecuteRestrictedAutomation,
     SubmitReviewCandidate,
     RequestUserInput,
+    DiscloseScreenshotAttachment,
 }
 
 // ========================================================================
@@ -174,7 +175,7 @@ impl AuthoritySnapshot {
         Ok(Self { digest, ..snapshot })
     }
 
-    /// Authorize a specific tool invocation for this run.
+    /// Authorize a run operation.
     ///
     /// Returns `Ok(())` if the run_id matches, the authority subject is
     /// consistent, and the required operation is in the grant set.
@@ -1003,6 +1004,45 @@ mod tests {
         assert!(
             msg.contains("ExecuteRestrictedAutomation"),
             "error message: {msg}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // DiscloseScreenshotAttachment grant check
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn full_screenshot_ceiling_alone_does_not_grant_disclose_screenshot_attachment() {
+        // FullScreenshot is a disclosure ceiling, not a grant. The
+        // DiscloseScreenshotAttachment run-operation must be explicitly
+        // granted even when the ceiling allows screenshots.
+        let snapshot = full_snapshot();
+        // full_snapshot has FullScreenshot ceiling but only ReadDraft + WriteDraft
+        assert!(matches!(
+            snapshot.authorize_tool(
+                &run_id(),
+                &AuthoritySubject::Document(document_binding()),
+                RunOperation::DiscloseScreenshotAttachment
+            ),
+            Err(AuthorityError::GrantMissing {
+                operation: RunOperation::DiscloseScreenshotAttachment
+            })
+        ));
+    }
+
+    #[test]
+    fn disclose_screenshot_attachment_succeeds_when_granted() {
+        let snapshot = snapshot_with_grants([
+            RunOperation::DiscloseScreenshotAttachment,
+            RunOperation::SubmitReviewCandidate,
+        ]);
+        assert_eq!(
+            snapshot.authorize_tool(
+                &run_id(),
+                &AuthoritySubject::Document(document_binding()),
+                RunOperation::DiscloseScreenshotAttachment
+            ),
+            Ok(())
         );
     }
 }

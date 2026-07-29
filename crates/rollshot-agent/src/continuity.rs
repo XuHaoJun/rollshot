@@ -587,6 +587,7 @@ fn task_kind_str(kind: TaskKind) -> String {
         TaskKind::SmartRedactionAuthor => "smart_redaction_author",
         TaskKind::SmartRedactionImprove => "smart_redaction_improve",
         TaskKind::ActionGuideCaptions => "action_guide_captions",
+        TaskKind::ActionGuideVisualAnnotation => "action_guide_visual_annotation",
     }
     .to_owned()
 }
@@ -612,6 +613,7 @@ fn artifact_kind_str(kind: ArtifactKind) -> String {
     match kind {
         ArtifactKind::SmartRedaction => "smart_redaction",
         ArtifactKind::ActionGuideCaptions => "action_guide_captions",
+        ArtifactKind::ActionGuideVisualAnnotation => "action_guide_visual_annotation",
     }
     .to_owned()
 }
