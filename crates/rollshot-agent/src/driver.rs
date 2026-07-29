@@ -56,7 +56,7 @@ use crate::runtime::{
     BudgetDimension, BudgetError, BudgetTracker, NullEventSink, RunBudget, RunCancellation,
     RunEvent, RunEventSink, UsageSnapshot,
 };
-use crate::skills::SMART_REDACTION_PACKAGE_ID;
+use crate::skills::{ACTION_GUIDE_CAPTIONS_PACKAGE_ID, SMART_REDACTION_PACKAGE_ID};
 use crate::tools::{ToolCall, ToolContext, ToolOutcome, ToolRegistry};
 
 // ---------- Configuration ----------
@@ -173,15 +173,55 @@ pub(crate) fn compose_smart_redaction_prompt(
     Ok(prompt)
 }
 
+#[allow(dead_code)]
+pub(crate) fn compose_caption_prompt(
+    skill_use: &crate::skills::SkillUse,
+) -> Result<String, DriverError> {
+    if skill_use.package_id().as_str() != ACTION_GUIDE_CAPTIONS_PACKAGE_ID {
+        return Err(DriverError::AgentProtocolFailure(format!(
+            "unexpected skill package: {}",
+            skill_use.package_id().as_str()
+        )));
+    }
+    if skill_use.source_authority().as_str() != "rollshot.bundled" {
+        return Err(DriverError::AgentProtocolFailure(format!(
+            "unexpected skill authority: {}",
+            skill_use.source_authority().as_str()
+        )));
+    }
+
+    Ok(format!(
+        "{envelope}\n\n<rollshot-skill package=\"{pkg}\" digest=\"{digest}\">\n{body}\n</rollshot-skill>",
+        envelope = CAPTION_SYSTEM_ENVELOPE,
+        pkg = skill_use.package_id().as_str(),
+        digest = skill_use.digest(),
+        body = skill_use.body(),
+    ))
+}
+
+/// System envelope for a caption run. Replaces the inline literal that lived in
+/// `caption_agent::suggest_captions_with_timeout` before the skill move.
+pub(crate) const CAPTION_SYSTEM_ENVELOPE: &str =
+    "You produce compact structured suggestions for Rollshot Action Guide captions.";
+
 pub(crate) enum AgentTaskProfile {
     #[allow(dead_code)]
     VisualAnnotation,
+    /// Constructed only by tests today: the caption run receives its composed,
+    /// digest-bearing system prompt as an owned `String` through
+    /// `SingleSubmitProfile` (Task 15), because `system_prompt` returns
+    /// `&'static str`. The variant still owns the terminal-tool declaration.
+    #[allow(dead_code)]
+    Captions,
 }
 
 impl AgentTaskProfile {
     pub(crate) fn system_prompt(&self) -> &'static str {
         match self {
             Self::VisualAnnotation => VISUAL_ANNOTATION_SYSTEM_PROMPT,
+            // Envelope only. The skill body and digest are appended by
+            // `compose_caption_prompt`, which cannot return `&'static str`.
+            Self::Captions => CAPTION_SYSTEM_ENVELOPE,
         }
     }
 
@@ -189,6 +229,7 @@ impl AgentTaskProfile {
     pub(crate) fn terminal_tools(&self) -> &'static [&'static str] {
         match self {
             Self::VisualAnnotation => &["submit_visual_annotation_suggestions"],
+            Self::Captions => &["submit_caption_suggestions"],
         }
     }
 }
@@ -2013,6 +2054,38 @@ pub(crate) mod tests {
         assert_eq!(
             AgentTaskProfile::VisualAnnotation.terminal_tools(),
             &["submit_visual_annotation_suggestions"],
+        );
+    }
+
+    #[test]
+    fn caption_prompt_wraps_the_skill_body_with_its_digest() {
+        let use_ = crate::skills::bundled_action_guide_captions_use().unwrap();
+
+        let prompt = compose_caption_prompt(&use_).unwrap();
+
+        assert!(prompt.starts_with(CAPTION_SYSTEM_ENVELOPE));
+        assert!(prompt.contains("<rollshot-skill package=\"action-guide-captions\""));
+        assert!(prompt.contains(use_.digest()));
+        assert!(prompt.contains("Suggest concise Action Guide titles"));
+        assert!(prompt.ends_with("</rollshot-skill>"));
+    }
+
+    #[test]
+    fn caption_prompt_rejects_a_foreign_package() {
+        let smart = crate::skills::bundled_smart_redaction_use().unwrap();
+
+        assert!(compose_caption_prompt(&smart).is_err());
+    }
+
+    #[test]
+    fn caption_profile_advertises_only_submit_caption_suggestions() {
+        assert_eq!(
+            AgentTaskProfile::Captions.terminal_tools(),
+            &["submit_caption_suggestions"],
+        );
+        assert_eq!(
+            AgentTaskProfile::Captions.system_prompt(),
+            CAPTION_SYSTEM_ENVELOPE,
         );
     }
 
