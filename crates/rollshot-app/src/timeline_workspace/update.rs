@@ -3744,14 +3744,67 @@ fn clamp_annotation_point(point: ImagePoint, width: u32, height: u32) -> ImagePo
     point.clamp_to(width, height)
 }
 
+/// Schedule an audited `mark_stale` transition for a visual annotation task.
+/// Called when a manual state-changing action (undo, redo, keyframe replacement,
+/// step deletion, annotation mutation) invalidates a pending review.
+///
+/// Logs a warning on failure but never blocks the UI update.
+#[cfg(feature = "action-guide")]
+fn schedule_visual_stale(
+    store: &crate::agent_store::TaskStore,
+    task_id: &rollshot_agent::product_task::ProductTaskId,
+    snapshot: &rollshot_agent::product_task::ProductTaskSnapshot,
+) {
+    if snapshot.status() != rollshot_agent::product_task::TaskStatus::ReadyForReview {
+        return;
+    }
+    let now = chrono::Utc::now().timestamp_millis();
+    match snapshot.mark_stale(now) {
+        Ok(stale) => {
+            let event_id = rollshot_agent::audit::AuditEventId::new_v4();
+            if let Err(e) = store.transition_audited(snapshot, &stale, event_id, now) {
+                tracing::warn!(
+                    target: "rollshot::app::visual_annotation",
+                    error = %e,
+                    task_id = task_id.as_str(),
+                    "schedule_visual_stale: transition_audited failed"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "rollshot::app::visual_annotation",
+                error = %e,
+                task_id = task_id.as_str(),
+                "schedule_visual_stale: mark_stale failed"
+            );
+        }
+    }
+}
+
 /// Dismiss a pending visual annotation review when a state-changing manual
 /// action occurs. Transitions to Idle and displays a "stale" banner.
+/// If a durable task store and snapshot are available, also schedules an
+/// audited `mark_stale` transition so the task reloads as `Stale`.
 fn dismiss_stale_visual_annotation_review(state: &mut TimelineWorkspace) {
     if matches!(
         state.visual_annotation_suggestion,
         super::VisualAnnotationSuggestionState::PendingReview(_)
     ) {
+        // Schedule audited stale before clearing UI state.
+        #[cfg(feature = "action-guide")]
+        {
+            if let (Some(store), Some(task_id), Some(snapshot)) = (
+                state.task_store.as_ref(),
+                state.visual_annotation_task_id.as_ref(),
+                state.visual_annotation_review_snapshot.as_ref(),
+            ) {
+                schedule_visual_stale(store, task_id, snapshot);
+            }
+        }
         state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
+        state.visual_annotation_task_id = None;
+        state.visual_annotation_review_snapshot = None;
         state.message = Some(VISUAL_ANNOTATION_STATUS_STALE.to_string());
     }
 }
