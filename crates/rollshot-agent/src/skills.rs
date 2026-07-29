@@ -989,8 +989,10 @@ const CAPTIONS_BUNDLED_MANIFEST: &str = include_str!("../skills/action-guide-cap
 /// Well-known package ID for the bundled Action Guide visual annotations skill.
 pub const ACTION_GUIDE_VISUAL_ANNOTATIONS_PACKAGE_ID: &str = "action-guide-visual-annotations";
 
-const VISUAL_ANNOTATIONS_BUNDLED_BODY: &str = include_str!("../skills/action-guide-visual-annotations/SKILL.md");
-const VISUAL_ANNOTATIONS_BUNDLED_MANIFEST: &str = include_str!("../skills/action-guide-visual-annotations/skill.toml");
+const VISUAL_ANNOTATIONS_BUNDLED_BODY: &str =
+    include_str!("../skills/action-guide-visual-annotations/SKILL.md");
+const VISUAL_ANNOTATIONS_BUNDLED_MANIFEST: &str =
+    include_str!("../skills/action-guide-visual-annotations/skill.toml");
 
 static BUNDLED_REPORT: LazyLock<CatalogBuildReport> = LazyLock::new(|| {
     let limits = SkillCatalogLimits::v1();
@@ -1073,7 +1075,8 @@ pub fn bundled_action_guide_visual_annotations_use() -> Option<SkillUse> {
         .invoke(
             &SkillInvocationRequest {
                 source_authority: SkillAuthorityId::parse("rollshot.bundled").unwrap(),
-                package_id: SkillPackageId::parse(ACTION_GUIDE_VISUAL_ANNOTATIONS_PACKAGE_ID).unwrap(),
+                package_id: SkillPackageId::parse(ACTION_GUIDE_VISUAL_ANNOTATIONS_PACKAGE_ID)
+                    .unwrap(),
                 expected_digest: None,
                 invocation_kind: SkillInvocationKind::HostExplicit,
             },
@@ -2208,9 +2211,15 @@ main = "SKILL.md"
     #[test]
     fn bundled_visual_skill_body_matches_frozen_system_prompt() {
         let skill = super::bundled_action_guide_visual_annotations_use().unwrap();
-        assert_eq!(skill.package_id().as_str(), "action-guide-visual-annotations");
+        assert_eq!(
+            skill.package_id().as_str(),
+            "action-guide-visual-annotations"
+        );
         assert_eq!(skill.source_authority().as_str(), "rollshot.bundled");
-        assert_eq!(skill.body(), crate::driver::VISUAL_ANNOTATION_SYSTEM_PROMPT_BASELINE);
+        assert_eq!(
+            skill.body(),
+            crate::driver::VISUAL_ANNOTATION_SYSTEM_PROMPT_BASELINE
+        );
     }
 
     #[test]

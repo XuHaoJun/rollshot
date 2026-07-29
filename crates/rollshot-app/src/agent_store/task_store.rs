@@ -4198,9 +4198,7 @@ mod tests {
         store
             .transition_audited(&running, &ready, AuditEventId::new_v4(), now_ms())
             .unwrap();
-        let applying = ready
-            .begin_apply(now_ms())
-            .unwrap();
+        let applying = ready.begin_apply(now_ms()).unwrap();
         store
             .transition_audited(&ready, &applying, AuditEventId::new_v4(), now_ms())
             .unwrap();

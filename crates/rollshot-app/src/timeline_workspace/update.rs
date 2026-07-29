@@ -441,9 +441,10 @@ fn visual_review_persistence_task(state: &TimelineWorkspace) -> Task<Message> {
         return Task::none();
     };
     let task_id = snapshot.task_id().clone();
-    let has_accepted = proposal.suggestions.iter().any(
-        |s| s.status == rollshot_action::VisualAnnotationSuggestionStatus::Accepted,
-    );
+    let has_accepted = proposal
+        .suggestions
+        .iter()
+        .any(|s| s.status == rollshot_action::VisualAnnotationSuggestionStatus::Accepted);
 
     // Compute the resulting document state and annotation digest from the
     // actual post-apply document annotations. The selected step's document
@@ -535,9 +536,7 @@ pub(super) fn restore_caption_proposal_on_project_open(
 /// On success, installs the task ID, snapshot, and proposal into workspace
 /// state and sets the status to "ready for review".
 #[cfg(feature = "action-guide")]
-pub(super) fn restore_visual_annotation_proposal_for_selected_step(
-    state: &mut TimelineWorkspace,
-) {
+pub(super) fn restore_visual_annotation_proposal_for_selected_step(state: &mut TimelineWorkspace) {
     use super::caption_agent::project_root_digest;
     use super::project::ProjectSession;
     use super::visual_annotation_agent::restore_visual_annotation_proposal;
@@ -635,8 +634,7 @@ pub(super) fn restore_visual_annotation_proposal_for_selected_step(
 // ---- Visual annotation status constants (frozen baseline) ----
 
 /// Shown while the visual annotation suggestion run is in flight.
-pub(crate) const VISUAL_ANNOTATION_STATUS_RUNNING: &str =
-    "Suggesting visual annotations...";
+pub(crate) const VISUAL_ANNOTATION_STATUS_RUNNING: &str = "Suggesting visual annotations...";
 /// Shown when the model returns a reviewable proposal.
 pub(crate) const VISUAL_ANNOTATION_STATUS_READY: &str =
     "Visual annotation suggestions ready for review.";
@@ -653,8 +651,7 @@ pub(crate) const VISUAL_ANNOTATION_STATUS_STALE: &str =
 pub(crate) const VISUAL_ANNOTATION_NO_SUGGESTION_DEFAULT: &str =
     "Visual annotation suggestion: no suggestion returned.";
 /// Shown when no annotations were applicable after accept-all.
-pub(crate) const VISUAL_ANNOTATION_ACCEPT_NONE: &str =
-    "No visual annotations to accept.";
+pub(crate) const VISUAL_ANNOTATION_ACCEPT_NONE: &str = "No visual annotations to accept.";
 
 pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
     match message {
@@ -2066,8 +2063,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             // Annotation-state digest: SHA-256("rollshot-action-guide-annotations-v1\0" || annotations_json)
             let annotation_state_sha256 = {
                 use sha2::{Digest, Sha256};
-                let annotations_json = serde_json::to_vec(&annotations)
-                    .unwrap_or_default();
+                let annotations_json = serde_json::to_vec(&annotations).unwrap_or_default();
                 let mut hasher = Sha256::new();
                 hasher.update(b"rollshot-action-guide-annotations-v1\0");
                 hasher.update(&annotations_json);
@@ -2076,11 +2072,9 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
 
             // Require task store for durable task lifecycle.
             let Some(store) = state.task_store.clone() else {
-                state.visual_annotation_suggestion =
-                    super::VisualAnnotationSuggestionState::Idle;
-                state.message = Some(
-                    "Visual annotation suggestions require a saved project.".to_string(),
-                );
+                state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
+                state.message =
+                    Some("Visual annotation suggestions require a saved project.".to_string());
                 return Update::none();
             };
             let context_request = super::visual_annotation_context_request(state);
@@ -2160,8 +2154,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                     state.visual_annotation_review_snapshot = Some(success.snapshot);
                     state.visual_annotation_suggestion =
                         super::VisualAnnotationSuggestionState::PendingReview(success.proposal);
-                    state.message =
-                        Some(VISUAL_ANNOTATION_STATUS_READY.to_string());
+                    state.message = Some(VISUAL_ANNOTATION_STATUS_READY.to_string());
                 }
                 Ok(super::visual_annotation_agent::VisualAnnotationTaskResult::NoSuggestion {
                     reason,
@@ -2185,9 +2178,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                     state.visual_annotation_review_snapshot = None;
                     state.visual_annotation_suggestion =
                         super::VisualAnnotationSuggestionState::Failed { message };
-                    state.message = Some(
-                        VISUAL_ANNOTATION_STATUS_FAILED.to_string(),
-                    );
+                    state.message = Some(VISUAL_ANNOTATION_STATUS_FAILED.to_string());
                 }
             }
             Update::none()
@@ -6913,13 +6904,11 @@ mod tests {
         state: &mut TimelineWorkspace,
         run_id: u64,
     ) -> crate::timeline_workspace::visual_annotation_agent::VisualAnnotationRunSuccess {
-        use rollshot_agent::product_task::{
-            ProductTaskSnapshot, SourceBinding, TaskKind,
-        };
+        use rollshot_agent::product_task::{ProductTaskSnapshot, SourceBinding, TaskKind};
         let proposal = visual_proposal_for_first_step(state, run_id);
-        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
-            &format!("task-00000000-0000-4000-8000-{run_id:012x}"),
-        )
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(&format!(
+            "task-00000000-0000-4000-8000-{run_id:012x}"
+        ))
         .unwrap();
         let now = 1000;
         let snapshot = ProductTaskSnapshot::new_v3(
@@ -8488,7 +8477,8 @@ key_source = { Env = "OPENAI_API_KEY" }
         let keyframe_sha = {
             let mut src = ws.frame_source.take().unwrap();
             let img = src.cached(step.keyframe).expect("keyframe cached");
-            let sha = crate::timeline_workspace::visual_annotation_agent::visual_keyframe_digest(&img);
+            let sha =
+                crate::timeline_workspace::visual_annotation_agent::visual_keyframe_digest(&img);
             ws.frame_source = Some(src);
             sha
         };
@@ -8520,8 +8510,7 @@ key_source = { Env = "OPENAI_API_KEY" }
         // The proposal's base values must match the workspace's actual
         // step, keyframe digest, annotation digest, and image dimensions
         // for rebase_restored to return Ready.
-        use crate::timeline_workspace::visual_annotation_agent::
-            suggestion_batch_to_proposal;
+        use crate::timeline_workspace::visual_annotation_agent::suggestion_batch_to_proposal;
         use rollshot_action::VisualAnnotationProposalOrigin;
         let proposal = suggestion_batch_to_proposal(
             42,
@@ -8535,15 +8524,13 @@ key_source = { Env = "OPENAI_API_KEY" }
             8, // image_height
             keyframe_sha,
             annotation_sha,
-            vec![
-                rollshot_agent::VisualAnnotationDraft::NumberCallout {
-                    id: 1,
-                    tip: rollshot_agent::NormalizedPoint { x: 0.5, y: 0.5 },
-                    bubble: rollshot_agent::NormalizedPoint { x: 0.2, y: 0.3 },
-                    confidence: 0.9,
-                    rationale: Some("button center".into()),
-                },
-            ],
+            vec![rollshot_agent::VisualAnnotationDraft::NumberCallout {
+                id: 1,
+                tip: rollshot_agent::NormalizedPoint { x: 0.5, y: 0.5 },
+                bubble: rollshot_agent::NormalizedPoint { x: 0.2, y: 0.3 },
+                confidence: 0.9,
+                rationale: Some("button center".into()),
+            }],
         )
         .expect("proposal");
         let proposal_payload = serde_json::to_vec(&proposal).unwrap();

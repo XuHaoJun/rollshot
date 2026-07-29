@@ -22,8 +22,13 @@ pub enum VisualAnnotationProvenance {
 /// revision (revision-bound) or from an ephemeral in-memory guide.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VisualAnnotationProposalOrigin {
-    DurableProject { revision: u64, projection_digest: String },
-    EphemeralGuide { guide_digest: String },
+    DurableProject {
+        revision: u64,
+        projection_digest: String,
+    },
+    EphemeralGuide {
+        guide_digest: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -128,6 +133,7 @@ pub enum VisualAnnotationProposalError {
 const MAX_RATIONALE_CHARS: usize = 500;
 
 impl VisualAnnotationProposal {
+    #[allow(clippy::too_many_arguments)]
     pub fn from_agent_drafts(
         id: VisualAnnotationProposalId,
         run_id: u64,

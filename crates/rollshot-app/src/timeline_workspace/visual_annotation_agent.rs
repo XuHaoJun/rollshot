@@ -1,5 +1,3 @@
-
-
 //! Bounded visual annotation suggestion task that runs in the iced async task.
 //!
 //! After the user consents in the consent dialog, the workspace sends a
@@ -206,7 +204,9 @@ pub(crate) struct VisualAnnotationTaskInput {
 pub(crate) enum VisualAnnotationTaskResult {
     /// Successful proposal with durable task metadata.
     Success(VisualAnnotationRunSuccess),
-    NoSuggestion { reason: Option<String> },
+    NoSuggestion {
+        reason: Option<String>,
+    },
 }
 
 /// Successful visual annotation run with durable task metadata.
@@ -381,19 +381,20 @@ pub(crate) async fn suggest_visual_annotation_task(
     let image_height = image.height();
 
     // 1. Prepare context.
-    let prepared_context = match prepare_visual_annotation_context_task(run_id, context_request).await {
-        Ok(ctx) => ctx,
-        Err(error) => {
-            tracing::error!(
-                target: "rollshot::action::visual_annotation_agent",
-                error = %error,
-                "visual annotation context preparation failed"
-            );
-            return Ok(VisualAnnotationTaskResult::NoSuggestion {
-                reason: Some(error),
-            });
-        }
-    };
+    let prepared_context =
+        match prepare_visual_annotation_context_task(run_id, context_request).await {
+            Ok(ctx) => ctx,
+            Err(error) => {
+                tracing::error!(
+                    target: "rollshot::action::visual_annotation_agent",
+                    error = %error,
+                    "visual annotation context preparation failed"
+                );
+                return Ok(VisualAnnotationTaskResult::NoSuggestion {
+                    reason: Some(error),
+                });
+            }
+        };
 
     // 2. Build source binding and create the task.
     let source_binding = visual_source_binding(
@@ -472,13 +473,8 @@ pub(crate) async fn suggest_visual_annotation_task(
             });
         }
         Err(error) => {
-            let _ = persist_visual_terminal(
-                store,
-                task_id,
-                TaskTerminal::RuntimeFailure,
-                now,
-            )
-            .await;
+            let _ =
+                persist_visual_terminal(store, task_id, TaskTerminal::RuntimeFailure, now).await;
             return Ok(VisualAnnotationTaskResult::NoSuggestion {
                 reason: Some(format!("spawn_blocking start attempt: {error}")),
             });
@@ -487,13 +483,7 @@ pub(crate) async fn suggest_visual_annotation_task(
 
     // 4. Resolve bundled skill; build authority; bind run contract.
     let Some(skill_use) = bundled_action_guide_visual_annotations_use() else {
-        let _ = persist_visual_terminal(
-            store,
-            task_id,
-            TaskTerminal::RuntimeFailure,
-            now,
-        )
-        .await;
+        let _ = persist_visual_terminal(store, task_id, TaskTerminal::RuntimeFailure, now).await;
         return Ok(VisualAnnotationTaskResult::NoSuggestion {
             reason: Some("skill unavailable".to_owned()),
         });
@@ -530,16 +520,13 @@ pub(crate) async fn suggest_visual_annotation_task(
         }
     };
 
-    let authority = match visual_authority(task_id.clone(), run_id_parsed.clone(), subject.clone()) {
+    let authority = match visual_authority(task_id.clone(), run_id_parsed.clone(), subject.clone())
+    {
         Ok(authority) => authority,
         Err(error) => {
-            let _ = persist_visual_terminal(
-                store,
-                task_id,
-                TaskTerminal::AgentProtocolFailure,
-                now,
-            )
-            .await;
+            let _ =
+                persist_visual_terminal(store, task_id, TaskTerminal::AgentProtocolFailure, now)
+                    .await;
             return Ok(VisualAnnotationTaskResult::NoSuggestion {
                 reason: Some(format!("build authority: {error}")),
             });
@@ -555,13 +542,8 @@ pub(crate) async fn suggest_visual_annotation_task(
     let bound = match running.bind_run_contract(run_contract, now) {
         Ok(bound) => bound,
         Err(error) => {
-            let _ = persist_visual_terminal(
-                store,
-                task_id,
-                TaskTerminal::RuntimeFailure,
-                now,
-            )
-            .await;
+            let _ =
+                persist_visual_terminal(store, task_id, TaskTerminal::RuntimeFailure, now).await;
             return Ok(VisualAnnotationTaskResult::NoSuggestion {
                 reason: Some(format!("bind run contract: {error}")),
             });
@@ -596,13 +578,8 @@ pub(crate) async fn suggest_visual_annotation_task(
             });
         }
         Err(error) => {
-            let _ = persist_visual_terminal(
-                store,
-                task_id,
-                TaskTerminal::RuntimeFailure,
-                now,
-            )
-            .await;
+            let _ =
+                persist_visual_terminal(store, task_id, TaskTerminal::RuntimeFailure, now).await;
             return Ok(VisualAnnotationTaskResult::NoSuggestion {
                 reason: Some(format!("spawn_blocking bind contract: {error}")),
             });
@@ -619,13 +596,8 @@ pub(crate) async fn suggest_visual_annotation_task(
                 error = %error,
                 "visual annotation PNG encoding failed"
             );
-            let _ = persist_visual_terminal(
-                store,
-                task_id,
-                TaskTerminal::RuntimeFailure,
-                now,
-            )
-            .await;
+            let _ =
+                persist_visual_terminal(store, task_id, TaskTerminal::RuntimeFailure, now).await;
             return Ok(VisualAnnotationTaskResult::NoSuggestion {
                 reason: Some(error),
             });
@@ -645,13 +617,8 @@ pub(crate) async fn suggest_visual_annotation_task(
                 error = %error,
                 "visual annotation input authorization failed"
             );
-            let _ = persist_visual_terminal(
-                store,
-                task_id,
-                TaskTerminal::RuntimeFailure,
-                now,
-            )
-            .await;
+            let _ =
+                persist_visual_terminal(store, task_id, TaskTerminal::RuntimeFailure, now).await;
             return Ok(VisualAnnotationTaskResult::NoSuggestion {
                 reason: Some(format!("input rejected: {error}")),
             });
@@ -666,13 +633,8 @@ pub(crate) async fn suggest_visual_annotation_task(
                 error = ?e,
                 "visual annotation profile rejected the bundled skill"
             );
-            let _ = persist_visual_terminal(
-                store,
-                task_id,
-                TaskTerminal::RuntimeFailure,
-                now,
-            )
-            .await;
+            let _ =
+                persist_visual_terminal(store, task_id, TaskTerminal::RuntimeFailure, now).await;
             return Ok(VisualAnnotationTaskResult::NoSuggestion {
                 reason: Some("skill unavailable".to_owned()),
             });
@@ -924,7 +886,9 @@ fn map_terminal_to_result(
                 "visual annotation authority denied"
             );
             VisualAnnotationTaskResult::NoSuggestion {
-                reason: Some("Visual annotation model did not return a usable suggestion.".to_string()),
+                reason: Some(
+                    "Visual annotation model did not return a usable suggestion.".to_string(),
+                ),
             }
         }
         VisualAnnotationRunTerminal::AuditFailure { category } => {
@@ -935,7 +899,9 @@ fn map_terminal_to_result(
                 "visual annotation audit failure"
             );
             VisualAnnotationTaskResult::NoSuggestion {
-                reason: Some("Visual annotation model did not return a usable suggestion.".to_string()),
+                reason: Some(
+                    "Visual annotation model did not return a usable suggestion.".to_string(),
+                ),
             }
         }
     }
@@ -1146,15 +1112,15 @@ pub(crate) fn visual_review_receipt(
     for suggestion in &proposal.suggestions {
         match suggestion.status {
             VisualAnnotationSuggestionStatus::Accepted => applied.push(narrow(suggestion.id.0)?),
-            VisualAnnotationSuggestionStatus::Rejected | VisualAnnotationSuggestionStatus::Stale => {
-                rejected.push(narrow(suggestion.id.0)?)
-            }
+            VisualAnnotationSuggestionStatus::Rejected
+            | VisualAnnotationSuggestionStatus::Stale => rejected.push(narrow(suggestion.id.0)?),
             VisualAnnotationSuggestionStatus::Pending => {}
         }
     }
 
-    let state_id_narrow = u32::try_from(resulting_document_state_id)
-        .map_err(|_| format!("resulting document state id {resulting_document_state_id} exceeds u32"))?;
+    let state_id_narrow = u32::try_from(resulting_document_state_id).map_err(|_| {
+        format!("resulting document state id {resulting_document_state_id} exceeds u32")
+    })?;
 
     Ok(ReviewReceipt {
         artifact_id: metadata.artifact_id().clone(),
@@ -1434,13 +1400,12 @@ pub(crate) mod restore_test_helpers {
             },
             _ => panic!("unexpected binding domain for visual seed"),
         };
-        let authority =
-            crate::timeline_workspace::visual_annotation_agent::visual_authority(
-                task_id.clone(),
-                run_id.clone(),
-                subject,
-            )
-            .unwrap();
+        let authority = crate::timeline_workspace::visual_annotation_agent::visual_authority(
+            task_id.clone(),
+            run_id.clone(),
+            subject,
+        )
+        .unwrap();
         let run_contract = RunContractReceiptV1 {
             authority: authority.receipt(now),
             skill_use: rollshot_agent::skills::bundled_action_guide_visual_annotations_use()
@@ -1465,7 +1430,9 @@ pub(crate) mod restore_test_helpers {
             "test-provider".to_string(),
             "test-model".to_string(),
             "run-config-digest".to_string(),
-            ArtifactSummary::ActionGuideVisualAnnotation { suggestion_count: 2 },
+            ArtifactSummary::ActionGuideVisualAnnotation {
+                suggestion_count: 2,
+            },
             now,
         );
 
@@ -1642,8 +1609,18 @@ mod tests {
 
     #[test]
     fn normalized_agent_batch_becomes_valid_core_proposal() {
-        let proposal = suggestion_batch_to_proposal(7, test_origin(), &step(), 12, 400, 200, test_keyframe_sha(), test_annotation_sha(), agent_batch())
-            .expect("proposal");
+        let proposal = suggestion_batch_to_proposal(
+            7,
+            test_origin(),
+            &step(),
+            12,
+            400,
+            200,
+            test_keyframe_sha(),
+            test_annotation_sha(),
+            agent_batch(),
+        )
+        .expect("proposal");
         assert_eq!(proposal.suggestions.len(), 3);
         assert_eq!(proposal.suggestions[0].base.image_width, 400);
         assert_eq!(proposal.suggestions[0].base.image_height, 200);
@@ -1655,8 +1632,18 @@ mod tests {
 
     #[test]
     fn callout_coordinates_are_scaled_to_pixel_space() {
-        let proposal =
-            suggestion_batch_to_proposal(1, test_origin(), &step(), 1, 400, 200, test_keyframe_sha(), test_annotation_sha(), agent_batch()).expect("proposal");
+        let proposal = suggestion_batch_to_proposal(
+            1,
+            test_origin(),
+            &step(),
+            1,
+            400,
+            200,
+            test_keyframe_sha(),
+            test_annotation_sha(),
+            agent_batch(),
+        )
+        .expect("proposal");
         let callout = match &proposal.suggestions[0].payload {
             VisualAnnotationPayload::NumberCallout { tip, bubble } => (tip, bubble),
             other => panic!("expected NumberCallout, got {other:?}"),
@@ -1669,8 +1656,18 @@ mod tests {
 
     #[test]
     fn note_coordinates_are_scaled_to_pixel_space() {
-        let proposal =
-            suggestion_batch_to_proposal(1, test_origin(), &step(), 1, 400, 200, test_keyframe_sha(), test_annotation_sha(), agent_batch()).expect("proposal");
+        let proposal = suggestion_batch_to_proposal(
+            1,
+            test_origin(),
+            &step(),
+            1,
+            400,
+            200,
+            test_keyframe_sha(),
+            test_annotation_sha(),
+            agent_batch(),
+        )
+        .expect("proposal");
         let note = match &proposal.suggestions[1].payload {
             VisualAnnotationPayload::TextNote { position, text } => (position, text),
             other => panic!("expected TextNote, got {other:?}"),
@@ -1682,8 +1679,18 @@ mod tests {
 
     #[test]
     fn redaction_coordinates_are_scaled_to_pixel_space() {
-        let proposal =
-            suggestion_batch_to_proposal(1, test_origin(), &step(), 1, 400, 200, test_keyframe_sha(), test_annotation_sha(), agent_batch()).expect("proposal");
+        let proposal = suggestion_batch_to_proposal(
+            1,
+            test_origin(),
+            &step(),
+            1,
+            400,
+            200,
+            test_keyframe_sha(),
+            test_annotation_sha(),
+            agent_batch(),
+        )
+        .expect("proposal");
         let rect = match &proposal.suggestions[2].payload {
             VisualAnnotationPayload::OpaqueRedaction { bounds } => bounds,
             other => panic!("expected OpaqueRedaction, got {other:?}"),
@@ -1703,8 +1710,18 @@ mod tests {
             confidence: 0.8,
             rationale: None,
         }];
-        let proposal =
-            suggestion_batch_to_proposal(3, test_origin(), &step(), 5, 800, 600, test_keyframe_sha(), test_annotation_sha(), single).expect("proposal");
+        let proposal = suggestion_batch_to_proposal(
+            3,
+            test_origin(),
+            &step(),
+            5,
+            800,
+            600,
+            test_keyframe_sha(),
+            test_annotation_sha(),
+            single,
+        )
+        .expect("proposal");
         assert_eq!(proposal.suggestions.len(), 1);
         assert_eq!(proposal.suggestions[0].base.image_width, 800);
         assert_eq!(proposal.suggestions[0].base.image_height, 600);
@@ -2033,7 +2050,8 @@ mod tests {
                     VisualAnnotationProposalOrigin::EphemeralGuide { guide_digest } => {
                         assert!(!guide_digest.is_empty(), "guide digest must be populated");
                         // The digest should be the same as the caption agent's.
-                        let expected_digest = crate::timeline_workspace::caption_agent::compute_guide_digest(&guide);
+                        let expected_digest =
+                            crate::timeline_workspace::caption_agent::compute_guide_digest(&guide);
                         assert_eq!(guide_digest, expected_digest);
                     }
                     other => panic!("expected EphemeralGuide origin, got {other:?}"),
@@ -2111,19 +2129,15 @@ mod tests {
             state_id: 5,
             annotations: vec![],
         };
-        rollshot_agent::product_task::DocumentContentBinding::new(
-            test_keyframe_sha(),
-            &state,
-            5,
-        )
-        .unwrap()
+        rollshot_agent::product_task::DocumentContentBinding::new(test_keyframe_sha(), &state, 5)
+            .unwrap()
     }
 
     /// Create a durable prepared context for binding tests.
     fn durable_context() -> PreparedVisualAnnotationContext {
         use rollshot_action::project::{
-            create_project, EnabledOutputs, ProjectSnapshot, ProjectStep,
-            ProjectStepId, SnapshotFrame, SnapshotFramePayload,
+            create_project, EnabledOutputs, ProjectSnapshot, ProjectStep, ProjectStepId,
+            SnapshotFrame, SnapshotFramePayload,
         };
 
         let dir = tempfile::tempdir().unwrap();
@@ -2190,8 +2204,7 @@ mod tests {
             nearby: vec![],
             source: 3,
         };
-        let guide =
-            rollshot_action::Guide::from_reviewed_steps("Test".into(), vec![step]).unwrap();
+        let guide = rollshot_action::Guide::from_reviewed_steps("Test".into(), vec![step]).unwrap();
         run(prepare_visual_annotation_context_task(
             99,
             VisualAnnotationContextRequest::Ephemeral {
@@ -2210,18 +2223,10 @@ mod tests {
         let ctx = durable_context();
         // Extract the project root stored in the durable context.
         let root = match &ctx {
-            PreparedVisualAnnotationContext::Durable { project_root, .. } => {
-                project_root.clone()
-            }
+            PreparedVisualAnnotationContext::Durable { project_root, .. } => project_root.clone(),
             _ => panic!("expected Durable context"),
         };
-        let binding = visual_source_binding(
-            &ctx,
-            3,
-            1,
-            test_keyframe_sha(),
-            test_annotation_sha(),
-        );
+        let binding = visual_source_binding(&ctx, 3, 1, test_keyframe_sha(), test_annotation_sha());
         match binding {
             SourceBinding::ActionGuideVisualAnnotationProject {
                 project_root_sha256,
@@ -2244,9 +2249,7 @@ mod tests {
                 assert_eq!(keyframe_sha256, test_keyframe_sha());
                 assert_eq!(annotation_state_sha256, test_annotation_sha());
             }
-            other => panic!(
-                "expected ActionGuideVisualAnnotationProject, got {other:?}"
-            ),
+            other => panic!("expected ActionGuideVisualAnnotationProject, got {other:?}"),
         }
     }
 
@@ -2255,13 +2258,7 @@ mod tests {
         use rollshot_agent::product_task::SourceBinding;
 
         let ctx = ephemeral_context();
-        let binding = visual_source_binding(
-            &ctx,
-            3,
-            5,
-            test_keyframe_sha(),
-            test_annotation_sha(),
-        );
+        let binding = visual_source_binding(&ctx, 3, 5, test_keyframe_sha(), test_annotation_sha());
         match binding {
             SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
                 guide_digest,
@@ -2276,9 +2273,7 @@ mod tests {
                 assert_eq!(keyframe_sha256, test_keyframe_sha());
                 assert_eq!(annotation_state_sha256, test_annotation_sha());
             }
-            other => panic!(
-                "expected ActionGuideVisualAnnotationEphemeralGuide, got {other:?}"
-            ),
+            other => panic!("expected ActionGuideVisualAnnotationEphemeralGuide, got {other:?}"),
         }
     }
 
@@ -2289,12 +2284,16 @@ mod tests {
         // Same project root used for both a caption and a visual binding.
         let root = std::path::Path::new("/tmp/test-project");
         let caption = SourceBinding::ActionGuideProject {
-            project_root_sha256: crate::timeline_workspace::caption_agent::project_root_digest(root),
+            project_root_sha256: crate::timeline_workspace::caption_agent::project_root_digest(
+                root,
+            ),
             revision: 1,
             projection_digest: "ab".repeat(32),
         };
         let visual = SourceBinding::ActionGuideVisualAnnotationProject {
-            project_root_sha256: crate::timeline_workspace::caption_agent::project_root_digest(root),
+            project_root_sha256: crate::timeline_workspace::caption_agent::project_root_digest(
+                root,
+            ),
             revision: 1,
             projection_digest: "ab".repeat(32),
             step_source: 3,
@@ -2393,9 +2392,7 @@ mod tests {
     mod lifecycle {
         use super::*;
         use rollshot_agent::authority::DisclosureCeiling;
-        use rollshot_agent::product_task::{
-            ArtifactKind, ArtifactSummary, TaskKind, TaskStatus,
-        };
+        use rollshot_agent::product_task::{ArtifactKind, ArtifactSummary, TaskKind, TaskStatus};
         use rollshot_agent::NormalizedPoint;
 
         /// Scripted provider that returns one valid tool call.
@@ -2405,7 +2402,9 @@ mod tests {
 
         impl OneCallProvider {
             fn new(args: &str) -> Self {
-                use rollshot_agent::model::{ModelCompletion, ModelStreamEvent, ModelUsage, StopReason};
+                use rollshot_agent::model::{
+                    ModelCompletion, ModelStreamEvent, ModelUsage, StopReason,
+                };
                 let events = vec![
                     ModelStreamEvent::ToolCallStart {
                         id: "tc_1".to_string(),
@@ -2514,11 +2513,8 @@ mod tests {
                     annotation_state_sha256: test_annotation_sha(),
                 },
                 VisualAnnotationContextRequest::Ephemeral {
-                    guide: rollshot_action::Guide::from_reviewed_steps(
-                        "Test".into(),
-                        vec![step()],
-                    )
-                    .unwrap(),
+                    guide: rollshot_action::Guide::from_reviewed_steps("Test".into(), vec![step()])
+                        .unwrap(),
                     step_source: 10,
                     keyframe: 7,
                 },
@@ -2553,12 +2549,13 @@ mod tests {
             assert_eq!(meta.model_id(), "test-model");
             assert!(matches!(
                 meta.summary(),
-                ArtifactSummary::ActionGuideVisualAnnotation { suggestion_count: 1 }
+                ArtifactSummary::ActionGuideVisualAnnotation {
+                    suggestion_count: 1
+                }
             ));
             // Decode pending_proposal_payload as VisualAnnotationProposal.
             let proposal_bytes = loaded.pending_proposal_payload().unwrap();
-            let decoded: VisualAnnotationProposal =
-                serde_json::from_slice(proposal_bytes).unwrap();
+            let decoded: VisualAnnotationProposal = serde_json::from_slice(proposal_bytes).unwrap();
             assert_eq!(decoded, success.proposal);
         }
 
@@ -2579,11 +2576,8 @@ mod tests {
                     annotation_state_sha256: test_annotation_sha(),
                 },
                 VisualAnnotationContextRequest::Ephemeral {
-                    guide: rollshot_action::Guide::from_reviewed_steps(
-                        "Test".into(),
-                        vec![step()],
-                    )
-                    .unwrap(),
+                    guide: rollshot_action::Guide::from_reviewed_steps("Test".into(), vec![step()])
+                        .unwrap(),
                     step_source: 10,
                     keyframe: 7,
                 },
@@ -2596,7 +2590,10 @@ mod tests {
             .await
             .unwrap();
 
-            assert!(matches!(result, VisualAnnotationTaskResult::NoSuggestion { .. }));
+            assert!(matches!(
+                result,
+                VisualAnnotationTaskResult::NoSuggestion { .. }
+            ));
         }
 
         #[tokio::test]
@@ -2622,11 +2619,8 @@ mod tests {
                     annotation_state_sha256: test_annotation_sha(),
                 },
                 VisualAnnotationContextRequest::Ephemeral {
-                    guide: rollshot_action::Guide::from_reviewed_steps(
-                        "Test".into(),
-                        vec![step()],
-                    )
-                    .unwrap(),
+                    guide: rollshot_action::Guide::from_reviewed_steps("Test".into(), vec![step()])
+                        .unwrap(),
                     step_source: 10,
                     keyframe: 7,
                 },
@@ -2673,11 +2667,8 @@ mod tests {
                     annotation_state_sha256: test_annotation_sha(),
                 },
                 VisualAnnotationContextRequest::Ephemeral {
-                    guide: rollshot_action::Guide::from_reviewed_steps(
-                        "Test".into(),
-                        vec![step()],
-                    )
-                    .unwrap(),
+                    guide: rollshot_action::Guide::from_reviewed_steps("Test".into(), vec![step()])
+                        .unwrap(),
                     step_source: 10,
                     keyframe: 7,
                 },
@@ -2741,11 +2732,8 @@ mod tests {
                     annotation_state_sha256: test_annotation_sha(),
                 },
                 VisualAnnotationContextRequest::Ephemeral {
-                    guide: rollshot_action::Guide::from_reviewed_steps(
-                        "Test".into(),
-                        vec![step()],
-                    )
-                    .unwrap(),
+                    guide: rollshot_action::Guide::from_reviewed_steps("Test".into(), vec![step()])
+                        .unwrap(),
                     step_source: 10,
                     keyframe: 7,
                 },
@@ -2835,23 +2823,19 @@ mod tests {
             },
             task_id.clone(),
             rollshot_agent::product_task::TaskAttemptId::new(1),
-            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
+                .unwrap(),
             "1".to_owned(),
             "test-provider".to_owned(),
             "test-model".to_owned(),
             String::new(),
-            ArtifactSummary::ActionGuideVisualAnnotation { suggestion_count: 2 },
+            ArtifactSummary::ActionGuideVisualAnnotation {
+                suggestion_count: 2,
+            },
             1000,
         );
 
-        let receipt = visual_review_receipt(
-            &proposal,
-            &metadata,
-            42,
-            [3u8; 32],
-            5000,
-        )
-        .unwrap();
+        let receipt = visual_review_receipt(&proposal, &metadata, 42, [3u8; 32], 5000).unwrap();
 
         // Assert artifact/revision/proposal IDs.
         assert_eq!(receipt.artifact_id, metadata.artifact_id().clone());
@@ -3266,10 +3250,9 @@ mod tests {
             "task-00000000-0000-4000-8000-0000000000aa",
         )
         .unwrap();
-        let run_id = rollshot_agent::domain::RunId::parse(
-            "run-00000000-0000-4000-8000-0000000000aa",
-        )
-        .unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-0000000000aa")
+                .unwrap();
         let binding = rollshot_agent::product_task::SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
             guide_digest: "cc".repeat(32),
             step_source: 10,
@@ -3299,7 +3282,12 @@ mod tests {
         );
         let running = created.start_attempt(attempt, now + 1).unwrap();
         store
-            .transition_audited(&created, &running, rollshot_agent::audit::AuditEventId::new_v4(), now + 1)
+            .transition_audited(
+                &created,
+                &running,
+                rollshot_agent::audit::AuditEventId::new_v4(),
+                now + 1,
+            )
             .unwrap();
 
         // 3. Bind run contract.
@@ -3316,14 +3304,22 @@ mod tests {
         };
         let bound = running.bind_run_contract(contract, now + 2).unwrap();
         store
-            .transition_audited(&running, &bound, rollshot_agent::audit::AuditEventId::new_v4(), now + 2)
+            .transition_audited(
+                &running,
+                &bound,
+                rollshot_agent::audit::AuditEventId::new_v4(),
+                now + 2,
+            )
             .unwrap();
 
         // 4. Promote to ReadyForReview.
         let proposal = visual_proposal_fixture();
         let payload_bytes = serde_json::to_vec(&proposal).unwrap();
         let meta = rollshot_agent::product_task::ProductArtifactMetadata::new_v3(
-            rollshot_agent::product_task::ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000001").unwrap(),
+            rollshot_agent::product_task::ArtifactId::parse(
+                "artifact-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap(),
             rollshot_agent::product_task::ArtifactRevision::new(1),
             rollshot_agent::product_task::ArtifactKind::ActionGuideVisualAnnotation,
             1,
@@ -3336,20 +3332,32 @@ mod tests {
             "test-provider".to_string(),
             "test-model".to_string(),
             "run-config-digest".to_string(),
-            rollshot_agent::product_task::ArtifactSummary::ActionGuideVisualAnnotation { suggestion_count: 2 },
+            rollshot_agent::product_task::ArtifactSummary::ActionGuideVisualAnnotation {
+                suggestion_count: 2,
+            },
             now + 3,
         );
         let ready = bound
             .record_ready_for_review(meta, payload_bytes.clone(), Some(payload_bytes), now + 3)
             .unwrap();
         store
-            .transition_audited(&bound, &ready, rollshot_agent::audit::AuditEventId::new_v4(), now + 3)
+            .transition_audited(
+                &bound,
+                &ready,
+                rollshot_agent::audit::AuditEventId::new_v4(),
+                now + 3,
+            )
             .unwrap();
 
         // 5. Begin apply.
         let applying = ready.begin_apply(now + 4).unwrap();
         store
-            .transition_audited(&ready, &applying, rollshot_agent::audit::AuditEventId::new_v4(), now + 4)
+            .transition_audited(
+                &ready,
+                &applying,
+                rollshot_agent::audit::AuditEventId::new_v4(),
+                now + 4,
+            )
             .unwrap();
 
         // 6. Complete apply (final review).
@@ -3372,7 +3380,12 @@ mod tests {
         };
         let completed = applying.complete_apply(receipt, now + 5).unwrap();
         store
-            .transition_audited(&applying, &completed, rollshot_agent::audit::AuditEventId::new_v4(), now + 5)
+            .transition_audited(
+                &applying,
+                &completed,
+                rollshot_agent::audit::AuditEventId::new_v4(),
+                now + 5,
+            )
             .unwrap();
 
         // 7. Assert exact material event order — 7 events ending with TaskTerminated.
@@ -3412,10 +3425,9 @@ mod tests {
             "task-00000000-0000-4000-8000-0000000000ac",
         )
         .unwrap();
-        let run_id2 = rollshot_agent::domain::RunId::parse(
-            "run-00000000-0000-4000-8000-0000000000ac",
-        )
-        .unwrap();
+        let run_id2 =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-0000000000ac")
+                .unwrap();
         let binding2 = rollshot_agent::product_task::SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
             guide_digest: "cc".repeat(32),
             step_source: 10,
@@ -3431,7 +3443,11 @@ mod tests {
         )
         .unwrap();
         store
-            .create_audited(&created2, rollshot_agent::audit::AuditEventId::new_v4(), now)
+            .create_audited(
+                &created2,
+                rollshot_agent::audit::AuditEventId::new_v4(),
+                now,
+            )
             .unwrap();
         let attempt2 = rollshot_agent::product_task::TaskAttempt::new(
             rollshot_agent::product_task::TaskAttemptId::new(1),
@@ -3440,7 +3456,12 @@ mod tests {
         );
         let running2 = created2.start_attempt(attempt2, now + 1).unwrap();
         store
-            .transition_audited(&created2, &running2, rollshot_agent::audit::AuditEventId::new_v4(), now + 1)
+            .transition_audited(
+                &created2,
+                &running2,
+                rollshot_agent::audit::AuditEventId::new_v4(),
+                now + 1,
+            )
             .unwrap();
         let subject2 = rollshot_agent::authority::AuthoritySubject::ActionGuideEphemeralGuide {
             guide_digest: "cc".repeat(32),
@@ -3455,12 +3476,20 @@ mod tests {
         };
         let bound2 = running2.bind_run_contract(contract2, now + 2).unwrap();
         store
-            .transition_audited(&running2, &bound2, rollshot_agent::audit::AuditEventId::new_v4(), now + 2)
+            .transition_audited(
+                &running2,
+                &bound2,
+                rollshot_agent::audit::AuditEventId::new_v4(),
+                now + 2,
+            )
             .unwrap();
         let proposal2 = visual_proposal_fixture();
         let payload_bytes2 = serde_json::to_vec(&proposal2).unwrap();
         let meta2 = rollshot_agent::product_task::ProductArtifactMetadata::new_v3(
-            rollshot_agent::product_task::ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000002").unwrap(),
+            rollshot_agent::product_task::ArtifactId::parse(
+                "artifact-00000000-0000-4000-8000-000000000002",
+            )
+            .unwrap(),
             rollshot_agent::product_task::ArtifactRevision::new(1),
             rollshot_agent::product_task::ArtifactKind::ActionGuideVisualAnnotation,
             1,
@@ -3473,20 +3502,32 @@ mod tests {
             "test-provider".to_string(),
             "test-model".to_string(),
             "run-config-digest".to_string(),
-            rollshot_agent::product_task::ArtifactSummary::ActionGuideVisualAnnotation { suggestion_count: 2 },
+            rollshot_agent::product_task::ArtifactSummary::ActionGuideVisualAnnotation {
+                suggestion_count: 2,
+            },
             now + 3,
         );
         let ready2 = bound2
             .record_ready_for_review(meta2, payload_bytes2.clone(), Some(payload_bytes2), now + 3)
             .unwrap();
         store
-            .transition_audited(&bound2, &ready2, rollshot_agent::audit::AuditEventId::new_v4(), now + 3)
+            .transition_audited(
+                &bound2,
+                &ready2,
+                rollshot_agent::audit::AuditEventId::new_v4(),
+                now + 3,
+            )
             .unwrap();
 
         // Mark stale — produces TaskTerminated (ReadyForReview → Stale).
         let stale2 = ready2.mark_stale(now + 4).unwrap();
         store
-            .transition_audited(&ready2, &stale2, rollshot_agent::audit::AuditEventId::new_v4(), now + 4)
+            .transition_audited(
+                &ready2,
+                &stale2,
+                rollshot_agent::audit::AuditEventId::new_v4(),
+                now + 4,
+            )
             .unwrap();
 
         // Verify the terminal path produces all 7 events including TaskTerminated.
@@ -3513,10 +3554,9 @@ mod tests {
             "task-00000000-0000-4000-8000-0000000000bb",
         )
         .unwrap();
-        let run_id = rollshot_agent::domain::RunId::parse(
-            "run-00000000-0000-4000-8000-0000000000bb",
-        )
-        .unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-0000000000bb")
+                .unwrap();
         let binding = rollshot_agent::product_task::SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
             guide_digest: "dd".repeat(32),
             step_source: 10,
@@ -3544,7 +3584,12 @@ mod tests {
         );
         let running = created.start_attempt(attempt, now + 1).unwrap();
         store
-            .transition_audited(&created, &running, rollshot_agent::audit::AuditEventId::new_v4(), now + 1)
+            .transition_audited(
+                &created,
+                &running,
+                rollshot_agent::audit::AuditEventId::new_v4(),
+                now + 1,
+            )
             .unwrap();
 
         // Authority denial (standalone audit event).
@@ -3631,10 +3676,22 @@ mod tests {
                 "{label} must not contain ROLLSHOT sentinel"
             );
             let text = String::from_utf8_lossy(bytes);
-            assert!(!text.contains("sk-ant-"), "{label} must not contain API key prefix");
-            assert!(!text.contains("/tmp/"), "{label} must not contain filesystem paths");
-            assert!(!text.contains("Inspect this reviewed"), "{label} must not contain model prompt text");
-            assert!(!text.contains("You are a visual annotation"), "{label} must not contain skill body text");
+            assert!(
+                !text.contains("sk-ant-"),
+                "{label} must not contain API key prefix"
+            );
+            assert!(
+                !text.contains("/tmp/"),
+                "{label} must not contain filesystem paths"
+            );
+            assert!(
+                !text.contains("Inspect this reviewed"),
+                "{label} must not contain model prompt text"
+            );
+            assert!(
+                !text.contains("You are a visual annotation"),
+                "{label} must not contain skill body text"
+            );
         };
 
         // Task JSON must be clean.
@@ -3713,12 +3770,12 @@ mod tests {
             .unwrap();
 
         // Duplicate creation must fail (AlreadyExists). No false success.
-        let result = store.create_audited(
-            &created,
-            rollshot_agent::audit::AuditEventId::new_v4(),
-            10,
+        let result =
+            store.create_audited(&created, rollshot_agent::audit::AuditEventId::new_v4(), 10);
+        assert!(
+            result.is_err(),
+            "duplicate create_audited must return error"
         );
-        assert!(result.is_err(), "duplicate create_audited must return error");
 
         // Task is still in a legal terminal state.
         let loaded = store.load(created.task_id()).unwrap();
@@ -3793,8 +3850,16 @@ mod tests {
                 );
                 let running = loaded.start_attempt(attempt, 20).unwrap();
 
-                let result = store.transition_audited(&loaded, &running, rollshot_agent::audit::AuditEventId::new_v4(), 20);
-                assert!(result.is_err(), "transition_audited must fail under AuditCommit failpoint");
+                let result = store.transition_audited(
+                    &loaded,
+                    &running,
+                    rollshot_agent::audit::AuditEventId::new_v4(),
+                    20,
+                );
+                assert!(
+                    result.is_err(),
+                    "transition_audited must fail under AuditCommit failpoint"
+                );
             }
             rollshot_agent::product_task::TaskStatus::Interrupted
             | rollshot_agent::product_task::TaskStatus::Stale => {
@@ -3823,10 +3888,9 @@ mod tests {
             "task-00000000-0000-4000-8000-0000000000f3",
         )
         .unwrap();
-        let run_id = rollshot_agent::domain::RunId::parse(
-            "run-00000000-0000-4000-8000-0000000000f3",
-        )
-        .unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-0000000000f3")
+                .unwrap();
 
         // Create and advance to Running.
         let created = rollshot_agent::product_task::ProductTaskSnapshot::new_v3(
@@ -3846,7 +3910,12 @@ mod tests {
         );
         let running = created.start_attempt(attempt, 20).unwrap();
         store
-            .transition_audited(&created, &running, rollshot_agent::audit::AuditEventId::new_v4(), 20)
+            .transition_audited(
+                &created,
+                &running,
+                rollshot_agent::audit::AuditEventId::new_v4(),
+                20,
+            )
             .unwrap();
 
         // Drop and reopen with AuditCommit failpoint.
@@ -3861,15 +3930,17 @@ mod tests {
         match loaded.status() {
             rollshot_agent::product_task::TaskStatus::Running => {
                 // Sweep didn't terminate. Attempt promotion.
-                let subject = rollshot_agent::authority::AuthoritySubject::ActionGuideEphemeralGuide {
-                    guide_digest: "ee".repeat(32),
-                };
+                let subject =
+                    rollshot_agent::authority::AuthoritySubject::ActionGuideEphemeralGuide {
+                        guide_digest: "ee".repeat(32),
+                    };
                 let authority = visual_authority(task_id.clone(), run_id, subject).unwrap();
                 let contract = rollshot_agent::product_task::RunContractReceiptV1 {
                     authority: authority.receipt(30),
-                    skill_use: rollshot_agent::skills::bundled_action_guide_visual_annotations_use()
-                        .unwrap()
-                        .receipt(),
+                    skill_use: rollshot_agent::skills::bundled_action_guide_visual_annotations_use(
+                    )
+                    .unwrap()
+                    .receipt(),
                     bound_at_unix_ms: 30,
                 };
                 let bound = loaded.bind_run_contract(contract, 30).unwrap();
@@ -3882,7 +3953,10 @@ mod tests {
                     rollshot_agent::audit::AuditEventId::new_v4(),
                     30,
                 );
-                assert!(result.is_err(), "transition_audited must fail under AuditCommit failpoint");
+                assert!(
+                    result.is_err(),
+                    "transition_audited must fail under AuditCommit failpoint"
+                );
             }
             rollshot_agent::product_task::TaskStatus::Interrupted
             | rollshot_agent::product_task::TaskStatus::Stale => {
@@ -3935,8 +4009,16 @@ mod tests {
         let applying = ready.begin_apply(now).unwrap();
 
         // Attempt transition — must fail under AuditCommit failpoint.
-        let result = store.transition_audited(&ready, &applying, rollshot_agent::audit::AuditEventId::new_v4(), now);
-        assert!(result.is_err(), "transition_audited must fail under AuditCommit failpoint");
+        let result = store.transition_audited(
+            &ready,
+            &applying,
+            rollshot_agent::audit::AuditEventId::new_v4(),
+            now,
+        );
+        assert!(
+            result.is_err(),
+            "transition_audited must fail under AuditCommit failpoint"
+        );
 
         // Legal terminal state — the CAS wrote the snapshot before the
         // failpoint fired, so the task may be in Applying (snapshot visible
@@ -3976,7 +4058,12 @@ mod tests {
         let now = chrono::Utc::now().timestamp_millis();
         let applying = ready.begin_apply(now).unwrap();
         store
-            .transition_audited(&ready, &applying, rollshot_agent::audit::AuditEventId::new_v4(), now)
+            .transition_audited(
+                &ready,
+                &applying,
+                rollshot_agent::audit::AuditEventId::new_v4(),
+                now,
+            )
             .unwrap();
 
         // Drop and reopen with AuditCommit failpoint.
@@ -4011,8 +4098,16 @@ mod tests {
                 let completed = applying.complete_apply(receipt, now + 1).unwrap();
 
                 // Attempt transition — must fail under AuditCommit failpoint.
-                let result = store.transition_audited(&applying, &completed, rollshot_agent::audit::AuditEventId::new_v4(), now + 1);
-                assert!(result.is_err(), "transition_audited must fail under AuditCommit failpoint");
+                let result = store.transition_audited(
+                    &applying,
+                    &completed,
+                    rollshot_agent::audit::AuditEventId::new_v4(),
+                    now + 1,
+                );
+                assert!(
+                    result.is_err(),
+                    "transition_audited must fail under AuditCommit failpoint"
+                );
             }
             rollshot_agent::product_task::TaskStatus::Interrupted => {
                 // Sweep terminated the task. Legal terminal.
@@ -4060,10 +4155,9 @@ mod tests {
             "task-00000000-0000-4000-8000-0000000000f7",
         )
         .unwrap();
-        let run_id = rollshot_agent::domain::RunId::parse(
-            "run-00000000-0000-4000-8000-0000000000f7",
-        )
-        .unwrap();
+        let run_id =
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-0000000000f7")
+                .unwrap();
         let created = rollshot_agent::product_task::ProductTaskSnapshot::new_v3(
             task_id.clone(),
             rollshot_agent::product_task::TaskKind::ActionGuideVisualAnnotation,
@@ -4081,7 +4175,12 @@ mod tests {
         );
         let running = created.start_attempt(attempt, 20).unwrap();
         store
-            .transition_audited(&created, &running, rollshot_agent::audit::AuditEventId::new_v4(), 20)
+            .transition_audited(
+                &created,
+                &running,
+                rollshot_agent::audit::AuditEventId::new_v4(),
+                20,
+            )
             .unwrap();
 
         // Drop and reopen with AuditCommit failpoint.
@@ -4105,7 +4204,10 @@ mod tests {
                     rollshot_agent::audit::AuditEventId::new_v4(),
                     30,
                 );
-                assert!(result.is_err(), "transition_audited must fail under AuditCommit failpoint");
+                assert!(
+                    result.is_err(),
+                    "transition_audited must fail under AuditCommit failpoint"
+                );
             }
             rollshot_agent::product_task::TaskStatus::Interrupted
             | rollshot_agent::product_task::TaskStatus::Stale => {

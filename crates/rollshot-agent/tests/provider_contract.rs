@@ -1317,16 +1317,18 @@ mod visual_annotation {
         let skill = bundled_action_guide_visual_annotations_use()
             .expect("bundled visual skill must resolve");
         let skill: &'static rollshot_agent::skills::SkillUse = Box::leak(Box::new(skill));
-        VisualAnnotationProfile::from_skill(skill)
-            .expect("bundled visual skill must be accepted")
+        VisualAnnotationProfile::from_skill(skill).expect("bundled visual skill must be accepted")
     }
 
-    fn va_authority() -> (rollshot_agent::authority::AuthoritySnapshot, rollshot_agent::authority::AuthoritySubject) {
+    fn va_authority() -> (
+        rollshot_agent::authority::AuthoritySnapshot,
+        rollshot_agent::authority::AuthoritySubject,
+    ) {
         use rollshot_agent::authority::{
             AuthorityBinding, AuthoritySnapshot, AuthoritySubject, DisclosureCeiling, RunOperation,
         };
-        use rollshot_agent::product_task::{ProductTaskId, TaskAttemptId};
         use rollshot_agent::domain::RunId;
+        use rollshot_agent::product_task::{ProductTaskId, TaskAttemptId};
         use std::collections::BTreeSet;
 
         let task_id = ProductTaskId::parse("task-00000000-0000-4000-8000-000000000001").unwrap();
@@ -1337,7 +1339,8 @@ mod visual_annotation {
         let mut grants = BTreeSet::new();
         grants.insert(RunOperation::DiscloseScreenshotAttachment);
         grants.insert(RunOperation::SubmitReviewCandidate);
-        let binding = AuthorityBinding::new(task_id, TaskAttemptId::new(1), run_id, subject.clone());
+        let binding =
+            AuthorityBinding::new(task_id, TaskAttemptId::new(1), run_id, subject.clone());
         let authority = AuthoritySnapshot::new(
             binding,
             "rollshot-v1".to_owned(),
@@ -1418,7 +1421,16 @@ mod visual_annotation {
 
         let (authority, subject) = va_authority();
         let _ = runner
-            .run_visual_annotation_with_provider(va_profile(), input, &provider, budget, &cancel, &authority, &subject, None)
+            .run_visual_annotation_with_provider(
+                va_profile(),
+                input,
+                &provider,
+                budget,
+                &cancel,
+                &authority,
+                &subject,
+                None,
+            )
             .await;
 
         let requests = provider.requests.lock().unwrap();
@@ -1455,7 +1467,16 @@ mod visual_annotation {
 
         let (authority, subject) = va_authority();
         let result = runner
-            .run_visual_annotation_with_provider(va_profile(), input, &provider, budget, &cancel, &authority, &subject, None)
+            .run_visual_annotation_with_provider(
+                va_profile(),
+                input,
+                &provider,
+                budget,
+                &cancel,
+                &authority,
+                &subject,
+                None,
+            )
             .await;
 
         match result {

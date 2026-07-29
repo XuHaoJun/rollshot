@@ -1144,9 +1144,7 @@ fn annotation_modal<'a>(
                 text("Pending annotations").size(13),
                 Space::new().width(Length::Fill),
                 button(text("Accept all"))
-                    .on_press_maybe(
-                        review_enabled.then_some(Message::AcceptAllVisualAnnotations)
-                    )
+                    .on_press_maybe(review_enabled.then_some(Message::AcceptAllVisualAnnotations))
                     .style(button::primary),
                 button(text("Reject all"))
                     .on_press_maybe(
@@ -1194,11 +1192,9 @@ fn annotation_modal<'a>(
                                         .then_some(Message::AcceptVisualAnnotation(suggestion.id))
                                 )
                                 .style(button::primary),
-                            button(text("Reject")).on_press_maybe(
-                                review_enabled.then_some(
-                                    Message::RejectSingleVisualAnnotationSuggestion(suggestion.id)
-                                )
-                            ),
+                            button(text("Reject")).on_press_maybe(review_enabled.then_some(
+                                Message::RejectSingleVisualAnnotationSuggestion(suggestion.id)
+                            )),
                         ]
                         .spacing(6),
                     );
@@ -2382,7 +2378,9 @@ mod tests {
             .expect("render visual annotation review scenario");
         let base = artifact_dir.join("restore-visual-annotation-review");
         assert!(
-            snapshot.matches_image(base).expect("write visual annotation review PNG"),
+            snapshot
+                .matches_image(base)
+                .expect("write visual annotation review PNG"),
             "visual annotation review scenario baseline mismatch"
         );
     }

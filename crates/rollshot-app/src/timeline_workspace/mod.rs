@@ -898,7 +898,9 @@ pub(crate) fn visual_annotation_context_request(
         ProjectSaveState::Clean,
     ) = (&ws.project_session, ws.save_state)
     {
-        let step = ws.selected_step().expect("selected step for context request");
+        let step = ws
+            .selected_step()
+            .expect("selected step for context request");
         VisualAnnotationContextRequest::Durable {
             root: root.clone(),
             expected_revision: *base_revision,
@@ -906,7 +908,9 @@ pub(crate) fn visual_annotation_context_request(
             keyframe: step.keyframe,
         }
     } else {
-        let step = ws.selected_step().expect("selected step for context request");
+        let step = ws
+            .selected_step()
+            .expect("selected step for context request");
         VisualAnnotationContextRequest::Ephemeral {
             guide: ws.guide.clone(),
             step_source: step.source,
@@ -1029,7 +1033,8 @@ mod tests {
         ActionRecorder, CandidateKind, CandidateStep, CaptureRegion, DetectReason, DetectorConfig,
         FrameStore, InputCapability, InputSourceKind, Recording, StoreConfig,
         VisualAnnotationPayload, VisualAnnotationProposal, VisualAnnotationProposalId,
-        VisualAnnotationProposalOrigin, VisualAnnotationSuggestionDraft, VisualAnnotationSuggestionId,
+        VisualAnnotationProposalOrigin, VisualAnnotationSuggestionDraft,
+        VisualAnnotationSuggestionId,
     };
 
     fn region_32() -> CaptureRegion {
@@ -2938,8 +2943,7 @@ mod tests {
             let ws = ws_project_backed();
             assert_eq!(ws.save_state, ProjectSaveState::Clean);
             assert!(ws.project_session.is_some());
-            let request =
-                super::super::visual_annotation_context_request(&ws);
+            let request = super::super::visual_annotation_context_request(&ws);
             match request {
                 super::super::visual_annotation_agent::VisualAnnotationContextRequest::Durable {
                     root,
@@ -2959,8 +2963,7 @@ mod tests {
             // Saved + Dirty → Ephemeral
             let mut ws = ws_project_backed();
             ws.save_state = ProjectSaveState::Dirty;
-            let request =
-                super::super::visual_annotation_context_request(&ws);
+            let request = super::super::visual_annotation_context_request(&ws);
             match request {
                 super::super::visual_annotation_agent::VisualAnnotationContextRequest::Ephemeral {
                     guide: _,
@@ -2977,8 +2980,7 @@ mod tests {
             // Unsaved → Ephemeral
             let ws = workspace(recording_from_frames());
             assert!(ws.project_session.is_none());
-            let request =
-                super::super::visual_annotation_context_request(&ws);
+            let request = super::super::visual_annotation_context_request(&ws);
             match request {
                 super::super::visual_annotation_agent::VisualAnnotationContextRequest::Ephemeral {
                     guide,

@@ -13,8 +13,8 @@ pub mod skills;
 pub mod tools;
 pub mod visual_annotation;
 
-pub use provider::{AnthropicAdapter, OpenAIAdapter, ProviderAdapter, StreamBounds};
 pub use driver::VisualAnnotationProfile;
+pub use provider::{AnthropicAdapter, OpenAIAdapter, ProviderAdapter, StreamBounds};
 pub use visual_annotation::{
     parse_visual_annotation_tool_args, submit_visual_annotation_suggestions_definition,
     visual_annotation_run_budget, NormalizedPoint, NormalizedRect, VisualAnnotationDraft,

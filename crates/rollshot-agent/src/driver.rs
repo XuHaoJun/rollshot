@@ -66,6 +66,7 @@ use crate::tools::{ToolCall, ToolContext, ToolOutcome, ToolRegistry};
 
 // SMART_REDACTION_SYSTEM_PROMPT removed: all runs now use compose_smart_redaction_prompt().
 
+#[allow(dead_code)]
 pub(crate) const VISUAL_ANNOTATION_SYSTEM_PROMPT_BASELINE: &str = r#"You are Rollshot Visual Annotation Agent.
 Your only job is to suggest visual annotations for the single most important UI
 element(s) in the screenshot the user is reviewing. Rollshot has already
@@ -250,6 +251,7 @@ pub(crate) enum AgentTaskProfile {
 }
 
 impl AgentTaskProfile {
+    #[allow(dead_code)]
     pub(crate) fn system_prompt(&self) -> &'static str {
         match self {
             Self::VisualAnnotation => VISUAL_ANNOTATION_SYSTEM_PROMPT_BASELINE,
@@ -1821,7 +1823,7 @@ impl AgentRunner {
     /// prompt text, attachment bytes, or image coordinates. Reuses
     /// `drive_streamed_turn` and the rig state machine for streamed-turn
     /// assembly, budget charging, cancellation, and tool-result threading.
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     pub async fn run_visual_annotation_with_provider(
         &self,
         profile: VisualAnnotationProfile<'_>,
@@ -2559,9 +2561,7 @@ async fn authorize_visual_operation(
     operation_name: &str,
     audit_sink: Option<&dyn crate::audit::AuditAppendSink>,
 ) -> Result<(), crate::visual_annotation::VisualAnnotationRunTerminal> {
-    if let Err(_err) =
-        authority.authorize_tool(authority.run_id(), subject, operation)
-    {
+    if let Err(_err) = authority.authorize_tool(authority.run_id(), subject, operation) {
         tracing::debug!(
             target: "rollshot::agent::visual_annotation",
             operation = ?operation,
@@ -2584,9 +2584,13 @@ async fn authorize_visual_operation(
         )
         .await
         {
-            return Err(crate::visual_annotation::VisualAnnotationRunTerminal::AuditFailure { category });
+            return Err(
+                crate::visual_annotation::VisualAnnotationRunTerminal::AuditFailure { category },
+            );
         }
-        return Err(crate::visual_annotation::VisualAnnotationRunTerminal::AuthorityDenied { operation });
+        return Err(
+            crate::visual_annotation::VisualAnnotationRunTerminal::AuthorityDenied { operation },
+        );
     }
     Ok(())
 }
@@ -2674,7 +2678,10 @@ pub(crate) mod tests {
     fn visual_profile_derives_the_exact_prompt_from_the_skill() {
         let skill = crate::skills::bundled_action_guide_visual_annotations_use().unwrap();
         let profile = VisualAnnotationProfile::from_skill(&skill).unwrap();
-        assert_eq!(profile.system_prompt(), VISUAL_ANNOTATION_SYSTEM_PROMPT_BASELINE);
+        assert_eq!(
+            profile.system_prompt(),
+            VISUAL_ANNOTATION_SYSTEM_PROMPT_BASELINE
+        );
     }
 
     #[test]
@@ -2685,10 +2692,10 @@ pub(crate) mod tests {
 
     #[test]
     fn visual_profile_rejects_a_host_authority_skill() {
-        use crate::skills::{HostSkillRoot, SkillCatalogLimits, SkillInvocationKind,
-            SkillInvocationRequest, SkillPackageId, SkillSource, SkillAuthorityId,
-            StaticSkillCatalog};
-        use std::time::Instant;
+        use crate::skills::{
+            HostSkillRoot, SkillAuthorityId, SkillCatalogLimits, SkillInvocationKind,
+            SkillInvocationRequest, SkillPackageId, SkillSource, StaticSkillCatalog,
+        };
 
         let tmp = tempfile::tempdir().unwrap();
         let pkg_dir = tmp.path().join(ACTION_GUIDE_VISUAL_ANNOTATIONS_PACKAGE_ID);
@@ -7981,9 +7988,11 @@ main = "SKILL.md"
         .await;
         assert_eq!(
             result,
-            Err(crate::visual_annotation::VisualAnnotationRunTerminal::AuthorityDenied {
-                operation: RunOperation::DiscloseScreenshotAttachment,
-            }),
+            Err(
+                crate::visual_annotation::VisualAnnotationRunTerminal::AuthorityDenied {
+                    operation: RunOperation::DiscloseScreenshotAttachment,
+                }
+            ),
         );
         // Exactly one authority-denied envelope was recorded.
         let envelope = events.try_recv().expect("authority denial was audited");
@@ -8028,9 +8037,11 @@ main = "SKILL.md"
         .await;
         assert_eq!(
             result,
-            Err(crate::visual_annotation::VisualAnnotationRunTerminal::AuthorityDenied {
-                operation: RunOperation::DiscloseScreenshotAttachment,
-            }),
+            Err(
+                crate::visual_annotation::VisualAnnotationRunTerminal::AuthorityDenied {
+                    operation: RunOperation::DiscloseScreenshotAttachment,
+                }
+            ),
         );
     }
 
@@ -8060,9 +8071,11 @@ main = "SKILL.md"
         .await;
         assert_eq!(
             result,
-            Err(crate::visual_annotation::VisualAnnotationRunTerminal::AuthorityDenied {
-                operation: RunOperation::SubmitReviewCandidate,
-            }),
+            Err(
+                crate::visual_annotation::VisualAnnotationRunTerminal::AuthorityDenied {
+                    operation: RunOperation::SubmitReviewCandidate,
+                }
+            ),
         );
     }
 
@@ -8110,8 +8123,8 @@ main = "SKILL.md"
                                 crate::audit::AuditAppendError,
                             >,
                         > + Send
-                        + '_
-                >
+                        + '_,
+                >,
             > {
                 Box::pin(async {
                     Err(crate::audit::AuditAppendError::from_category(
@@ -8143,9 +8156,11 @@ main = "SKILL.md"
         .await;
         assert_eq!(
             result,
-            Err(crate::visual_annotation::VisualAnnotationRunTerminal::AuditFailure {
-                category: crate::audit::AuditFailureCategory::AppendPreCommitFailure,
-            }),
+            Err(
+                crate::visual_annotation::VisualAnnotationRunTerminal::AuditFailure {
+                    category: crate::audit::AuditFailureCategory::AppendPreCommitFailure,
+                }
+            ),
         );
     }
 
@@ -8176,9 +8191,6 @@ main = "SKILL.md"
         )
         .await;
         assert_eq!(result, Ok(()));
-        assert!(
-            events.try_recv().is_err(),
-            "no audit event on success"
-        );
+        assert!(events.try_recv().is_err(), "no audit event on success");
     }
 }

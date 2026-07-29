@@ -3476,9 +3476,8 @@ mod tests {
         assert!(!base.freshness_matches(&fresh_change));
 
         let mut different_step = base.clone();
-        if let SourceBinding::ActionGuideVisualAnnotationProject {
-            step_source, ..
-        } = &mut different_step
+        if let SourceBinding::ActionGuideVisualAnnotationProject { step_source, .. } =
+            &mut different_step
         {
             *step_source += 1;
         }
@@ -3506,9 +3505,8 @@ mod tests {
         assert!(!base.freshness_matches(&proj_change));
 
         let mut keyframe_change = base.clone();
-        if let SourceBinding::ActionGuideVisualAnnotationProject {
-            keyframe, ..
-        } = &mut keyframe_change
+        if let SourceBinding::ActionGuideVisualAnnotationProject { keyframe, .. } =
+            &mut keyframe_change
         {
             *keyframe += 1;
         }
@@ -3517,8 +3515,7 @@ mod tests {
 
         let mut kh_change = base.clone();
         if let SourceBinding::ActionGuideVisualAnnotationProject {
-            keyframe_sha256,
-            ..
+            keyframe_sha256, ..
         } = &mut kh_change
         {
             keyframe_sha256[0] ^= 0xff;
@@ -3553,9 +3550,8 @@ mod tests {
 
         // Any field change breaks both identity and freshness.
         let mut changed = a.clone();
-        if let SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
-            step_source, ..
-        } = &mut changed
+        if let SourceBinding::ActionGuideVisualAnnotationEphemeralGuide { step_source, .. } =
+            &mut changed
         {
             *step_source += 1;
         }

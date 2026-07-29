@@ -74,7 +74,9 @@ pub enum VisualAnnotationRunTerminal {
     Suggested(Vec<VisualAnnotationDraft>),
     NoSuggestion(VisualAnnotationNoSuggestion),
     Cancelled,
-    BudgetExhausted { dimension: BudgetDimension },
+    BudgetExhausted {
+        dimension: BudgetDimension,
+    },
     ProviderFailure,
     ProtocolFailure,
     /// The authority snapshot does not grant the required operation.
@@ -1023,16 +1025,20 @@ pub(crate) mod tests {
 
         /// Permissive authority for visual annotation tests — grants both
         /// `DiscloseScreenshotAttachment` and `SubmitReviewCandidate`.
-        pub(crate) fn va_authority() -> (crate::authority::AuthoritySnapshot, crate::authority::AuthoritySubject) {
+        pub(crate) fn va_authority() -> (
+            crate::authority::AuthoritySnapshot,
+            crate::authority::AuthoritySubject,
+        ) {
             use crate::authority::{
                 AuthorityBinding, AuthoritySnapshot, AuthoritySubject, DisclosureCeiling,
                 RunOperation,
             };
-            use crate::product_task::{ProductTaskId, TaskAttemptId};
             use crate::domain::RunId;
+            use crate::product_task::{ProductTaskId, TaskAttemptId};
             use std::collections::BTreeSet;
 
-            let task_id = ProductTaskId::parse("task-00000000-0000-4000-8000-000000000001").unwrap();
+            let task_id =
+                ProductTaskId::parse("task-00000000-0000-4000-8000-000000000001").unwrap();
             let run_id = RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap();
             let subject = AuthoritySubject::ActionGuideEphemeralGuide {
                 guide_digest: "aa".repeat(32),
@@ -1040,7 +1046,8 @@ pub(crate) mod tests {
             let mut grants = BTreeSet::new();
             grants.insert(RunOperation::DiscloseScreenshotAttachment);
             grants.insert(RunOperation::SubmitReviewCandidate);
-            let binding = AuthorityBinding::new(task_id, TaskAttemptId::new(1), run_id, subject.clone());
+            let binding =
+                AuthorityBinding::new(task_id, TaskAttemptId::new(1), run_id, subject.clone());
             let authority = AuthoritySnapshot::new(
                 binding,
                 "rollshot-v1".to_owned(),
@@ -1238,7 +1245,16 @@ pub(crate) mod tests {
 
             let (authority, subject) = va_authority();
             let result = runner
-                .run_visual_annotation_with_provider(va_profile(), input, &provider, budget, &cancel, &authority, &subject, None)
+                .run_visual_annotation_with_provider(
+                    va_profile(),
+                    input,
+                    &provider,
+                    budget,
+                    &cancel,
+                    &authority,
+                    &subject,
+                    None,
+                )
                 .await;
 
             match result {
