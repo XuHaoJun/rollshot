@@ -119,7 +119,7 @@ Steps: {json}"
 /// Compute a deterministic SHA-256 digest of the guide content for ephemeral
 /// provenance. Hashes title, step count, and each step's (source, keyframe,
 /// title, caption) with a domain separator.
-fn compute_guide_digest(guide: &rollshot_action::Guide) -> String {
+pub(crate) fn compute_guide_digest(guide: &rollshot_action::Guide) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(b"rollshot-guide-ephemeral-v1\0");

@@ -24,6 +24,163 @@ use rollshot_agent::driver::{AgentConfig, AgentRunner};
 use rollshot_agent::runtime::RunCancellation;
 use rollshot_agent::{ProviderAdapter, VisualAnnotationDraft, VisualAnnotationRunTerminal};
 use rollshot_image_document::{ImagePoint, ImageRect};
+use sha2::{Digest, Sha256};
+
+// ========================================================================
+// Visual content digests
+// ========================================================================
+
+/// Compute a deterministic SHA-256 digest of the keyframe image.
+///
+/// Domain-separated with `rollshot-action-guide-keyframe-v1\0`, then width
+/// (little-endian u32), height (little-endian u32), and the raw RGBA pixel
+/// bytes. The digest binds the exact unflattened source pixels without
+/// depending on any encoder output.
+pub(crate) fn visual_keyframe_digest(image: &image::RgbaImage) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(b"rollshot-action-guide-keyframe-v1\0");
+    hash.update(image.width().to_le_bytes());
+    hash.update(image.height().to_le_bytes());
+    hash.update(image.as_raw());
+    hash.finalize().into()
+}
+
+/// Compute a deterministic SHA-256 digest of the annotation state.
+///
+/// Domain-separated with `rollshot-action-guide-annotations-v1\0`, then
+/// `serde_json::to_vec` of the ordered, validated persisted annotation list.
+/// No pixels, paths, or explanations enter the digest.
+pub(crate) fn visual_annotation_state_digest(
+    annotations: &[rollshot_image_document::Annotation],
+) -> Result<[u8; 32], String> {
+    let bytes = serde_json::to_vec(annotations)
+        .map_err(|error| format!("serialize visual annotation state: {error}"))?;
+    let mut hash = Sha256::new();
+    hash.update(b"rollshot-action-guide-annotations-v1\0");
+    hash.update(bytes);
+    Ok(hash.finalize().into())
+}
+
+// ========================================================================
+// Two-stage durable visual annotation dispatch types
+// ========================================================================
+
+/// Request to prepare visual annotation context. Captured when the workspace
+/// starts a visual annotation suggestion and passed to the async preparation
+/// worker.
+pub(crate) enum VisualAnnotationContextRequest {
+    /// Durable: saved project root exists and is clean.
+    Durable {
+        root: std::path::PathBuf,
+        expected_revision: u64,
+        step_source: u64,
+        keyframe: u64,
+    },
+    /// Ephemeral: unsaved or dirty workspace; no durable identity.
+    Ephemeral {
+        guide: rollshot_action::Guide,
+        step_source: u64,
+        keyframe: u64,
+    },
+}
+
+/// Prepared visual annotation context returned by the preparation worker.
+/// Carries the digest values and origin needed to build source bindings
+/// and launch the provider request.
+#[derive(Debug)]
+pub(crate) enum PreparedVisualAnnotationContext {
+    Durable {
+        guide: rollshot_action::Guide,
+        projection: rollshot_action::project::ActionGuideContextProjectionV1,
+        origin: VisualAnnotationProposalOrigin,
+        step_source: u64,
+        keyframe: u64,
+    },
+    Ephemeral {
+        guide: rollshot_action::Guide,
+        origin: VisualAnnotationProposalOrigin,
+        step_source: u64,
+        keyframe: u64,
+    },
+}
+
+/// Async preparation worker for two-stage durable visual annotation dispatch.
+///
+/// For durable input, loads the project from disk via [`spawn_blocking`],
+/// verifies the expected revision, and builds an
+/// [`ActionGuideContextProjectionV1`]. For ephemeral input, computes
+/// the guide digest (reusing the caption agent's algorithm) for provenance.
+pub(crate) async fn prepare_visual_annotation_context_task(
+    _run_id: u64,
+    request: VisualAnnotationContextRequest,
+) -> Result<PreparedVisualAnnotationContext, String> {
+    match request {
+        VisualAnnotationContextRequest::Durable {
+            root,
+            expected_revision,
+            step_source,
+            keyframe,
+        } => {
+            let loaded = tokio::task::spawn_blocking(move || {
+                rollshot_action::project::load_project(&root)
+            })
+            .await
+            .map_err(|_| "Project load task panicked.".to_string())?
+            .map_err(|e| e.to_string())?;
+
+            if loaded.manifest.revision != expected_revision {
+                return Err(format!(
+                    "Project was modified externally (expected revision {expected_revision}, got {}).",
+                    loaded.manifest.revision
+                ));
+            }
+
+            let projection =
+                rollshot_action::project::ActionGuideContextProjectionV1::from_loaded_project(
+                    &loaded,
+                )
+                .map_err(|e| format!("Visual annotation context projection failed: {e}"))?;
+            let guide = projection
+                .to_guide()
+                .map_err(|e| format!("Guide from projection failed: {e}"))?;
+            let origin = VisualAnnotationProposalOrigin::DurableProject {
+                revision: projection.revision(),
+                projection_digest: projection.digest().to_owned(),
+            };
+
+            tracing::info!(
+                target: "rollshot::action::visual_annotation_agent",
+                _run_id,
+                revision = projection.revision(),
+                step_count = guide.steps().len(),
+                "durable visual annotation context prepared"
+            );
+
+            Ok(PreparedVisualAnnotationContext::Durable {
+                guide,
+                projection,
+                origin,
+                step_source,
+                keyframe,
+            })
+        }
+        VisualAnnotationContextRequest::Ephemeral {
+            guide,
+            step_source,
+            keyframe,
+        } => {
+            let guide_digest =
+                crate::timeline_workspace::caption_agent::compute_guide_digest(&guide);
+            let origin = VisualAnnotationProposalOrigin::EphemeralGuide { guide_digest };
+            Ok(PreparedVisualAnnotationContext::Ephemeral {
+                guide,
+                origin,
+                step_source,
+                keyframe,
+            })
+        }
+    }
+}
 
 /// Inputs the workspace hands to the async visual annotation task. The image
 /// is the original retained keyframe (cloned, not borrowed) so the `'static`
@@ -363,6 +520,7 @@ mod tests {
     use rollshot_action::{CandidateKind, DetectReason};
     use rollshot_agent::NormalizedPoint;
     use rollshot_agent::NormalizedRect;
+    use std::sync::Arc;
 
     fn test_origin() -> VisualAnnotationProposalOrigin {
         VisualAnnotationProposalOrigin::EphemeralGuide {
@@ -647,5 +805,183 @@ mod tests {
             panic!("expected no-suggestion result");
         };
         assert!(reason.is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // Visual content digest tests
+    // ------------------------------------------------------------------
+
+    fn annotation_fixture(id: u64) -> rollshot_image_document::Annotation {
+        rollshot_image_document::Annotation::OpaqueRedaction {
+            id: rollshot_image_document::AnnotationId(id),
+            bounds: rollshot_image_document::ImageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            },
+        }
+    }
+
+    fn digest_hex(bytes: [u8; 32]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn visual_keyframe_digest_is_domain_separated_and_dimension_sensitive() {
+        let one = RgbaImage::from_pixel(2, 1, Rgba([1, 2, 3, 255]));
+        let two = RgbaImage::from_pixel(1, 2, Rgba([1, 2, 3, 255]));
+        assert_ne!(visual_keyframe_digest(&one), visual_keyframe_digest(&two));
+        assert_eq!(visual_keyframe_digest(&one), visual_keyframe_digest(&one));
+    }
+
+    #[test]
+    fn annotation_digest_is_order_and_content_sensitive() {
+        let a = vec![annotation_fixture(1), annotation_fixture(2)];
+        let b = vec![annotation_fixture(2), annotation_fixture(1)];
+        assert_ne!(
+            visual_annotation_state_digest(&a).unwrap(),
+            visual_annotation_state_digest(&b).unwrap(),
+        );
+    }
+
+    #[test]
+    fn visual_content_digest_vectors_are_stable() {
+        let image = RgbaImage::from_pixel(1, 1, Rgba([1, 2, 3, 255]));
+        assert_eq!(
+            digest_hex(visual_keyframe_digest(&image)),
+            "076499b61e7fac624835f05426686bf725b0220d24f5b2c18d2d70368ac2cbef",
+        );
+        assert_eq!(
+            digest_hex(visual_annotation_state_digest(&[]).unwrap()),
+            "c2f1bf7391acf52d4af9a694e2e4253e3fc9eafb11aaf105d8a8b1e2ffed8fd2",
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Context preparation drift tests
+    // ------------------------------------------------------------------
+
+    fn run<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    /// Durable preparation rejects a project whose revision has changed since
+    /// the user opened the consent dialog.
+    #[test]
+    fn durable_preparation_rejects_changed_revision() {
+        use rollshot_action::project::{
+            create_project, load_project, EnabledOutputs, ProjectSnapshot, ProjectStep,
+            ProjectStepId, SnapshotFrame, SnapshotFramePayload,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path().join("guide.rollshot-guide");
+        let steps = vec![ProjectStep {
+            id: ProjectStepId(1),
+            order: 1,
+            title: "Step 1".into(),
+            caption: Some("Caption 1".into()),
+            kind: rollshot_action::CandidateKind::Click,
+            reason: rollshot_action::DetectReason::ClickConfirmed,
+            at_ms: 100,
+            keyframe: 1,
+            nearby: vec![1],
+            annotations: None,
+        }];
+        let snapshot = ProjectSnapshot {
+            base_revision: None,
+            title: "Test Guide".into(),
+            capture_region: rollshot_action::CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            input_source: rollshot_action::InputSourceKind::VisualOnly,
+            input_capability: rollshot_action::InputCapability::SemanticEvents,
+            enabled_outputs: EnabledOutputs::default(),
+            frames: vec![SnapshotFrame {
+                id: 1,
+                at_ms: 100,
+                payload: SnapshotFramePayload::Pixels(Arc::new(image::RgbaImage::new(8, 8))),
+            }],
+            steps,
+            import_warnings: Vec::new(),
+        };
+        create_project(&snapshot, &project_dir).unwrap();
+        let loaded = load_project(&project_dir).unwrap();
+        let actual_revision = loaded.manifest.revision;
+
+        let result = run(prepare_visual_annotation_context_task(
+            42,
+            VisualAnnotationContextRequest::Durable {
+                root: project_dir.clone(),
+                expected_revision: actual_revision + 999,
+                step_source: 1,
+                keyframe: 1,
+            },
+        ));
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("modified externally"),
+            "expected revision mismatch error, got: {err}"
+        );
+    }
+
+    /// Ephemeral preparation produces an origin with a guide digest and
+    /// carries no filesystem path.
+    #[test]
+    fn ephemeral_preparation_never_carries_path() {
+        use rollshot_action::CandidateKind;
+
+        let step = rollshot_action::GuideStep {
+            index: 1,
+            title: "Open".into(),
+            caption: "Done".into(),
+            kind: CandidateKind::Click,
+            reason: rollshot_action::DetectReason::ClickConfirmed,
+            at_ms: 100,
+            keyframe: 5,
+            nearby: vec![],
+            source: 3,
+        };
+        let guide = rollshot_action::Guide::from_reviewed_steps("Test".into(), vec![step]).unwrap();
+
+        let ctx = run(prepare_visual_annotation_context_task(
+            99,
+            VisualAnnotationContextRequest::Ephemeral {
+                guide: guide.clone(),
+                step_source: 3,
+                keyframe: 5,
+            },
+        ))
+        .unwrap();
+
+        match ctx {
+            PreparedVisualAnnotationContext::Ephemeral {
+                origin,
+                step_source,
+                keyframe,
+                ..
+            } => {
+                match origin {
+                    VisualAnnotationProposalOrigin::EphemeralGuide { guide_digest } => {
+                        assert!(!guide_digest.is_empty(), "guide digest must be populated");
+                        // The digest should be the same as the caption agent's.
+                        let expected_digest = crate::timeline_workspace::caption_agent::compute_guide_digest(&guide);
+                        assert_eq!(guide_digest, expected_digest);
+                    }
+                    other => panic!("expected EphemeralGuide origin, got {other:?}"),
+                }
+                assert_eq!(step_source, 3);
+                assert_eq!(keyframe, 5);
+            }
+            other => panic!("expected Ephemeral context, got {other:?}"),
+        }
     }
 }
