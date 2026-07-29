@@ -1667,3 +1667,455 @@ mod provider_tests {
         }
     }
 }
+
+// ========================================================================
+// Audit coverage and privacy tests (Task 20)
+// ========================================================================
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+    use rollshot_agent::audit::{AuditEventId, AuditEventKindV1};
+    use rollshot_agent::authority::{
+        AuthorityBinding, AuthoritySnapshot, AuthoritySubject, DisclosureCeiling,
+    };
+    use rollshot_agent::product_task::{
+        ArtifactId, ArtifactKind, ArtifactRevision, ArtifactSummary,
+        ProductArtifactMetadata, ProductTaskId, ProductTaskSnapshot, RunContractReceiptV1,
+        TaskAttempt, TaskAttemptId, TaskKind, TaskTerminal,
+    };
+    use sha2::{Digest, Sha256};
+
+    fn test_task_id() -> ProductTaskId {
+        ProductTaskId::parse("task-00000000-0000-4000-8000-000000000001").unwrap()
+    }
+
+    fn test_run_id() -> rollshot_agent::domain::RunId {
+        rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap()
+    }
+
+    fn ephemeral_binding() -> rollshot_agent::product_task::SourceBinding {
+        rollshot_agent::product_task::SourceBinding::ActionGuideEphemeralGuide {
+            guide_digest: "0".repeat(64),
+        }
+    }
+
+    fn caption_proposal_fixture() -> rollshot_action::CaptionProposal {
+        let guide = rollshot_action::Guide::from_candidates(vec![rollshot_action::CandidateStep {
+            id: 10,
+            kind: rollshot_action::CandidateKind::Click,
+            reason: rollshot_action::DetectReason::ClickConfirmed,
+            at_ms: 120,
+            keyframe: 1,
+            nearby: vec![1],
+        }]);
+        let drafts = vec![rollshot_action::CaptionSuggestionDraft {
+            step_source: 10,
+            title: Some("Open Settings".into()),
+            caption: "The settings panel appears.".into(),
+            confidence: 0.85,
+            rationale: Some("Click begins the flow.".into()),
+        }];
+        rollshot_action::CaptionProposal::from_agent_drafts(
+            rollshot_action::CaptionProposalId(42),
+            42,
+            rollshot_action::CaptionProposalOrigin::EphemeralGuide {
+                guide_digest: "0".repeat(64),
+            },
+            &guide,
+            drafts,
+        )
+    }
+
+    fn build_run_contract(
+        task_id: &ProductTaskId,
+        run_id: &rollshot_agent::domain::RunId,
+    ) -> RunContractReceiptV1 {
+        let subject = AuthoritySubject::ActionGuideEphemeralGuide {
+            guide_digest: "0".repeat(64),
+        };
+        let authority = caption_authority(task_id.clone(), run_id.clone(), subject).unwrap();
+        RunContractReceiptV1 {
+            authority: authority.receipt(20),
+            skill_use: rollshot_agent::skills::bundled_action_guide_captions_use()
+                .unwrap()
+                .receipt(),
+            bound_at_unix_ms: 20,
+        }
+    }
+
+    fn build_meta(
+        task_id: &ProductTaskId,
+        run_id: &rollshot_agent::domain::RunId,
+        binding: &rollshot_agent::product_task::SourceBinding,
+        proposal: &rollshot_action::CaptionProposal,
+        payload_bytes: &[u8],
+    ) -> ProductArtifactMetadata {
+        ProductArtifactMetadata::new_v3(
+            ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000001").unwrap(),
+            ArtifactRevision::new(1),
+            ArtifactKind::ActionGuideCaptions,
+            1,
+            format!("{:x}", Sha256::digest(payload_bytes)),
+            binding.clone(),
+            task_id.clone(),
+            TaskAttemptId::new(1),
+            run_id.clone(),
+            proposal.id.0.to_string(),
+            "test-provider".to_string(),
+            "test-model".to_string(),
+            "run-config-digest".to_string(),
+            ArtifactSummary::ActionGuideCaptions {
+                suggestion_count: proposal.suggestions.len() as u32,
+            },
+            30,
+        )
+    }
+
+    /// Drive a caption task through the full happy-path lifecycle using
+    /// audited store methods. Returns the task id.
+    fn drive_full_caption_lifecycle(
+        store: &crate::agent_store::TaskStore,
+    ) -> ProductTaskId {
+        let task_id = test_task_id();
+        let run_id = test_run_id();
+        let binding = ephemeral_binding();
+        let proposal = caption_proposal_fixture();
+        let payload_bytes = caption_artifact_payload(&proposal);
+
+        // 1. TaskCreated.
+        let created = ProductTaskSnapshot::new_v3(
+            task_id.clone(),
+            TaskKind::ActionGuideCaptions,
+            binding.clone(),
+            10,
+        )
+        .unwrap();
+        store
+            .create_audited(&created, AuditEventId::new_v4(), 10)
+            .unwrap();
+
+        // 2. AttemptStarted.
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), 15);
+        let running = created.start_attempt(attempt, 15).unwrap();
+        store
+            .transition_audited(&created, &running, AuditEventId::new_v4(), 15)
+            .unwrap();
+
+        // 3. RunContractBound.
+        let contract = build_run_contract(&task_id, &run_id);
+        let bound = running.bind_run_contract(contract, 20).unwrap();
+        store
+            .transition_audited(&running, &bound, AuditEventId::new_v4(), 20)
+            .unwrap();
+
+        // 4. ArtifactPromoted (Running → ReadyForReview).
+        let meta = build_meta(&task_id, &run_id, &binding, &proposal, &payload_bytes);
+        let ready = bound
+            .record_ready_for_review(meta, payload_bytes, None, 30)
+            .unwrap();
+        store
+            .transition_audited(&bound, &ready, AuditEventId::new_v4(), 30)
+            .unwrap();
+
+        // 5. ReviewApplyStarted (ReadyForReview → Applying).
+        let applying = ready.begin_apply(35).unwrap();
+        store
+            .transition_audited(&ready, &applying, AuditEventId::new_v4(), 35)
+            .unwrap();
+
+        // 6. ReviewDecisionCommitted (Applying → Completed).
+        let metadata = applying.artifact_metadata().unwrap();
+        let receipt = caption_review_receipt(&proposal, metadata, 40).unwrap();
+        let completed = applying.complete_apply(receipt, 40).unwrap();
+        store
+            .transition_audited(&applying, &completed, AuditEventId::new_v4(), 40)
+            .unwrap();
+
+        task_id
+    }
+
+    /// Drive a caption task to Running, then record a terminal condition.
+    fn drive_caption_lifecycle_to_terminal(
+        store: &crate::agent_store::TaskStore,
+        terminal: TaskTerminal,
+    ) -> ProductTaskId {
+        let task_id = test_task_id();
+        let run_id = test_run_id();
+        let binding = ephemeral_binding();
+
+        // 1. TaskCreated.
+        let created = ProductTaskSnapshot::new_v3(
+            task_id.clone(),
+            TaskKind::ActionGuideCaptions,
+            binding,
+            10,
+        )
+        .unwrap();
+        store
+            .create_audited(&created, AuditEventId::new_v4(), 10)
+            .unwrap();
+
+        // 2. AttemptStarted.
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id, 15);
+        let running = created.start_attempt(attempt, 15).unwrap();
+        store
+            .transition_audited(&created, &running, AuditEventId::new_v4(), 15)
+            .unwrap();
+
+        // 3. TaskTerminated (Running → Failed).
+        let failed = running.record_terminal(terminal, 20).unwrap();
+        store
+            .transition_audited(&running, &failed, AuditEventId::new_v4(), 20)
+            .unwrap();
+
+        task_id
+    }
+
+    /// Drive a caption task to Running with a no-grants authority bound,
+    /// then append an AuthorityDenied standalone event. No promotion occurs
+    /// because the submit is denied before the provider can produce results.
+    fn drive_caption_lifecycle_with_no_grants(
+        store: &crate::agent_store::TaskStore,
+    ) -> ProductTaskId {
+        let task_id = test_task_id();
+        let run_id = test_run_id();
+        let binding = ephemeral_binding();
+
+        // 1. TaskCreated.
+        let created = ProductTaskSnapshot::new_v3(
+            task_id.clone(),
+            TaskKind::ActionGuideCaptions,
+            binding,
+            10,
+        )
+        .unwrap();
+        store
+            .create_audited(&created, AuditEventId::new_v4(), 10)
+            .unwrap();
+
+        // 2. AttemptStarted.
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), 15);
+        let running = created.start_attempt(attempt, 15).unwrap();
+        store
+            .transition_audited(&created, &running, AuditEventId::new_v4(), 15)
+            .unwrap();
+
+        // 3. RunContractBound with a NO-GRANTS authority.
+        let subject = AuthoritySubject::ActionGuideEphemeralGuide {
+            guide_digest: "0".repeat(64),
+        };
+        let authority = AuthoritySnapshot::new(
+            AuthorityBinding::new(
+                task_id.clone(),
+                TaskAttemptId::new(1),
+                run_id.clone(),
+                subject,
+            ),
+            "no-grants".into(),
+            DisclosureCeiling::TextMetadataOnly,
+            false,
+            std::collections::BTreeSet::new(),
+            std::collections::BTreeSet::new(),
+        )
+        .unwrap();
+        let contract = RunContractReceiptV1 {
+            authority: authority.receipt(20),
+            skill_use: rollshot_agent::skills::bundled_action_guide_captions_use()
+                .unwrap()
+                .receipt(),
+            bound_at_unix_ms: 20,
+        };
+        let bound = running.bind_run_contract(contract, 20).unwrap();
+        store
+            .transition_audited(&running, &bound, AuditEventId::new_v4(), 20)
+            .unwrap();
+
+        // 4. AuthorityDenied — standalone audit event. No promotion because
+        // the submit was denied before any artifact could be produced.
+        let denied_envelope = rollshot_agent::audit::authority_denied_envelope(
+            &authority,
+            "submit_caption_suggestions",
+            "SubmitReviewCandidate",
+            AuditEventId::new_v4(),
+            25,
+        )
+        .unwrap();
+        store.append_standalone_audit(denied_envelope).unwrap();
+
+        task_id
+    }
+
+    /// Read the raw audit journal file for a task.
+    fn read_journal_to_string(
+        config_dir: &std::path::Path,
+        task_id: &ProductTaskId,
+    ) -> String {
+        let path = config_dir
+            .join("agent-tasks/audit")
+            .join(format!("{}.jsonl", task_id.as_str()));
+        std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!("journal file not found at {}: {e}", path.display())
+        })
+    }
+
+    // ------------------------------------------------------------------
+    // Coverage tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn caption_task_lifecycle_appends_every_material_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let task_id = drive_full_caption_lifecycle(&store);
+
+        let kinds: Vec<_> = store
+            .committed_audit_events(&task_id)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.event().kind())
+            .collect();
+
+        for expected in [
+            AuditEventKindV1::TaskCreated,
+            AuditEventKindV1::AttemptStarted,
+            AuditEventKindV1::RunContractBound,
+            AuditEventKindV1::ArtifactPromoted,
+            AuditEventKindV1::ReviewApplyStarted,
+            AuditEventKindV1::ReviewDecisionCommitted,
+        ] {
+            assert!(kinds.contains(&expected), "missing {expected:?} in {kinds:?}");
+        }
+
+        // Order is part of the contract: a promotion cannot precede its
+        // contract bind, and a review decision cannot precede its apply.
+        let position = |k: AuditEventKindV1| kinds.iter().position(|got| *got == k).unwrap();
+        assert!(position(AuditEventKindV1::TaskCreated) < position(AuditEventKindV1::AttemptStarted));
+        assert!(
+            position(AuditEventKindV1::RunContractBound)
+                < position(AuditEventKindV1::ArtifactPromoted)
+        );
+        assert!(
+            position(AuditEventKindV1::ReviewApplyStarted)
+                < position(AuditEventKindV1::ReviewDecisionCommitted)
+        );
+    }
+
+    #[test]
+    fn a_failed_caption_run_appends_task_terminated() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let task_id = drive_caption_lifecycle_to_terminal(
+            &store,
+            TaskTerminal::BudgetExhausted {
+                dimension: "wall_time".to_owned(),
+            },
+        );
+
+        let kinds: Vec<_> = store
+            .committed_audit_events(&task_id)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.event().kind())
+            .collect();
+
+        assert!(kinds.contains(&AuditEventKindV1::TaskTerminated), "{kinds:?}");
+        assert!(
+            !kinds.contains(&AuditEventKindV1::ArtifactPromoted),
+            "a budget-exhausted run must never promote an artifact: {kinds:?}"
+        );
+    }
+
+    #[test]
+    fn an_authority_denied_submit_appends_authority_denied_and_does_not_promote() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let task_id = drive_caption_lifecycle_with_no_grants(&store);
+
+        let kinds: Vec<_> = store
+            .committed_audit_events(&task_id)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.event().kind())
+            .collect();
+
+        assert!(kinds.contains(&AuditEventKindV1::AuthorityDenied), "{kinds:?}");
+        assert!(!kinds.contains(&AuditEventKindV1::ArtifactPromoted), "{kinds:?}");
+        assert_eq!(
+            store.load(&task_id).unwrap().artifact_metadata(),
+            None,
+            "a denied submit must leave no artifact metadata"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Privacy tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn caption_audit_journal_holds_no_caption_or_step_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let task_id = drive_full_caption_lifecycle(&store);
+
+        let journal = read_journal_to_string(dir.path(), &task_id);
+
+        for secret in [
+            "The settings panel appears.",
+            "Open Settings",
+            "Suggest concise Action Guide titles",
+        ] {
+            assert!(
+                !journal.contains(secret),
+                "audit journal leaked {secret:?}: {journal}"
+            );
+        }
+    }
+
+    #[test]
+    fn caption_task_file_holds_no_image_bytes_and_no_skill_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let task_id = drive_full_caption_lifecycle(&store);
+
+        // `ProductTaskId::as_str()` already begins with "task-"
+        // (product_task.rs:29), and `task_path` writes
+        // `<tasks_dir>/{id}.json` (task_store.rs:398). Re-adding the prefix
+        // here would look for `task-task-<uuid>.json` and panic on unwrap.
+        let raw = std::fs::read_to_string(
+            dir.path()
+                .join("agent-tasks/tasks")
+                .join(format!("{}.json", task_id.as_str())),
+        )
+        .unwrap();
+
+        assert!(!raw.contains("Suggest concise Action Guide titles"),
+            "the skill body must not be persisted; only its digest");
+        assert!(!raw.contains("base_image_sha256"),
+            "a caption binding must not carry image fields");
+        assert!(!raw.contains("iVBORw0KGgo"),
+            "no PNG payload may reach the task store");
+
+        // Positive counterpart, so the three negatives above cannot all pass
+        // simply because nothing was written: the digest IS present, and it is
+        // the caption package that was bound.
+        let snapshot = store.load(&task_id).unwrap();
+        let contract = snapshot
+            .attempts()
+            .last()
+            .unwrap()
+            .run_contract()
+            .expect("a caption task always binds a run contract");
+        assert_eq!(contract.skill_use.package_id, "action-guide-captions");
+        assert_eq!(contract.skill_use.package_digest.len(), 64);
+        assert!(raw.contains(&contract.skill_use.package_digest));
+        assert_eq!(
+            contract.authority.disclosure_ceiling,
+            rollshot_agent::authority::DisclosureCeiling::TextMetadataOnly
+        );
+        assert_eq!(
+            contract.authority.granted_operations,
+            vec![rollshot_agent::authority::RunOperation::SubmitReviewCandidate]
+        );
+    }
+}
