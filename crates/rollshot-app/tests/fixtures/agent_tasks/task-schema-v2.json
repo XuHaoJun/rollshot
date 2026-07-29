@@ -1,0 +1,20 @@
+{
+  "store_schema_version": 2,
+  "snapshot_revision": 0,
+  "task_id": "task-00000000-0000-4000-8000-000000000001",
+  "kind": "smart_redaction_author",
+  "source_binding": {
+    "base_image_sha256": [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+    "annotation_state_sha256": [2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],
+    "document_state_id": 0,
+    "preset_id": "preset-001",
+    "active_preset_revision_id": null
+  },
+  "status": "created",
+  "attempts": [],
+  "artifact_metadata": null,
+  "pending_artifact_payload": null,
+  "review_receipt": null,
+  "created_at_unix_ms": 1000,
+  "updated_at_unix_ms": 1000
+}

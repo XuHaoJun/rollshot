@@ -980,15 +980,30 @@ pub const SMART_REDACTION_PACKAGE_ID: &str = "smart-redaction";
 const BUNDLED_MANIFEST: &str = include_str!("../skills/smart-redaction/skill.toml");
 const BUNDLED_BODY: &str = include_str!("../skills/smart-redaction/SKILL.md");
 
+/// Well-known package ID for the bundled Action Guide captions skill.
+pub const ACTION_GUIDE_CAPTIONS_PACKAGE_ID: &str = "action-guide-captions";
+
+const CAPTIONS_BUNDLED_BODY: &str = include_str!("../skills/action-guide-captions/SKILL.md");
+const CAPTIONS_BUNDLED_MANIFEST: &str = include_str!("../skills/action-guide-captions/skill.toml");
+
 static BUNDLED_REPORT: LazyLock<CatalogBuildReport> = LazyLock::new(|| {
     let limits = SkillCatalogLimits::v1();
-    let sources: Vec<SkillSource<'_>> = vec![SkillSource::Bundled(vec![(
-        SMART_REDACTION_PACKAGE_ID,
-        vec![
-            ("skill.toml", BUNDLED_MANIFEST.as_bytes()),
-            ("SKILL.md", BUNDLED_BODY.as_bytes()),
-        ],
-    )])];
+    let sources: Vec<SkillSource<'_>> = vec![SkillSource::Bundled(vec![
+        (
+            SMART_REDACTION_PACKAGE_ID,
+            vec![
+                ("skill.toml", BUNDLED_MANIFEST.as_bytes()),
+                ("SKILL.md", BUNDLED_BODY.as_bytes()),
+            ],
+        ),
+        (
+            ACTION_GUIDE_CAPTIONS_PACKAGE_ID,
+            vec![
+                ("skill.toml", CAPTIONS_BUNDLED_MANIFEST.as_bytes()),
+                ("SKILL.md", CAPTIONS_BUNDLED_BODY.as_bytes()),
+            ],
+        ),
+    ])];
     StaticSkillCatalog::build(sources, &limits)
 });
 
@@ -1010,6 +1025,24 @@ pub fn bundled_smart_redaction_use() -> Option<SkillUse> {
             &SkillInvocationRequest {
                 source_authority: SkillAuthorityId::parse("rollshot.bundled").unwrap(),
                 package_id: SkillPackageId::parse(SMART_REDACTION_PACKAGE_ID).unwrap(),
+                expected_digest: None,
+                invocation_kind: SkillInvocationKind::HostExplicit,
+            },
+            0,
+        )
+        .ok()
+}
+
+/// Resolve the bundled Action Guide captions skill.  Returns `None` if the
+/// package was not loaded (diagnostic in the build report).
+pub fn bundled_action_guide_captions_use() -> Option<SkillUse> {
+    let report = bundled_skill_catalog();
+    report
+        .catalog
+        .invoke(
+            &SkillInvocationRequest {
+                source_authority: SkillAuthorityId::parse("rollshot.bundled").unwrap(),
+                package_id: SkillPackageId::parse(ACTION_GUIDE_CAPTIONS_PACKAGE_ID).unwrap(),
                 expected_digest: None,
                 invocation_kind: SkillInvocationKind::HostExplicit,
             },
@@ -2051,7 +2084,7 @@ main = "SKILL.md"
             "unexpected diagnostics: {:?}",
             report.diagnostics
         );
-        assert_eq!(report.catalog.entries.len(), 1);
+        assert_eq!(report.catalog.entries.len(), 2);
     }
 
     #[test]
@@ -2093,5 +2126,51 @@ main = "SKILL.md"
             .unwrap();
         assert_eq!(skill_use.package_id().as_str(), "smart-redaction");
         assert!(!skill_use.body().is_empty());
+    }
+
+    /// The instruction text as it stood in `build_caption_prompt` on
+    /// 2026-07-28, before the skill move. Byte-identical preservation of this
+    /// text is the behavior evidence for plan Task 14.
+    const CAPTION_INSTRUCTION_BASELINE: &str = "Suggest concise Action Guide titles and one-sentence captions for these reviewed workflow steps.\nPrefer calling the submit_caption_suggestions tool. If tool calling is unavailable, return only JSON in the same schema.\nUse the source values exactly. Omit a title by using null when the current title is already good. Do not invent raw typed text.";
+
+    #[test]
+    fn bundled_caption_skill_body_matches_the_recorded_instruction_text() {
+        let use_ = super::bundled_action_guide_captions_use().expect("caption skill must resolve");
+
+        assert_eq!(use_.package_id().as_str(), "action-guide-captions");
+        assert_eq!(use_.source_authority().as_str(), "rollshot.bundled");
+        assert_eq!(
+            use_.body().trim_end(),
+            CAPTION_INSTRUCTION_BASELINE,
+            "skill body must preserve the recorded instruction text verbatim"
+        );
+        assert_eq!(use_.digest().len(), 64, "digest must be a hex sha256");
+        assert!(
+            use_.digest()
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "digest must be lowercase hex: {}",
+            use_.digest()
+        );
+    }
+
+    #[test]
+    fn bundled_caption_skill_golden_digest_stable() {
+        // Golden digest \u2014 update only when SKILL.md or skill.toml content
+        // changes. Mirrors bundled_smart_redaction_golden_digest_stable.
+        let skill_use =
+            super::bundled_action_guide_captions_use().expect("caption skill must resolve");
+        let expected = "3aaa0566bd4cb28eecc87f964c093a4d3bceeb7c0e4d0de0860a43988cb865db";
+        assert_eq!(
+            skill_use.digest(),
+            expected,
+            "digest mismatch \u{2014} if SKILL.md or skill.toml changed, update the golden digest"
+        );
+    }
+
+    #[test]
+    fn bundled_caption_skill_body_below_16kib() {
+        let skill_use = super::bundled_action_guide_captions_use().unwrap();
+        assert!(skill_use.body().len() <= 16 * 1024);
     }
 }

@@ -180,6 +180,8 @@ pub struct MacosProduct {
     recording_tray: Option<crate::macos_recording_tray::Guard>,
     #[cfg(feature = "action-guide")]
     lock_conflict_path: Option<std::path::PathBuf>,
+    #[cfg(feature = "action-guide")]
+    task_store: Option<Arc<crate::agent_store::TaskStore>>,
 }
 
 impl MacosProduct {
@@ -242,6 +244,8 @@ impl MacosProduct {
                         recording_tray,
                         #[cfg(feature = "action-guide")]
                         lock_conflict_path: None,
+                        #[cfg(feature = "action-guide")]
+                        task_store: None,
                     },
                     open_task,
                 )))
@@ -289,6 +293,8 @@ impl MacosProduct {
             recording_tray: None,
             #[cfg(feature = "action-guide")]
             lock_conflict_path: None,
+            #[cfg(feature = "action-guide")]
+            task_store: None,
         }
     }
 
@@ -335,6 +341,7 @@ impl MacosProduct {
     #[cfg(feature = "action-guide")]
     pub fn new_action_guide(
         recent: crate::action_guide_home::recent::RecentProjects,
+        task_store: Arc<crate::agent_store::TaskStore>,
     ) -> (Self, Task<Message>) {
         let product = MacosProduct {
             phase: Phase::Home(ActionGuideHome::new(recent)),
@@ -345,6 +352,7 @@ impl MacosProduct {
             thumbnail_cursor: Point::ORIGIN,
             recording_tray: None,
             lock_conflict_path: None,
+            task_store: Some(task_store),
         };
         (product, Task::none())
     }
@@ -521,7 +529,14 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                         unreachable!();
                     };
                     product.phase = Phase::Opening(home);
-                    Task::perform(open_project_task(path, true), |msg| msg)
+                    Task::perform(
+                        open_project_task(
+                            path,
+                            true,
+                            product.task_store.clone().expect("Action Guide task store"),
+                        ),
+                        |msg| msg,
+                    )
                 }
                 action_guide_home::Effect::OpenLegacyReader(path) => {
                     if let Phase::Home(ref mut home) = &mut product.phase {
@@ -552,7 +567,8 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                 )
                 .map(Message::HomeMsg),
                 action_guide_home::Effect::OpenImportedTimeline(seed) => {
-                    let ws = TimelineWorkspace::from_imported_video(seed);
+                    let mut ws = TimelineWorkspace::from_imported_video(seed);
+                    ws.task_store = product.task_store.clone();
                     let initial_load = ws.initial_frame_load_task().map(Message::Timeline);
                     product.phase = Phase::Timeline(ws);
                     let (id, open) = window::open(workspace_window_settings());
@@ -567,9 +583,14 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                 return Task::none();
             };
             match kind {
-                SelectedDirectoryKind::Project(project_path) => {
-                    Task::perform(open_project_task(project_path, true), |msg| msg)
-                }
+                SelectedDirectoryKind::Project(project_path) => Task::perform(
+                    open_project_task(
+                        project_path,
+                        true,
+                        product.task_store.clone().expect("Action Guide task store"),
+                    ),
+                    |msg| msg,
+                ),
                 SelectedDirectoryKind::LegacyReader(reader_path) => {
                     home.message = open_legacy_reader(&reader_path).err();
                     let Phase::Opening(home) = std::mem::replace(
@@ -601,10 +622,11 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
             }
             match result {
                 ProjectOpenResult::Workspace(ws) => {
-                    let ws = match std::sync::Arc::try_unwrap(ws) {
+                    let mut ws = match std::sync::Arc::try_unwrap(ws) {
                         Ok(ws) => ws,
                         Err(_) => unreachable!("sole ownership"),
                     };
+                    ws.task_store = product.task_store.clone();
                     let Phase::Opening(mut home) = std::mem::replace(
                         &mut product.phase,
                         Phase::Home(ActionGuideHome::new_empty()),
@@ -665,7 +687,14 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                 unreachable!();
             };
             product.phase = Phase::Opening(home);
-            Task::perform(open_project_task(path, false), |msg| msg)
+            Task::perform(
+                open_project_task(
+                    path,
+                    false,
+                    product.task_store.clone().expect("Action Guide task store"),
+                ),
+                |msg| msg,
+            )
         }
         #[cfg(feature = "action-guide")]
         Message::CancelLockedOpen => {
@@ -1147,6 +1176,8 @@ fn from_imported_document(document: ResultDocument) -> (MacosProduct, Task<Messa
         recording_tray: None,
         #[cfg(feature = "action-guide")]
         lock_conflict_path: None,
+        #[cfg(feature = "action-guide")]
+        task_store: None,
     };
     let open_task = open_presentation_window(&mut product);
     (product, open_task)
@@ -1202,13 +1233,21 @@ fn kind_path(kind: &SelectedDirectoryKind) -> std::path::PathBuf {
 }
 
 #[cfg(feature = "action-guide")]
-async fn open_project_task(path: std::path::PathBuf, writable: bool) -> Message {
-    let result = open_project_inner(path, writable).await;
+async fn open_project_task(
+    path: std::path::PathBuf,
+    writable: bool,
+    task_store: Arc<crate::agent_store::TaskStore>,
+) -> Message {
+    let result = open_project_inner(path, writable, task_store).await;
     Message::ProjectOpened(result)
 }
 
 #[cfg(feature = "action-guide")]
-async fn open_project_inner(path: std::path::PathBuf, writable: bool) -> ProjectOpenResult {
+async fn open_project_inner(
+    path: std::path::PathBuf,
+    writable: bool,
+    task_store: Arc<crate::agent_store::TaskStore>,
+) -> ProjectOpenResult {
     let request = crate::timeline_workspace::project::OpenProjectRequest {
         root: path,
         writable,
@@ -1219,9 +1258,10 @@ async fn open_project_inner(path: std::path::PathBuf, writable: bool) -> Project
     };
     match result {
         crate::timeline_workspace::project::OpenProjectWorkerResult::Opened(opened) => {
-            match crate::timeline_workspace::project::from_loaded_project(
+            match crate::timeline_workspace::project::from_loaded_project_with_task_store(
                 opened.loaded,
                 opened.access,
+                task_store,
             ) {
                 Ok(ws) => ProjectOpenResult::Workspace(std::sync::Arc::new(ws)),
                 Err(e) => ProjectOpenResult::Error(format!("Failed to build workspace: {e:?}")),
@@ -1241,17 +1281,19 @@ pub fn run_action_guide(initial: ActionGuideIntent) -> Result<(), String> {
     let config_dir =
         crate::daemon::config::rollshot_config_dir().map_err(|e| format!("config dir: {e}"))?;
     let recent = crate::action_guide_home::recent::RecentProjects::load(&config_dir);
+    let task_store = crate::agent_store::open_process_store(&config_dir)
+        .map_err(|e| format!("task store: {e}"))?;
 
     cleanup_stale_import_scratch();
 
-    let boot_data = Arc::new(Mutex::new(Some((initial, recent))));
+    let boot_data = Arc::new(Mutex::new(Some((initial, recent, task_store))));
     let boot = move || {
-        let (boot_initial, recent) = boot_data
+        let (boot_initial, recent, task_store) = boot_data
             .lock()
             .unwrap()
             .take()
             .expect("boot data already consumed");
-        let (mut product, base_task) = MacosProduct::new_action_guide(recent);
+        let (mut product, base_task) = MacosProduct::new_action_guide(recent, task_store);
         let mut tasks = vec![base_task];
 
         match boot_initial {
@@ -1471,6 +1513,8 @@ mod tests {
             recording_tray: None,
             #[cfg(feature = "action-guide")]
             lock_conflict_path: None,
+            #[cfg(feature = "action-guide")]
+            task_store: None,
         }
     }
 
@@ -1491,6 +1535,8 @@ mod tests {
             recording_tray: None,
             #[cfg(feature = "action-guide")]
             lock_conflict_path: None,
+            #[cfg(feature = "action-guide")]
+            task_store: None,
         }
     }
 
@@ -1790,8 +1836,12 @@ mod tests {
         }
 
         fn product_in_home_phase() -> MacosProduct {
+            let dir = tempfile::tempdir().unwrap();
+            let task_store = Arc::new(crate::agent_store::TaskStore::open(dir.path()).unwrap());
+            let _ = dir.keep();
             let (product, _task) = MacosProduct::new_action_guide(
                 crate::action_guide_home::recent::RecentProjects::empty(),
+                task_store,
             );
             product
         }
@@ -1911,6 +1961,13 @@ mod tests {
                 Message::ProjectOpened(ProjectOpenResult::Workspace(std::sync::Arc::new(ws))),
             );
             assert!(matches!(product.phase, Phase::Timeline(_)));
+            let Phase::Timeline(workspace) = &product.phase else {
+                unreachable!();
+            };
+            assert!(Arc::ptr_eq(
+                workspace.task_store.as_ref().unwrap(),
+                product.task_store.as_ref().unwrap(),
+            ));
             assert!(task.units() > 0, "should open workspace window");
         }
 
@@ -2110,6 +2167,13 @@ mod tests {
             let mut product = macos_home_product();
             drive_import_success(&mut product);
             assert!(matches!(product.phase, Phase::Timeline(_)));
+            let Phase::Timeline(workspace) = &product.phase else {
+                unreachable!();
+            };
+            assert!(Arc::ptr_eq(
+                workspace.task_store.as_ref().unwrap(),
+                product.task_store.as_ref().unwrap(),
+            ));
             assert!(product.workspace_window.is_some());
         }
     }

@@ -244,9 +244,9 @@ impl TryFrom<&crate::product_task::ProductTaskSnapshot> for ContinuityProjection
     type Error = ContinuityProjectionError;
 
     fn try_from(snapshot: &crate::product_task::ProductTaskSnapshot) -> Result<Self, Self::Error> {
-        // 1. Accept store schema 1 and 2, reject zero or greater than 2.
+        // 1. Accept store schema 1, 2, and 3; reject zero or greater than 3.
         let store_schema = snapshot.store_schema_version();
-        if store_schema == 0 || store_schema > 2 {
+        if store_schema == 0 || store_schema > 3 {
             return Err(ContinuityProjectionError::UnsupportedSchema(store_schema));
         }
 
@@ -256,15 +256,41 @@ impl TryFrom<&crate::product_task::ProductTaskSnapshot> for ContinuityProjection
         let status = snapshot.status();
         let source_binding = snapshot.source_binding();
 
-        // Compute source binding digest.
+        // Compute source binding digest. Each variant carries a distinct domain
+        // separator so bindings from different domains cannot collide.
         let source_binding_digest = {
             let mut hasher = Sha256::new();
-            hasher.update(source_binding.base_image_sha256());
-            hasher.update(source_binding.annotation_state_sha256());
-            hasher.update(source_binding.document_state_id().to_le_bytes());
-            hasher.update(source_binding.preset_id().as_bytes());
-            if let Some(rev) = source_binding.active_preset_revision_id() {
-                hasher.update(rev.as_bytes());
+            match source_binding {
+                crate::product_task::SourceBinding::SmartRedaction {
+                    base_image_sha256,
+                    annotation_state_sha256,
+                    document_state_id,
+                    preset_id,
+                    active_preset_revision_id,
+                } => {
+                    hasher.update(b"rollshot-source-binding-smart-redaction-v1\0");
+                    hasher.update(base_image_sha256);
+                    hasher.update(annotation_state_sha256);
+                    hasher.update(document_state_id.to_le_bytes());
+                    hasher.update(preset_id.as_bytes());
+                    if let Some(rev) = active_preset_revision_id {
+                        hasher.update(rev.as_bytes());
+                    }
+                }
+                crate::product_task::SourceBinding::ActionGuideProject {
+                    project_root_sha256,
+                    revision,
+                    projection_digest,
+                } => {
+                    hasher.update(b"rollshot-source-binding-action-guide-project-v1\0");
+                    hasher.update(project_root_sha256);
+                    hasher.update(revision.to_le_bytes());
+                    hasher.update(projection_digest.as_bytes());
+                }
+                crate::product_task::SourceBinding::ActionGuideEphemeralGuide { guide_digest } => {
+                    hasher.update(b"rollshot-source-binding-action-guide-ephemeral-v1\0");
+                    hasher.update(guide_digest.as_bytes());
+                }
             }
             format!("{:x}", hasher.finalize())
         };
@@ -528,6 +554,7 @@ fn task_kind_str(kind: TaskKind) -> String {
     match kind {
         TaskKind::SmartRedactionAuthor => "smart_redaction_author",
         TaskKind::SmartRedactionImprove => "smart_redaction_improve",
+        TaskKind::ActionGuideCaptions => "action_guide_captions",
     }
     .to_owned()
 }
@@ -552,6 +579,7 @@ fn task_status_str(status: &TaskStatus) -> String {
 fn artifact_kind_str(kind: ArtifactKind) -> String {
     match kind {
         ArtifactKind::SmartRedaction => "smart_redaction",
+        ArtifactKind::ActionGuideCaptions => "action_guide_captions",
     }
     .to_owned()
 }
@@ -1171,7 +1199,7 @@ mod tests {
     }
 
     fn source_binding_fixture() -> SourceBinding {
-        SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None)
+        SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None)
     }
 
     fn attempt_fixture() -> TaskAttempt {
@@ -1187,7 +1215,7 @@ mod tests {
             policy_revision: "policy-rev-1".to_owned(),
             disclosure_ceiling: crate::authority::DisclosureCeiling::OcrLayoutOnly,
             existing_product_capture: false,
-            document_binding_digest: "doc-bind-digest".to_owned(),
+            subject_digest: "doc-bind-digest".to_owned(),
             prepared_capabilities: vec![],
             granted_operations: vec![],
             snapshot_digest: "auth-snap-digest-abc123".to_owned(),
@@ -1251,6 +1279,10 @@ mod tests {
                 },
             },
         }
+    }
+
+    fn payload_bytes_fixture() -> Vec<u8> {
+        serde_json::to_vec(&payload_fixture()).expect("fixture payload serializes")
     }
 
     fn metadata_fixture(run_id: RunId, attempt_id: TaskAttemptId) -> ProductArtifactMetadata {
@@ -1397,7 +1429,7 @@ mod tests {
         let running = running_v2_snapshot();
         let meta = metadata_v2_fixture(run_id_fixture(), TaskAttemptId::new(1), contract);
         running
-            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
             .unwrap()
     }
 
@@ -1407,7 +1439,7 @@ mod tests {
         let running = running_v2_snapshot();
         let meta = metadata_v2_fixture(run_id_fixture(), TaskAttemptId::new(1), contract);
         running
-            .record_ready_for_review(meta, payload_fixture(), Some(bytes), 30)
+            .record_ready_for_review(meta, payload_bytes_fixture(), Some(bytes), 30)
             .unwrap()
     }
 
@@ -1583,8 +1615,8 @@ mod tests {
     #[test]
     fn v1_schema_accepted() {
         // Verify that a V1 task (store_schema_version = 1) is accepted.
-        // Schema 0 / >2 rejection is validated by the store_schema_version guard
-        // in TryFrom, which rejects values 0 and >2.
+        // Schema 0 / >3 rejection is validated by the store_schema_version guard
+        // in TryFrom, which rejects values 0 and >3.
         let snapshot = ProductTaskSnapshot::new(
             task_id_fixture(),
             TaskKind::SmartRedactionAuthor,
@@ -1734,7 +1766,7 @@ mod tests {
         .unwrap();
         let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
         let snapshot = snapshot
-            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
             .unwrap();
         let proj = ContinuityProjectionV1::try_from(&snapshot).unwrap();
         assert_eq!(
@@ -1873,17 +1905,19 @@ mod tests {
                 task_id_fixture(),
                 TaskAttemptId::new(1),
                 run_id_fixture(),
-                crate::product_task::DocumentContentBinding::new(
-                    [1u8; 32],
-                    &crate::product_task::AnnotationStateV1 {
-                        width: 100,
-                        height: 100,
-                        state_id: 0,
-                        annotations: vec![],
-                    },
-                    0,
-                )
-                .unwrap(),
+                crate::authority::AuthoritySubject::Document(
+                    crate::product_task::DocumentContentBinding::new(
+                        [1u8; 32],
+                        &crate::product_task::AnnotationStateV1 {
+                            width: 100,
+                            height: 100,
+                            state_id: 0,
+                            annotations: vec![],
+                        },
+                        0,
+                    )
+                    .unwrap(),
+                ),
             ),
             "policy-rev-1".to_owned(),
             crate::authority::DisclosureCeiling::OcrLayoutOnly,

@@ -1,0 +1,6 @@
+schema_version = 1
+package_id = "action-guide-captions"
+name = "Action Guide Captions"
+description = "Suggest reviewable Action Guide titles and captions."
+declared_version = "1"
+main = "SKILL.md"

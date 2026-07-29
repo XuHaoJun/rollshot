@@ -72,14 +72,19 @@ pub(crate) struct State {
     home: ActionGuideHome,
     timeline: Option<crate::timeline_workspace::TimelineWorkspace>,
     lock_conflict_path: Option<std::path::PathBuf>,
+    task_store: std::sync::Arc<crate::agent_store::TaskStore>,
 }
 
 impl State {
-    fn new(recent: crate::action_guide_home::recent::RecentProjects) -> Self {
+    fn new(
+        recent: crate::action_guide_home::recent::RecentProjects,
+        task_store: std::sync::Arc<crate::agent_store::TaskStore>,
+    ) -> Self {
         Self {
             phase: Phase::Home,
             home: ActionGuideHome::new(recent),
             timeline: None,
+            task_store,
             lock_conflict_path: None,
         }
     }
@@ -112,7 +117,10 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
                 }
                 action_guide_home::Effect::OpenProject(path) => {
                     state.phase = Phase::Opening;
-                    iced::Task::perform(open_project_task(path, true), |msg| msg)
+                    iced::Task::perform(
+                        open_project_task(path, true, state.task_store.clone()),
+                        |msg| msg,
+                    )
                 }
                 action_guide_home::Effect::OpenLegacyReader(path) => {
                     state.home.message = open_legacy_reader(&path).err();
@@ -141,8 +149,9 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
                 )
                 .map(Message::Home),
                 action_guide_home::Effect::OpenImportedTimeline(seed) => {
-                    let ws =
+                    let mut ws =
                         crate::timeline_workspace::TimelineWorkspace::from_imported_video(seed);
+                    ws.task_store = Some(state.task_store.clone());
                     let initial_load = ws.initial_frame_load_task().map(Message::Timeline);
                     state.timeline = Some(ws);
                     state.phase = Phase::Timeline;
@@ -181,9 +190,10 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
                 return iced::Task::none();
             }
             match kind {
-                SelectedDirectoryKind::Project(project_path) => {
-                    iced::Task::perform(open_project_task(project_path, true), |msg| msg)
-                }
+                SelectedDirectoryKind::Project(project_path) => iced::Task::perform(
+                    open_project_task(project_path, true, state.task_store.clone()),
+                    |msg| msg,
+                ),
                 SelectedDirectoryKind::LegacyReader(reader_path) => {
                     state.phase = Phase::Home;
                     state.home.message = open_legacy_reader(&reader_path).err();
@@ -203,10 +213,11 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
             }
             match result {
                 ProjectOpenResult::Workspace(ws) => {
-                    let ws = match std::sync::Arc::try_unwrap(ws) {
+                    let mut ws = match std::sync::Arc::try_unwrap(ws) {
                         Ok(ws) => ws,
                         Err(_) => unreachable!("sole ownership"),
                     };
+                    ws.task_store = Some(state.task_store.clone());
                     if let Some((root, display_name)) = ws.project_recent_metadata() {
                         state.home.record_project_open(root, display_name);
                     }
@@ -236,7 +247,10 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
                 return iced::Task::none();
             };
             state.phase = Phase::Opening;
-            iced::Task::perform(open_project_task(path, false), |msg| msg)
+            iced::Task::perform(
+                open_project_task(path, false, state.task_store.clone()),
+                |msg| msg,
+            )
         }
         Message::CancelLockedOpen => {
             state.lock_conflict_path = None;
@@ -340,12 +354,20 @@ fn cleanup_stale_import_scratch() {
     crate::action_guide_home::cleanup_stale_import_scratch();
 }
 
-async fn open_project_task(path: std::path::PathBuf, writable: bool) -> Message {
-    let result = open_project_inner(path, writable).await;
+async fn open_project_task(
+    path: std::path::PathBuf,
+    writable: bool,
+    task_store: std::sync::Arc<crate::agent_store::TaskStore>,
+) -> Message {
+    let result = open_project_inner(path, writable, task_store).await;
     Message::ProjectOpened(result)
 }
 
-async fn open_project_inner(path: std::path::PathBuf, writable: bool) -> ProjectOpenResult {
+async fn open_project_inner(
+    path: std::path::PathBuf,
+    writable: bool,
+    task_store: std::sync::Arc<crate::agent_store::TaskStore>,
+) -> ProjectOpenResult {
     let request = crate::timeline_workspace::project::OpenProjectRequest {
         root: path,
         writable,
@@ -357,9 +379,10 @@ async fn open_project_inner(path: std::path::PathBuf, writable: bool) -> Project
 
     match result {
         crate::timeline_workspace::project::OpenProjectWorkerResult::Opened(opened) => {
-            match crate::timeline_workspace::project::from_loaded_project(
+            match crate::timeline_workspace::project::from_loaded_project_with_task_store(
                 opened.loaded,
                 opened.access,
+                task_store,
             ) {
                 Ok(ws) => ProjectOpenResult::Workspace(std::sync::Arc::new(ws)),
                 Err(e) => ProjectOpenResult::Error(format!("Failed to build workspace: {e:?}")),
@@ -375,17 +398,19 @@ pub(crate) fn run(initial: ActionGuideIntent) -> Result<(), String> {
     let config_dir =
         crate::daemon::config::rollshot_config_dir().map_err(|e| format!("config dir: {e}"))?;
     let recent = crate::action_guide_home::recent::RecentProjects::load(&config_dir);
+    let task_store = crate::agent_store::open_process_store(&config_dir)
+        .map_err(|e| format!("task store: {e}"))?;
 
     cleanup_stale_import_scratch();
 
-    let boot_data = std::sync::Arc::new(std::sync::Mutex::new(Some((initial, recent))));
+    let boot_data = std::sync::Arc::new(std::sync::Mutex::new(Some((initial, recent, task_store))));
     let boot = move || {
-        let (boot_initial, recent) = boot_data
+        let (boot_initial, recent, task_store) = boot_data
             .lock()
             .unwrap()
             .take()
             .expect("boot data already consumed");
-        let mut state = State::new(recent);
+        let mut state = State::new(recent, task_store);
         let mut tasks = Vec::new();
 
         let (_window_id, open_task) = iced::window::open(product_window_settings());
@@ -510,7 +535,10 @@ mod tests {
         let config_dir = dir.path().join("rollshot");
         std::fs::create_dir_all(&config_dir).unwrap();
         let recent = RecentProjects::load(&config_dir);
-        State::new(recent)
+        let task_store =
+            std::sync::Arc::new(crate::agent_store::TaskStore::open(&config_dir).unwrap());
+        let _ = dir.keep();
+        State::new(recent, task_store)
     }
 
     #[test]
@@ -663,6 +691,16 @@ mod tests {
         );
         assert_eq!(state.phase, Phase::Timeline);
         assert!(state.timeline.is_some());
+        assert!(std::sync::Arc::ptr_eq(
+            state
+                .timeline
+                .as_ref()
+                .unwrap()
+                .task_store
+                .as_ref()
+                .unwrap(),
+            &state.task_store,
+        ));
         assert!(!state.home.opening);
         assert!(task.units() == 0);
     }
@@ -893,6 +931,16 @@ mod tests {
         let mut state = linux_home_state();
         drive_import_success(&mut state);
         assert_eq!(state.phase, Phase::Timeline);
+        assert!(std::sync::Arc::ptr_eq(
+            state
+                .timeline
+                .as_ref()
+                .unwrap()
+                .task_store
+                .as_ref()
+                .unwrap(),
+            &state.task_store,
+        ));
         assert!(state
             .timeline
             .as_ref()

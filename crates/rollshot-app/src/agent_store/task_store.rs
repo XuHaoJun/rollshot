@@ -11,19 +11,22 @@
 //! Atomic persistence via sibling-temp + fsync + rename.
 //! Commit outcomes classify rename + parent-directory sync results.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::future::Future;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
+use fs4::{FileExt, TryLockError};
 use rollshot_agent::audit::{
     derive_material_transition, AuditAppendReceiptV1, AuditEnvelopeV1, AuditEventId,
 };
 use rollshot_agent::product_task::{ProductTaskId, ProductTaskSnapshot, SourceBinding, TaskStatus};
 
-use crate::result_workspace::workbench::audit_store::{
+use super::audit_store::{
     reconcile::{classify_unresolved, ReconcileDecision},
     record,
     record::{AuditAbortCategory, AuditTransactionId, JournalPayloadV1, PreparedTransactionV1},
@@ -36,6 +39,7 @@ use crate::result_workspace::workbench::audit_store::{
 
 const TASKS_DIR: &str = "tasks";
 const LOCK_FILE: &str = ".lock";
+const LIVE_TASKS_DIR: &str = "live";
 const TASK_FILE_PREFIX: &str = "task-";
 const TASK_FILE_SUFFIX: &str = ".json";
 const TEMP_PREFIX: &str = ".tmp-";
@@ -61,6 +65,8 @@ pub enum Failpoint {
     Rename,
     /// Fail on parent directory sync after rename.
     DirectorySync,
+    /// Fail the audit commit append after a transition snapshot is visible.
+    AuditCommit,
 }
 
 // ============================================================================
@@ -184,10 +190,12 @@ pub struct AuditedCommitOutcome {
 pub struct TaskStore {
     config_dir: PathBuf,
     tasks_dir: PathBuf,
+    live_tasks_dir: PathBuf,
     lock_path: PathBuf,
     temp_counter: AtomicU64,
     failpoint: Option<Failpoint>,
     audit_journal: AuditJournal,
+    live_tasks: Arc<Mutex<HashMap<ProductTaskId, fs::File>>>,
 }
 
 impl TaskStore {
@@ -199,10 +207,15 @@ impl TaskStore {
         let config_dir = config_dir.into();
         let agent_tasks = config_dir.join("agent-tasks");
         let tasks_dir = agent_tasks.join(TASKS_DIR);
+        let live_tasks_dir = agent_tasks.join(LIVE_TASKS_DIR);
         let lock_path = agent_tasks.join(LOCK_FILE);
 
         fs::create_dir_all(&tasks_dir).map_err(|e| TaskStoreError::Io {
             category: "create_dir".to_owned(),
+            source: e,
+        })?;
+        fs::create_dir_all(&live_tasks_dir).map_err(|e| TaskStoreError::Io {
+            category: "create_live_dir".to_owned(),
             source: e,
         })?;
 
@@ -212,6 +225,7 @@ impl TaskStore {
             use std::os::unix::fs::PermissionsExt;
             let _ = fs::set_permissions(&agent_tasks, fs::Permissions::from_mode(0o700));
             let _ = fs::set_permissions(&tasks_dir, fs::Permissions::from_mode(0o700));
+            let _ = fs::set_permissions(&live_tasks_dir, fs::Permissions::from_mode(0o700));
         }
 
         // Create lock file if it doesn't exist.
@@ -238,16 +252,28 @@ impl TaskStore {
         let store = Self {
             config_dir,
             tasks_dir,
+            live_tasks_dir,
             lock_path,
             temp_counter: AtomicU64::new(0),
             failpoint: None,
             audit_journal,
+            live_tasks: Arc::new(Mutex::new(HashMap::new())),
         };
 
         // Reconcile all audit journals before returning.
         // Spec §9.4: "TaskStore::open must reconcile all audit journals
         // before Product Task restore or new audited writes."
         store.reconcile_all_task_audits();
+
+        // Audit journals are reconciled first so the sweep's own transitions
+        // append onto repaired journals.
+        if let Err(e) = store.sweep_ephemeral_on_open(chrono::Utc::now().timestamp_millis()) {
+            tracing::warn!(
+                target: "rollshot::app::agent_store",
+                error = %e,
+                "open-time sweep failed"
+            );
+        }
 
         Ok(store)
     }
@@ -348,6 +374,70 @@ impl TaskStore {
                 );
             }
         }
+    }
+
+    /// Resolve tasks that cannot survive a process boundary.
+    ///
+    /// `open` runs once per process, which is precisely "after a restart". A
+    /// per-source matcher cannot do this job: it cannot distinguish processes.
+    ///
+    /// An ephemeral-origin task has no durable target to apply to, so a
+    /// `ReadyForReview` one becomes `Stale`. Any `Created`, `Running`, or
+    /// `Applying` task in any domain becomes `Interrupted`, because its process
+    /// is gone.
+    ///
+    /// `Created` uses the same `CREATED_INTERRUPT_GRACE_MS` window as
+    /// `reconcile_for_source`: a task created moments ago may belong to a live
+    /// run whose `Created → Running` write has not landed yet. At `open` that is
+    /// only reachable when a second process is mid-launch, which the
+    /// one-instance rule forbids — but the guard costs nothing and keeps the two
+    /// reconcilers from disagreeing.
+    pub fn sweep_ephemeral_on_open(&self, now: i64) -> Result<usize, TaskStoreError> {
+        let mut resolved = 0usize;
+
+        for task_id in self.task_ids()? {
+            let snapshot = match self.load(&task_id) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if self.task_is_live(&task_id)? {
+                continue;
+            }
+
+            let ephemeral = matches!(
+                snapshot.source_binding(),
+                SourceBinding::ActionGuideEphemeralGuide { .. }
+            );
+
+            let next = match (snapshot.status(), ephemeral) {
+                (TaskStatus::ReadyForReview, true) => snapshot.mark_stale(now).ok(),
+                (TaskStatus::Created, _)
+                    if now - snapshot.updated_at_unix_ms() < CREATED_INTERRUPT_GRACE_MS =>
+                {
+                    None
+                }
+                (TaskStatus::Created | TaskStatus::Running | TaskStatus::Applying, _) => {
+                    snapshot.reconcile_interrupted(now).ok().flatten()
+                }
+                _ => None,
+            };
+
+            if let Some(next) = next {
+                let event_id = AuditEventId::new_v4();
+                if let Err(e) = self.transition_audited(&snapshot, &next, event_id, now) {
+                    tracing::warn!(
+                        target: "rollshot::app::agent_store",
+                        error = %e,
+                        task_id = task_id.as_str(),
+                        "open-time sweep transition failed"
+                    );
+                    continue;
+                }
+                resolved += 1;
+            }
+        }
+
+        Ok(resolved)
     }
 
     /// Open with an injected failpoint for deterministic testing.
@@ -490,7 +580,7 @@ impl TaskStore {
         })?;
 
         // Validate schema version.
-        if snapshot.store_schema_version() > 2 {
+        if snapshot.store_schema_version() > 3 {
             return Err(TaskStoreError::UnsupportedSchema {
                 version: snapshot.store_schema_version(),
             });
@@ -670,7 +760,19 @@ impl TaskStore {
             });
         }
 
-        self.atomic_write(&path, snapshot, self.failpoint)
+        let owns_liveness = Self::snapshot_is_active(snapshot);
+        if owns_liveness {
+            self.begin_task_liveness(task_id)?;
+        }
+        match self.atomic_write(&path, snapshot, self.failpoint) {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                if owns_liveness {
+                    self.end_task_liveness(task_id);
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Create a task, bypassing any configured failpoint.
@@ -687,7 +789,19 @@ impl TaskStore {
             });
         }
 
-        self.atomic_write(&path, snapshot, None)
+        let owns_liveness = Self::snapshot_is_active(snapshot);
+        if owns_liveness {
+            self.begin_task_liveness(task_id)?;
+        }
+        match self.atomic_write(&path, snapshot, None) {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                if owns_liveness {
+                    self.end_task_liveness(task_id);
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Create a snapshot using an already-held lock. Caller must hold
@@ -738,7 +852,12 @@ impl TaskStore {
             source: e,
         })?;
 
-        self.compare_and_swap_snapshot_locked(expected, replacement, self.failpoint)
+        let outcome =
+            self.compare_and_swap_snapshot_locked(expected, replacement, self.failpoint)?;
+        if !Self::snapshot_is_active(replacement) {
+            self.end_task_liveness(replacement.task_id());
+        }
+        Ok(outcome)
     }
 
     /// CAS using an already-held lock. Caller must hold the exclusive
@@ -806,6 +925,99 @@ impl TaskStore {
         Ok(lock_file)
     }
 
+    fn snapshot_is_active(snapshot: &ProductTaskSnapshot) -> bool {
+        matches!(
+            snapshot.status(),
+            TaskStatus::Created
+                | TaskStatus::Running
+                | TaskStatus::ReadyForReview
+                | TaskStatus::Applying
+        )
+    }
+
+    fn liveness_path(&self, task_id: &ProductTaskId) -> PathBuf {
+        self.live_tasks_dir
+            .join(format!("{}.lock", task_id.as_str()))
+    }
+
+    fn begin_task_liveness(&self, task_id: &ProductTaskId) -> Result<(), TaskStoreError> {
+        let mut live_tasks = self.live_tasks.lock().map_err(|_| TaskStoreError::Io {
+            category: "live_tasks_lock".to_owned(),
+            source: io::Error::other("live task map poisoned"),
+        })?;
+        if live_tasks.contains_key(task_id) {
+            return Ok(());
+        }
+
+        let path = self.liveness_path(task_id);
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|e| TaskStoreError::Io {
+                category: "open_task_liveness".to_owned(),
+                source: e,
+            })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+        }
+
+        match FileExt::try_lock(&file) {
+            Ok(()) => {
+                live_tasks.insert(task_id.clone(), file);
+                Ok(())
+            }
+            Err(TryLockError::WouldBlock) => Err(TaskStoreError::LockContended),
+            Err(TryLockError::Error(error)) => Err(TaskStoreError::Io {
+                category: "lock_task_liveness".to_owned(),
+                source: error,
+            }),
+        }
+    }
+
+    fn task_is_live(&self, task_id: &ProductTaskId) -> Result<bool, TaskStoreError> {
+        let live_tasks = self.live_tasks.lock().map_err(|_| TaskStoreError::Io {
+            category: "live_tasks_lock".to_owned(),
+            source: io::Error::other("live task map poisoned"),
+        })?;
+        if live_tasks.contains_key(task_id) {
+            return Ok(true);
+        }
+        drop(live_tasks);
+
+        let path = self.liveness_path(task_id);
+        let file = match fs::OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(TaskStoreError::Io {
+                    category: "probe_task_liveness".to_owned(),
+                    source: error,
+                });
+            }
+        };
+        match FileExt::try_lock(&file) {
+            Ok(()) => Ok(false),
+            Err(TryLockError::WouldBlock) => Ok(true),
+            Err(TryLockError::Error(error)) => Err(TaskStoreError::Io {
+                category: "probe_task_liveness".to_owned(),
+                source: error,
+            }),
+        }
+    }
+
+    fn end_task_liveness(&self, task_id: &ProductTaskId) {
+        let Ok(mut live_tasks) = self.live_tasks.lock() else {
+            return;
+        };
+        live_tasks.remove(task_id);
+        let _ = fs::remove_file(self.liveness_path(task_id));
+    }
+
     /// Generate an opaque audit transaction ID.
     fn new_transaction_id() -> AuditTransactionId {
         use uuid::Uuid;
@@ -861,6 +1073,9 @@ impl TaskStore {
         let _prepare_receipt = self.audit_journal.append(task_id, prepare_payload)?;
 
         // Create snapshot.
+        if Self::snapshot_is_active(snapshot) {
+            self.begin_task_liveness(task_id)?;
+        }
         let store_outcome = match self.create_snapshot_locked(snapshot, None) {
             Ok(outcome) => outcome,
             Err(e) => {
@@ -871,6 +1086,9 @@ impl TaskStore {
                     reason: AuditAbortCategory::TaskStoreCommitFailed,
                 };
                 let _ = self.audit_journal.append(task_id, abort_payload);
+                if Self::snapshot_is_active(snapshot) {
+                    self.end_task_liveness(task_id);
+                }
                 return Err(e);
             }
         };
@@ -963,12 +1181,29 @@ impl TaskStore {
             }
         };
 
+        if self.failpoint == Some(Failpoint::AuditCommit) {
+            if !Self::snapshot_is_active(new) {
+                self.end_task_liveness(task_id);
+            }
+            return Err(TaskStoreError::PreCommit {
+                reason: "failpoint: audit commit".to_owned(),
+            });
+        }
+
         // Commit audit.
         let commit_payload = JournalPayloadV1::Committed {
             transaction_id: txn_id,
             event_id: event_id.clone(),
         };
-        let audit_receipt = self.audit_journal.append(task_id, commit_payload)?;
+        let audit_receipt = match self.audit_journal.append(task_id, commit_payload) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                if !Self::snapshot_is_active(new) {
+                    self.end_task_liveness(task_id);
+                }
+                return Err(error.into());
+            }
+        };
 
         tracing::info!(
             target: "rollshot::app::agent_audit_store",
@@ -977,6 +1212,9 @@ impl TaskStore {
             store_outcome = ?store_outcome,
             "transition_audited: complete"
         );
+        if !Self::snapshot_is_active(new) {
+            self.end_task_liveness(task_id);
+        }
 
         Ok(AuditedCommitOutcome {
             store: store_outcome,
@@ -1240,6 +1478,11 @@ impl TaskStore {
             // Reconcile running/applying → interrupted.
             match snapshot.status() {
                 TaskStatus::Created | TaskStatus::Running | TaskStatus::Applying => {
+                    if !snapshot.source_binding().identity_matches(binding)
+                        || self.task_is_live(&task_id)?
+                    {
+                        continue;
+                    }
                     // A task that was just created is still mid-launch: its
                     // `Created → Running` transition is a separate audited
                     // write, so interrupting it immediately would abort a
@@ -1288,17 +1531,13 @@ impl TaskStore {
                     continue;
                 }
                 TaskStatus::ReadyForReview => {
-                    // Skip tasks with completely unrelated base images.
-                    if snapshot.source_binding().base_image_sha256() != binding.base_image_sha256()
-                    {
+                    // Different source entirely — not a restore candidate.
+                    if !snapshot.source_binding().identity_matches(binding) {
                         continue;
                     }
 
-                    // Mark same-base-image but mismatching annotation-state
-                    // tasks as stale.
-                    if snapshot.source_binding().annotation_state_sha256()
-                        != binding.annotation_state_sha256()
-                    {
+                    // Same source, moved on — audited mark stale.
+                    if !snapshot.source_binding().freshness_matches(binding) {
                         // Audited mark stale.
                         if let Ok(stale) = snapshot.mark_stale(now) {
                             let event_id = AuditEventId::new_v4();
@@ -1331,6 +1570,28 @@ impl TaskStore {
         }
 
         Ok(newest_ready)
+    }
+
+    /// Collect every task ID present on disk.
+    ///
+    /// Reuses the filename-to-ID parsing that `sorted_task_entries` and
+    /// `reconcile_for_source` already rely on.
+    fn task_ids(&self) -> Result<Vec<ProductTaskId>, TaskStoreError> {
+        let entries = self.sorted_task_entries()?;
+        let mut ids = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            let filename = match entry.file_name().to_str().map(|s| s.to_owned()) {
+                Some(f) => f,
+                None => continue,
+            };
+            let Some(id_str) = filename.strip_suffix(TASK_FILE_SUFFIX) else {
+                continue;
+            };
+            if let Ok(id) = ProductTaskId::parse(id_str) {
+                ids.push(id);
+            }
+        }
+        Ok(ids)
     }
 
     /// Get sorted task-file entries from the tasks directory.
@@ -1484,17 +1745,17 @@ fn map_store_error(e: TaskStoreError) -> rollshot_agent::continuity::ContextReco
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rollshot_agent::audit::{AuditEventV1, AuditTaskTerminalV1};
+    use rollshot_agent::audit::{AuditEventKindV1, AuditEventV1, AuditTaskTerminalV1};
     use rollshot_agent::authority::{
         AuthoritySnapshotReceiptV1, DisclosureCeiling, PreparedCapability, RunOperation,
     };
     use rollshot_agent::domain::RunId;
     use rollshot_agent::product_task::{
         canonical_config_v2_digest, canonical_payload_bytes, ArtifactId, ArtifactKind,
-        ArtifactRevision, PayloadConfigV1, PayloadDryRunV1, PayloadMode, PayloadProposalV1,
-        PayloadSourceV1, ProductArtifactMetadata, RunConfigFingerprintV1, RunConfigFingerprintV2,
-        RunContractReceiptV1, SmartRedactionReviewPayload, TaskAttempt, TaskAttemptId, TaskKind,
-        TaskTerminal,
+        ArtifactRevision, ArtifactSummary, PayloadConfigV1, PayloadDryRunV1, PayloadMode,
+        PayloadProposalV1, PayloadSourceV1, ProductArtifactMetadata, RunConfigFingerprintV1,
+        RunConfigFingerprintV2, RunContractReceiptV1, SmartRedactionReviewPayload, TaskAttempt,
+        TaskAttemptId, TaskKind, TaskTerminal,
     };
     use rollshot_agent::skills::{SkillInvocationKind, SkillUseReceiptV1};
     use sha2::{Digest, Sha256};
@@ -1521,7 +1782,7 @@ mod tests {
     }
 
     fn source_binding_fixture() -> SourceBinding {
-        SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None)
+        SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None)
     }
 
     fn attempt_fixture() -> TaskAttempt {
@@ -1555,6 +1816,10 @@ mod tests {
                 },
             },
         }
+    }
+
+    fn payload_bytes_fixture() -> Vec<u8> {
+        serde_json::to_vec(&payload_fixture()).expect("fixture payload serializes")
     }
 
     fn metadata_fixture(run_id: RunId, attempt_id: TaskAttemptId) -> ProductArtifactMetadata {
@@ -1619,7 +1884,7 @@ mod tests {
         let running = running_task_fixture();
         let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
         running
-            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
             .unwrap()
     }
 
@@ -1640,7 +1905,7 @@ mod tests {
     }
 
     fn authority_snapshot_fixture() -> rollshot_agent::authority::AuthoritySnapshot {
-        use rollshot_agent::authority::{AuthorityBinding, AuthoritySnapshot};
+        use rollshot_agent::authority::{AuthorityBinding, AuthoritySnapshot, AuthoritySubject};
         use rollshot_agent::product_task::{AnnotationStateV1, DocumentContentBinding};
         let state = AnnotationStateV1 {
             width: 100,
@@ -1654,7 +1919,7 @@ mod tests {
                 task_id_fixture(),
                 TaskAttemptId::new(1),
                 run_id_fixture(),
-                document_binding,
+                AuthoritySubject::Document(document_binding),
             ),
             "rollshot-v1".into(),
             DisclosureCeiling::FullScreenshot,
@@ -1674,7 +1939,7 @@ mod tests {
             policy_revision: "rev-1".to_owned(),
             disclosure_ceiling: DisclosureCeiling::FullScreenshot,
             existing_product_capture: false,
-            document_binding_digest: "ab".repeat(32),
+            subject_digest: "ab".repeat(32),
             prepared_capabilities: vec![PreparedCapability::Ocr],
             granted_operations: vec![RunOperation::SubmitReviewCandidate],
             snapshot_digest: "cd".repeat(32),
@@ -1764,7 +2029,7 @@ mod tests {
         let contract = bound.active_run_contract().unwrap().clone();
         let meta = v2_metadata_with_contract(&contract);
         bound
-            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
             .unwrap()
     }
 
@@ -2169,6 +2434,7 @@ mod tests {
         let (store, _dir) = store();
         let expected = running_task_fixture();
         store.create(&expected).unwrap();
+        store.end_task_liveness(expected.task_id());
 
         let binding = source_binding_fixture();
         store.reconcile_for_source(&binding, 100).unwrap();
@@ -2184,6 +2450,7 @@ mod tests {
         store.create_without_failpoint(&ready).unwrap();
         let applying = ready.begin_apply(35).unwrap();
         store.compare_and_swap(&ready, &applying).unwrap();
+        store.end_task_liveness(ready.task_id());
 
         let binding = source_binding_fixture();
         store.reconcile_for_source(&binding, 100).unwrap();
@@ -2219,7 +2486,7 @@ mod tests {
         store.create_without_failpoint(&ready).unwrap();
 
         // Same base image, different annotation-state.
-        let new_binding = SourceBinding::new(
+        let new_binding = SourceBinding::smart_redaction(
             [1u8; 32],  // same base image
             [99u8; 32], // different annotation state
             1,
@@ -2240,7 +2507,7 @@ mod tests {
         store.create_without_failpoint(&ready).unwrap();
 
         // Different base image entirely.
-        let unrelated_binding = SourceBinding::new(
+        let unrelated_binding = SourceBinding::smart_redaction(
             [99u8; 32], // different base image
             [2u8; 32],
             0,
@@ -2274,7 +2541,7 @@ mod tests {
             let running = created.start_attempt(attempt, 20).unwrap();
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             running
-                .record_ready_for_review(meta, payload_fixture(), None, 30)
+                .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
                 .unwrap()
         };
         store.create_without_failpoint(&ready1).unwrap();
@@ -2300,7 +2567,7 @@ mod tests {
                 TaskAttemptId::new(1),
             );
             running
-                .record_ready_for_review(meta, payload_fixture(), None, 120)
+                .record_ready_for_review(meta, payload_bytes_fixture(), None, 120)
                 .unwrap()
         };
         store.create_without_failpoint(&ready2).unwrap();
@@ -2362,12 +2629,55 @@ mod tests {
     }
 
     #[test]
-    fn schema_three_fails_closed() {
-        let error = load_snapshot_with_schema(3).unwrap_err();
+    fn schema_four_fails_closed() {
+        let error = load_snapshot_with_schema(4).unwrap_err();
         assert!(matches!(
             error,
-            TaskStoreError::UnsupportedSchema { version: 3 }
+            TaskStoreError::UnsupportedSchema { version: 4 }
         ));
+    }
+
+    #[test]
+    fn loads_pre_migration_schema_fixtures() {
+        for (name, expected_version) in [
+            ("task-schema-v1.json", 1u32),
+            ("task-schema-v2.json", 2u32),
+            ("task-schema-v2-ready.json", 2u32),
+        ] {
+            let raw = std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/agent_tasks")
+                    .join(name),
+            )
+            .unwrap();
+
+            let snapshot: ProductTaskSnapshot =
+                serde_json::from_str(&raw).unwrap_or_else(|e| panic!("{name} failed to load: {e}"));
+
+            assert_eq!(snapshot.store_schema_version(), expected_version);
+            assert!(matches!(
+                snapshot.source_binding(),
+                SourceBinding::SmartRedaction { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn legacy_flat_dry_run_counters_become_a_smart_redaction_summary() {
+        let raw = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/agent_tasks/task-schema-v2-ready.json"),
+        )
+        .unwrap();
+        let snapshot: ProductTaskSnapshot = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(
+            snapshot.artifact_metadata().unwrap().summary(),
+            &ArtifactSummary::SmartRedaction {
+                dry_run_candidate_count: 3,
+                dry_run_affected_area: 0.42,
+            }
+        );
     }
 
     #[test]
@@ -2391,7 +2701,7 @@ mod tests {
         let contract = bound.active_run_contract().unwrap().clone();
         let meta = v2_metadata_with_contract(&contract);
         let ready = bound
-            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
             .unwrap();
 
         assert_eq!(
@@ -2692,13 +3002,23 @@ mod tests {
             .create_audited(&snapshot, event_id.clone(), 10)
             .unwrap();
 
-        // Drop and reopen the store — open() reconciles all journals.
+        // Drop and reopen the store — open() reconciles all journals, then
+        // the ephemeral sweep transitions Created → Interrupted (the task is
+        // well past the launch-grace window).
         drop(store);
         let store2 = TaskStore::open(dir.path()).unwrap();
 
-        // Verify committed events survived reopen.
+        // Verify committed events survived reopen.  The sweep adds a
+        // TaskTerminated(Interrupted) event on top of the original TaskCreated.
         let events = store2.committed_audit_events(snapshot.task_id()).unwrap();
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0].event(), AuditEventV1::TaskCreated));
+        assert!(matches!(
+            events[1].event(),
+            AuditEventV1::TaskTerminated {
+                terminal: AuditTaskTerminalV1::Interrupted
+            }
+        ));
     }
 
     #[test]
@@ -2850,7 +3170,7 @@ mod tests {
         let contract = bound.active_run_contract().unwrap().clone();
         let meta = v2_metadata_with_contract(&contract);
         let ready = bound
-            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
             .unwrap();
         store
             .transition_audited(&bound, &ready, AuditEventId::new_v4(), 30)
@@ -2895,6 +3215,7 @@ mod tests {
         store
             .create_audited(&created, AuditEventId::new_v4(), 10)
             .unwrap();
+        store.end_task_liveness(created.task_id());
 
         let binding = source_binding_fixture();
         // Past the launch grace window: the task is genuinely abandoned.
@@ -3220,12 +3541,20 @@ mod tests {
         drop(store);
         let store2 = TaskStore::open(dir.path()).unwrap();
 
-        // Verify the audit events are present after reopen.
+        // Verify the audit events are present after reopen.  The ephemeral
+        // sweep transitions Created → Interrupted (past grace window), adding
+        // a TaskTerminated event.
         let events = store2.committed_audit_events(&task_id_fixture()).unwrap();
-        assert_eq!(events.len(), 1, "authority denial must survive reopen");
+        assert_eq!(events.len(), 2, "authority denial + sweep TaskTerminated");
         assert!(matches!(
             events[0].event(),
             rollshot_agent::audit::AuditEventV1::AuthorityDenied { .. }
+        ));
+        assert!(matches!(
+            events[1].event(),
+            AuditEventV1::TaskTerminated {
+                terminal: AuditTaskTerminalV1::Interrupted
+            }
         ));
     }
 
@@ -3304,6 +3633,424 @@ mod tests {
         assert!(
             audit_result.is_err(),
             "corrupt journal must fail audit read"
+        );
+    }
+
+    #[test]
+    fn concurrent_audited_creates_from_two_domains_both_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+
+        // Distinct deterministic ids; the tempdir is fresh so no uniqueness
+        // across runs is needed. `ProductTaskId::new_v4()` does not exist.
+        let smart_task_id =
+            ProductTaskId::parse("task-00000000-0000-4000-8000-00000000000a").unwrap();
+        let caption_task_id =
+            ProductTaskId::parse("task-00000000-0000-4000-8000-00000000000b").unwrap();
+
+        let smart = ProductTaskSnapshot::new_v3(
+            smart_task_id,
+            TaskKind::SmartRedactionAuthor,
+            SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None),
+            1_000,
+        )
+        .unwrap();
+        let captions = ProductTaskSnapshot::new_v3(
+            caption_task_id,
+            TaskKind::ActionGuideCaptions,
+            SourceBinding::ActionGuideProject {
+                project_root_sha256: [3u8; 32],
+                revision: 1,
+                projection_digest: "ab".repeat(32),
+            },
+            1_000,
+        )
+        .unwrap();
+
+        let a = store.clone();
+        let b = store.clone();
+        let smart_id = smart.task_id().clone();
+        let captions_id = captions.task_id().clone();
+
+        let ha =
+            std::thread::spawn(move || a.create_audited(&smart, AuditEventId::new_v4(), 1_000));
+        let hb =
+            std::thread::spawn(move || b.create_audited(&captions, AuditEventId::new_v4(), 1_000));
+
+        ha.join().unwrap().expect("smart redaction create failed");
+        hb.join().unwrap().expect("caption create failed");
+
+        // Both files exist AND both survived the schema-3 load guard relaxed in
+        // Task 4, with their own domains intact.
+        let smart_loaded = store.load(&smart_id).expect("smart redaction load failed");
+        let caption_loaded = store.load(&captions_id).expect("caption load failed");
+        assert_eq!(smart_loaded.store_schema_version(), 3);
+        assert_eq!(caption_loaded.kind(), TaskKind::ActionGuideCaptions);
+        assert!(matches!(
+            caption_loaded.source_binding(),
+            SourceBinding::ActionGuideProject { revision: 1, .. }
+        ));
+
+        // Two audited creates means two journals, each with its own TaskCreated.
+        for id in [&smart_id, &captions_id] {
+            let kinds: Vec<_> = store
+                .committed_audit_events(id)
+                .unwrap()
+                .into_iter()
+                .map(|e| e.event().kind())
+                .collect();
+            assert_eq!(kinds, vec![AuditEventKindV1::TaskCreated], "{id:?}");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Ephemeral sweep tests (Task 19)
+    // ------------------------------------------------------------------
+
+    fn now_ms() -> i64 {
+        chrono::Utc::now().timestamp_millis()
+    }
+
+    /// Seed an ephemeral guide in `ReadyForReview` — must become `Stale` on
+    /// reopen.
+    fn seed_ephemeral_ready_for_review(store: &TaskStore) -> ProductTaskId {
+        let id = ProductTaskId::parse("task-00000000-0000-4000-8000-0000000000c1").unwrap();
+        let binding = SourceBinding::ActionGuideEphemeralGuide {
+            guide_digest: "aa".repeat(32),
+        };
+        let created = ProductTaskSnapshot::new(
+            id.clone(),
+            TaskKind::SmartRedactionAuthor,
+            binding,
+            now_ms(),
+        )
+        .unwrap();
+        store
+            .create_audited(&created, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        // Walk the task through to ReadyForReview.
+        let run_id = RunId::parse("run-00000000-0000-4000-8000-0000000000c1").unwrap();
+        let running = created
+            .start_attempt(
+                TaskAttempt::new(TaskAttemptId::new(1), run_id, now_ms()),
+                now_ms(),
+            )
+            .unwrap();
+        store
+            .transition_audited(&created, &running, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        let meta = metadata_fixture(
+            RunId::parse("run-00000000-0000-4000-8000-0000000000c1").unwrap(),
+            TaskAttemptId::new(1),
+        );
+        let ready = running
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, now_ms())
+            .unwrap();
+        store
+            .transition_audited(&running, &ready, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        id
+    }
+
+    /// Seed a durable (non-ephemeral) caption in `ReadyForReview` — must be
+    /// left alone on reopen.
+    fn seed_durable_ready_for_review_caption(store: &TaskStore) -> ProductTaskId {
+        let id = ProductTaskId::parse("task-00000000-0000-4000-8000-0000000000c2").unwrap();
+        let binding = SourceBinding::ActionGuideProject {
+            project_root_sha256: [3u8; 32],
+            revision: 1,
+            projection_digest: "bb".repeat(32),
+        };
+        let created =
+            ProductTaskSnapshot::new(id.clone(), TaskKind::ActionGuideCaptions, binding, now_ms())
+                .unwrap();
+        store
+            .create_audited(&created, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        let run_id = RunId::parse("run-00000000-0000-4000-8000-0000000000c2").unwrap();
+        let running = created
+            .start_attempt(
+                TaskAttempt::new(TaskAttemptId::new(1), run_id, now_ms()),
+                now_ms(),
+            )
+            .unwrap();
+        store
+            .transition_audited(&created, &running, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        let meta = metadata_fixture(
+            RunId::parse("run-00000000-0000-4000-8000-0000000000c2").unwrap(),
+            TaskAttemptId::new(1),
+        );
+        let ready = running
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, now_ms())
+            .unwrap();
+        store
+            .transition_audited(&running, &ready, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        id
+    }
+
+    /// Seed a smart-redaction task in `Running` — must become `Interrupted` on
+    /// reopen.
+    fn seed_running_smart_redaction(store: &TaskStore) -> ProductTaskId {
+        let id = ProductTaskId::parse("task-00000000-0000-4000-8000-0000000000c3").unwrap();
+        let binding = SourceBinding::smart_redaction([4u8; 32], [5u8; 32], 0, "p".into(), None);
+        let created = ProductTaskSnapshot::new(
+            id.clone(),
+            TaskKind::SmartRedactionAuthor,
+            binding,
+            now_ms(),
+        )
+        .unwrap();
+        store
+            .create_audited(&created, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        let run_id = RunId::parse("run-00000000-0000-4000-8000-0000000000c3").unwrap();
+        let running = created
+            .start_attempt(
+                TaskAttempt::new(TaskAttemptId::new(1), run_id, now_ms()),
+                now_ms(),
+            )
+            .unwrap();
+        store
+            .transition_audited(&created, &running, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        id
+    }
+
+    /// Seed a caption task in `Running` — must become `Interrupted` on reopen.
+    fn seed_running_caption(store: &TaskStore) -> ProductTaskId {
+        let id = ProductTaskId::parse("task-00000000-0000-4000-8000-0000000000c4").unwrap();
+        let binding = SourceBinding::ActionGuideProject {
+            project_root_sha256: [6u8; 32],
+            revision: 1,
+            projection_digest: "cc".repeat(32),
+        };
+        let created =
+            ProductTaskSnapshot::new(id.clone(), TaskKind::ActionGuideCaptions, binding, now_ms())
+                .unwrap();
+        store
+            .create_audited(&created, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        let run_id = RunId::parse("run-00000000-0000-4000-8000-0000000000c4").unwrap();
+        let running = created
+            .start_attempt(
+                TaskAttempt::new(TaskAttemptId::new(1), run_id, now_ms()),
+                now_ms(),
+            )
+            .unwrap();
+        store
+            .transition_audited(&created, &running, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        id
+    }
+
+    /// Seed a caption task in `Completed` — must be left alone on reopen.
+    fn seed_completed_caption(store: &TaskStore) -> ProductTaskId {
+        let id = ProductTaskId::parse("task-00000000-0000-4000-8000-0000000000c5").unwrap();
+        let binding = SourceBinding::ActionGuideProject {
+            project_root_sha256: [7u8; 32],
+            revision: 1,
+            projection_digest: "dd".repeat(32),
+        };
+        let created =
+            ProductTaskSnapshot::new(id.clone(), TaskKind::ActionGuideCaptions, binding, now_ms())
+                .unwrap();
+        store
+            .create_audited(&created, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        let run_id = RunId::parse("run-00000000-0000-4000-8000-0000000000c5").unwrap();
+        let running = created
+            .start_attempt(
+                TaskAttempt::new(TaskAttemptId::new(1), run_id, now_ms()),
+                now_ms(),
+            )
+            .unwrap();
+        store
+            .transition_audited(&created, &running, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        let meta = metadata_fixture(
+            RunId::parse("run-00000000-0000-4000-8000-0000000000c5").unwrap(),
+            TaskAttemptId::new(1),
+        );
+        let ready = running
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, now_ms())
+            .unwrap();
+        store
+            .transition_audited(&running, &ready, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        let receipt = rollshot_agent::product_task::ReviewReceipt {
+            artifact_id: artifact_id_fixture(),
+            artifact_revision: ArtifactRevision::new(1),
+            proposal_id: "proposal-00000000-0000-4000-8000-000000000001".to_owned(),
+            applied_candidates: vec![0, 1],
+            rejected_candidates: vec![],
+            local_delta: rollshot_agent::product_task::LocalReviewDeltaV1 {
+                moved_candidates: vec![],
+                manual_additions: vec![],
+            },
+            resulting_document_state_id: Some(4),
+            resulting_document_digest: None,
+            decided_at_unix_ms: now_ms(),
+        };
+        let applying = ready.begin_apply(now_ms()).unwrap();
+        store
+            .transition_audited(&ready, &applying, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        let completed = applying.complete_apply(receipt, now_ms()).unwrap();
+        store
+            .transition_audited(&applying, &completed, AuditEventId::new_v4(), now_ms())
+            .unwrap();
+        id
+    }
+
+    #[test]
+    fn open_marks_ephemeral_ready_for_review_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let task_id = {
+            let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+            seed_ephemeral_ready_for_review(&store)
+        };
+
+        // Reopening is what a restart looks like.
+        let reopened = crate::agent_store::open_process_store(dir.path()).unwrap();
+
+        assert_eq!(
+            reopened.load(&task_id).unwrap().status(),
+            TaskStatus::Stale,
+            "an ephemeral guide has no durable target to apply to"
+        );
+    }
+
+    #[test]
+    fn second_live_store_does_not_interrupt_running_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let task_id = seed_running_caption(&first);
+
+        let second = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let binding = second.load(&task_id).unwrap().source_binding().clone();
+        let _ = second
+            .reconcile_for_source(&binding, chrono::Utc::now().timestamp_millis())
+            .unwrap();
+
+        assert_eq!(
+            second.load(&task_id).unwrap().status(),
+            TaskStatus::Running,
+            "opening another process store must not interrupt a live owner"
+        );
+    }
+
+    #[test]
+    fn second_live_store_does_not_stale_ephemeral_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let task_id = seed_ephemeral_ready_for_review(&first);
+
+        let second = crate::agent_store::open_process_store(dir.path()).unwrap();
+
+        assert_eq!(
+            second.load(&task_id).unwrap().status(),
+            TaskStatus::ReadyForReview,
+            "an ephemeral review remains usable while its owning process is live"
+        );
+    }
+
+    #[test]
+    fn open_marks_running_tasks_interrupted_for_both_domains() {
+        let dir = tempfile::tempdir().unwrap();
+        let (smart_id, caption_id) = {
+            let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+            (
+                seed_running_smart_redaction(&store),
+                seed_running_caption(&store),
+            )
+        };
+
+        let reopened = crate::agent_store::open_process_store(dir.path()).unwrap();
+
+        for id in [smart_id, caption_id] {
+            assert!(matches!(
+                reopened.load(&id).unwrap().status(),
+                TaskStatus::Interrupted
+            ));
+        }
+    }
+
+    #[test]
+    fn open_leaves_durable_ready_for_review_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let task_id = {
+            let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+            seed_durable_ready_for_review_caption(&store)
+        };
+
+        let reopened = crate::agent_store::open_process_store(dir.path()).unwrap();
+
+        assert_eq!(
+            reopened.load(&task_id).unwrap().status(),
+            TaskStatus::ReadyForReview
+        );
+    }
+
+    #[test]
+    fn open_leaves_terminal_tasks_alone_and_reports_zero() {
+        // The sweep must be a no-op on a store that has nothing to resolve, or
+        // every restart writes spurious audit events.
+        let dir = tempfile::tempdir().unwrap();
+        let task_id = {
+            let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+            seed_completed_caption(&store)
+        };
+
+        let reopened = crate::agent_store::open_process_store(dir.path()).unwrap();
+
+        assert_eq!(reopened.sweep_ephemeral_on_open(now_ms()).unwrap(), 0);
+        assert_eq!(
+            reopened.load(&task_id).unwrap().status(),
+            TaskStatus::Completed
+        );
+    }
+
+    #[test]
+    fn open_is_idempotent_across_two_restarts() {
+        // A second restart must not re-transition an already-swept task; the
+        // sweep would otherwise fail its own CAS and log a warning every boot.
+        let dir = tempfile::tempdir().unwrap();
+        let task_id = {
+            let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+            seed_ephemeral_ready_for_review(&store)
+        };
+
+        let _first = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let second = crate::agent_store::open_process_store(dir.path()).unwrap();
+
+        assert_eq!(second.sweep_ephemeral_on_open(now_ms()).unwrap(), 0);
+        assert_eq!(second.load(&task_id).unwrap().status(), TaskStatus::Stale);
+    }
+
+    #[test]
+    fn open_appends_a_task_terminated_event_for_each_resolution() {
+        // §5.1 maps both mark_stale and reconcile_interrupted at open to
+        // TaskTerminated. Without this the sweep could transition state
+        // silently and still pass every test above.
+        let dir = tempfile::tempdir().unwrap();
+        let task_id = {
+            let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+            seed_ephemeral_ready_for_review(&store)
+        };
+
+        let reopened = crate::agent_store::open_process_store(dir.path()).unwrap();
+
+        let kinds: Vec<_> = reopened
+            .committed_audit_events(&task_id)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.event().kind())
+            .collect();
+        assert!(
+            kinds.contains(&AuditEventKindV1::TaskTerminated),
+            "sweep must be audited, got {kinds:?}"
         );
     }
 }

@@ -1152,8 +1152,8 @@ fn derive_event(
             })
         }
 
-        // ReviewDecisionCommitted::Rejected: ReadyForReview → Rejected
-        (Some(TaskStatus::ReadyForReview), TaskStatus::Rejected) => {
+        // ReviewDecisionCommitted::Rejected: review declined before or after apply began
+        (Some(TaskStatus::ReadyForReview | TaskStatus::Applying), TaskStatus::Rejected) => {
             let receipt =
                 new.review_receipt()
                     .ok_or(AuditContractError::MissingTransitionField {
@@ -1238,8 +1238,8 @@ fn make_artifact_ref(
 mod tests {
     use super::*;
     use crate::authority::{
-        AuthorityBinding, AuthoritySnapshotReceiptV1, DisclosureCeiling, PreparedCapability,
-        RunOperation,
+        AuthorityBinding, AuthoritySnapshotReceiptV1, AuthoritySubject, DisclosureCeiling,
+        PreparedCapability, RunOperation,
     };
     use crate::domain::RunId;
     use crate::product_task::*;
@@ -1263,7 +1263,7 @@ mod tests {
     }
 
     fn source_binding_fixture() -> SourceBinding {
-        SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None)
+        SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None)
     }
 
     fn attempt_fixture() -> TaskAttempt {
@@ -1297,6 +1297,10 @@ mod tests {
                 },
             },
         }
+    }
+
+    fn payload_bytes_fixture() -> Vec<u8> {
+        serde_json::to_vec(&payload_fixture()).expect("fixture payload serializes")
     }
 
     fn metadata_fixture(run_id: RunId, attempt_id: TaskAttemptId) -> ProductArtifactMetadata {
@@ -1370,7 +1374,7 @@ mod tests {
                 task_id_fixture(),
                 TaskAttemptId::new(1),
                 run_id(),
-                document_binding_fixture(),
+                AuthoritySubject::Document(document_binding_fixture()),
             ),
             "auth-sentinel-policy".into(),
             DisclosureCeiling::OcrLayoutOnly,
@@ -1658,7 +1662,7 @@ mod tests {
                 .unwrap();
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             let ready = running
-                .record_ready_for_review(meta, payload_fixture(), None, 30)
+                .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
                 .unwrap();
             let receipt = ready.audit_transition_receipt().unwrap();
             assert_eq!(receipt.status, AuditTaskStatusV1::ReadyForReview);
@@ -1815,7 +1819,7 @@ mod tests {
                 .unwrap();
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             let ready = running
-                .record_ready_for_review(meta, payload_fixture(), None, 30)
+                .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
                 .unwrap();
             let envelope =
                 derive_material_transition(Some(&running), &ready, audit_id(4), 30).unwrap();
@@ -1840,7 +1844,7 @@ mod tests {
                 .unwrap();
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             let ready = running
-                .record_ready_for_review(meta, payload_fixture(), None, 30)
+                .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
                 .unwrap();
             let applying = ready.begin_apply(35).unwrap();
             let envelope =
@@ -1860,7 +1864,7 @@ mod tests {
                 .unwrap();
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             let ready = running
-                .record_ready_for_review(meta, payload_fixture(), None, 30)
+                .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
                 .unwrap();
             let applying = ready.begin_apply(35).unwrap();
             let completed = applying
@@ -1893,7 +1897,7 @@ mod tests {
                 .unwrap();
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             let ready = running
-                .record_ready_for_review(meta, payload_fixture(), None, 30)
+                .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
                 .unwrap();
             let rejected = ready
                 .reject(
@@ -1933,6 +1937,30 @@ mod tests {
             }
         }
 
+        #[test]
+        fn derives_review_decision_committed_after_apply_started() {
+            let running = created_task_fixture()
+                .start_attempt(TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20), 20)
+                .unwrap();
+            let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
+            let ready = running
+                .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
+                .unwrap();
+            let applying = ready.begin_apply(35).unwrap();
+            let rejected = applying.reject_apply(apply_receipt_fixture(), 40).unwrap();
+
+            let envelope =
+                derive_material_transition(Some(&applying), &rejected, audit_id(8), 40).unwrap();
+            assert!(matches!(
+                envelope.event(),
+                AuditEventV1::ReviewDecisionCommitted {
+                    applied: false,
+                    document_state: None,
+                    ..
+                }
+            ));
+        }
+
         // ---- TaskTerminated (Stale) ----
 
         #[test]
@@ -1942,7 +1970,7 @@ mod tests {
                 .unwrap();
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             let ready = running
-                .record_ready_for_review(meta, payload_fixture(), None, 30)
+                .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
                 .unwrap();
             let stale = ready.mark_stale(40).unwrap();
             let envelope =
@@ -2105,7 +2133,7 @@ mod tests {
             // Use running (rev 1) → Completed which is unsupported
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             let ready = running
-                .record_ready_for_review(meta, payload_fixture(), None, 30)
+                .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
                 .unwrap();
             let applying = ready.begin_apply(35).unwrap();
             let completed = applying
@@ -2346,7 +2374,7 @@ mod tests {
                 .unwrap();
             let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
             let ready = running
-                .record_ready_for_review(meta, payload_fixture(), None, 30)
+                .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
                 .unwrap();
             let applying = ready.begin_apply(35).unwrap();
             let mut receipt = apply_receipt_fixture();
@@ -2566,7 +2594,13 @@ mod tests {
             let task = ProductTaskSnapshot::new(
                 task_id_fixture(),
                 TaskKind::SmartRedactionAuthor,
-                SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None),
+                SourceBinding::smart_redaction(
+                    [1u8; 32],
+                    [2u8; 32],
+                    0,
+                    "preset-001".to_owned(),
+                    None,
+                ),
                 10,
             )
             .unwrap();

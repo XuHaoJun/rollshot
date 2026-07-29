@@ -148,9 +148,11 @@ impl ToolRegistry {
         if let (Some(snapshot), Some(ctx)) = (authority, tool_ctx) {
             let tool = &self.tools[index];
             for &op in tool.required_operations() {
-                if let Err(_auth_err) =
-                    snapshot.authorize_tool(&ctx.run_id, &ctx.content_binding, op)
-                {
+                if let Err(_auth_err) = snapshot.authorize_tool(
+                    &ctx.run_id,
+                    &crate::authority::AuthoritySubject::Document(ctx.content_binding.clone()),
+                    op,
+                ) {
                     return Err(ToolError::AuthorityDenied {
                         tool: tool.name().to_string(),
                         operation: op,
@@ -3411,7 +3413,9 @@ function main(input) {
 
     // ---- Authority enforcement ----
 
-    use crate::authority::{AuthorityBinding, AuthoritySnapshot, DisclosureCeiling, RunOperation};
+    use crate::authority::{
+        AuthorityBinding, AuthoritySnapshot, AuthoritySubject, DisclosureCeiling, RunOperation,
+    };
     use crate::product_task::{AnnotationStateV1, TaskAttemptId};
     use std::collections::BTreeSet;
 
@@ -3466,7 +3470,7 @@ function main(input) {
                 .unwrap(),
             TaskAttemptId::new(1),
             RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
-            binding,
+            AuthoritySubject::Document(binding),
         );
         // InspectPreparedImage requires existing_product_capture = true.
         let ops_vec: Vec<_> = ops.into_iter().collect();
@@ -3611,7 +3615,7 @@ function main(input) {
             TaskAttemptId::new(1),
             // Wrong run ID
             RunId::parse("run-99999999-9999-4999-8999-999999999999").unwrap(),
-            binding,
+            AuthoritySubject::Document(binding),
         );
         let stale_snapshot = AuthoritySnapshot::new(
             auth_binding,
@@ -3665,7 +3669,7 @@ function main(input) {
                 .unwrap(),
             TaskAttemptId::new(1),
             RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
-            binding,
+            AuthoritySubject::Document(binding),
         );
         let stale_snapshot = AuthoritySnapshot::new(
             auth_binding,

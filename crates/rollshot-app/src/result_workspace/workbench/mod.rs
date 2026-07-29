@@ -1,11 +1,9 @@
 #![allow(dead_code, clippy::large_enum_variant)] // SP6 scaffolding
 
-pub mod audit_store;
 pub mod provider_config;
 pub mod review;
 pub mod run;
 pub mod state;
-pub mod task_store;
 pub mod view;
 
 #[cfg(test)]
@@ -127,7 +125,7 @@ pub struct WorkbenchState {
     pub corrections_non_empty: bool,
     /// Filesystem-backed task store for run-outcome persistence.
     /// `None` when no config directory is available (e.g. tests).
-    pub task_store: Option<std::sync::Arc<task_store::TaskStore>>,
+    pub task_store: Option<std::sync::Arc<crate::agent_store::TaskStore>>,
     /// Monotonically increasing token for stale restore guards.
     pub restore_operation_id: RestoreOperationId,
     /// Source binding cached at restore time; used to validate the

@@ -1492,7 +1492,9 @@ impl<P, R: Send + 'static> Drop for JobReporter<P, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::{AuthorityBinding, AuthoritySnapshot, DisclosureCeiling};
+    use crate::authority::{
+        AuthorityBinding, AuthoritySnapshot, AuthoritySubject, DisclosureCeiling,
+    };
     use crate::product_task::{AnnotationStateV1, DocumentContentBinding};
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1528,7 +1530,12 @@ mod tests {
         };
         let document = DocumentContentBinding::new([0xAB_u8; 32], &state, 1).unwrap();
         AuthoritySnapshot::new(
-            AuthorityBinding::new(task_id, attempt_id, run_id, document),
+            AuthorityBinding::new(
+                task_id,
+                attempt_id,
+                run_id,
+                AuthoritySubject::Document(document),
+            ),
             "job-test-policy-v1".into(),
             DisclosureCeiling::OcrLayoutOnly,
             false,

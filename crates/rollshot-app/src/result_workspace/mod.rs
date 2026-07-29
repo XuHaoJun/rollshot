@@ -157,6 +157,17 @@ pub struct ResultWorkspace {
     pub(crate) annotation_defaults: AnnotationDefaultsState,
     /// Pixelate preview cache: keys → RGBA handles, LRU eviction.
     pub(crate) pixelate_previews: PixelatePreviewCache,
+    /// Result of opening the process-wide agent task store, cached so
+    /// `Message::SmartRedaction` never opens more than one instance per
+    /// process: `TaskStore::acquire_lock` takes a blocking per-operation file
+    /// lock, and two live instances in one process are unrelated holders to
+    /// flock — they block each other and nested acquisition self-deadlocks.
+    /// `None` means no attempt has been made yet (e.g. `run` hasn't opened it
+    /// — the macOS product embedding constructs `ResultWorkspace` directly —
+    /// or config-dir resolution isn't available); `Message::SmartRedaction`
+    /// opens it lazily exactly once in that case and caches the outcome here.
+    pub(crate) agent_task_store:
+        Option<Result<std::sync::Arc<crate::agent_store::TaskStore>, String>>,
 }
 
 impl ResultWorkspace {
@@ -258,6 +269,7 @@ impl ResultWorkspace {
                 warning_reported: false,
             },
             pixelate_previews: PixelatePreviewCache::new(64 * 1024 * 1024),
+            agent_task_store: None,
             document,
             message,
             image_handle,
@@ -364,6 +376,29 @@ pub(crate) fn build_display_handle(source: &RgbaImage, scale: f32) -> ImageHandl
 }
 
 // ---------------------------------------------------------------------------
+// Agent task store
+// ---------------------------------------------------------------------------
+
+/// Open the process-wide agent task store, formatting the exact user-visible
+/// failure message `Message::SmartRedaction` surfaces as
+/// `WorkbenchError::StorePersist`.
+///
+/// Without a store there is no durable task state and no audit journal, so
+/// failures are logged instead of silently running unpersisted and unaudited.
+fn open_agent_task_store(
+    config_dir: &std::path::Path,
+) -> Result<std::sync::Arc<crate::agent_store::TaskStore>, String> {
+    crate::agent_store::open_process_store(config_dir).map_err(|e| {
+        tracing::error!(
+            target: "rollshot::app::agent_audit_store",
+            error = %e,
+            "task store unavailable: run will not be persisted or audited"
+        );
+        format!("task store unavailable: {e}")
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Runner (Linux standalone window)
 // ---------------------------------------------------------------------------
 
@@ -384,10 +419,14 @@ pub fn run(document: ResultDocument, initial_error: Option<String>) -> Result<()
             .unwrap()
             .take()
             .expect("result workspace boot data already consumed");
-        (
-            ResultWorkspace::new(document, initial_error).with_initial_viewport(INITIAL_VIEWPORT),
-            iced::Task::none(),
-        )
+        let mut ws =
+            ResultWorkspace::new(document, initial_error).with_initial_viewport(INITIAL_VIEWPORT);
+        // Open the process-wide task store exactly once, at boot, so it is
+        // never reopened when the user enters Smart Redaction.
+        if let Ok(config_dir) = crate::daemon::config::rollshot_config_dir() {
+            ws.agent_task_store = Some(open_agent_task_store(&config_dir));
+        }
+        (ws, iced::Task::none())
     };
 
     iced::application(boot, update, view)
@@ -972,7 +1011,8 @@ mod tests {
             wb.cached_base_digest = Some([99u8; 32]); // mismatch with source_binding
             wb.restore_operation_id.next()
         };
-        let binding = SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-default".into(), None);
+        let binding =
+            SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 0, "preset-default".into(), None);
         let _ = update(
             &mut ws,
             Message::Workbench(workbench::WorkbenchMessage::TaskRestoreFinished {
@@ -1018,7 +1058,8 @@ mod tests {
         let run_id =
             rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
                 .unwrap();
-        let binding = SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-default".into(), None);
+        let binding =
+            SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 0, "preset-default".into(), None);
         let snapshot = rollshot_agent::product_task::ProductTaskSnapshot::new(
             task_id.clone(),
             TaskKind::SmartRedactionAuthor,
@@ -1072,7 +1113,12 @@ mod tests {
         };
         let proposal_bytes = serde_json::to_vec(&workbench_proposal_with_candidate()).unwrap();
         let corrupt_ready = running
-            .record_ready_for_review(metadata, payload, Some(proposal_bytes), 30)
+            .record_ready_for_review(
+                metadata,
+                serde_json::to_vec(&payload).unwrap(),
+                Some(proposal_bytes),
+                30,
+            )
             .unwrap();
 
         // Confirm projection fails.
@@ -1129,7 +1175,8 @@ mod tests {
         let run_id =
             rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
                 .unwrap();
-        let binding = SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-default".into(), None);
+        let binding =
+            SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 0, "preset-default".into(), None);
         let snapshot = rollshot_agent::product_task::ProductTaskSnapshot::new(
             task_id.clone(),
             TaskKind::SmartRedactionAuthor,
@@ -1180,7 +1227,12 @@ mod tests {
         };
         let proposal_bytes = serde_json::to_vec(&workbench_proposal_with_candidate()).unwrap();
         running
-            .record_ready_for_review(metadata, payload, Some(proposal_bytes), 30)
+            .record_ready_for_review(
+                metadata,
+                serde_json::to_vec(&payload).unwrap(),
+                Some(proposal_bytes),
+                30,
+            )
             .unwrap()
     }
 

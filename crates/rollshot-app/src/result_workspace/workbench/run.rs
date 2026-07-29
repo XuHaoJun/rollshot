@@ -754,7 +754,7 @@ pub(crate) fn build_authoring_tool_registry(
 /// Returns silently on success or store error (the store error is not
 /// surfaced to the user — the `RunFailed` message carries the real cause).
 async fn persist_terminal_if_possible(
-    task_store: Option<Arc<super::task_store::TaskStore>>,
+    task_store: Option<Arc<crate::agent_store::TaskStore>>,
     task_id: &rollshot_agent::product_task::ProductTaskId,
     _run_id: &rollshot_agent::domain::RunId,
     error: &WorkbenchError,
@@ -785,7 +785,7 @@ async fn persist_terminal_if_possible(
 /// failed — caller should yield a bounded `StorePersist` error and suppress
 /// the proposal.
 async fn persist_terminal_outcome(
-    task_store: Option<Arc<super::task_store::TaskStore>>,
+    task_store: Option<Arc<crate::agent_store::TaskStore>>,
     task_id: &rollshot_agent::product_task::ProductTaskId,
     _run_id: &rollshot_agent::domain::RunId,
     proposal_id_str: &str,
@@ -816,15 +816,27 @@ async fn persist_terminal_outcome(
                 None => return Some("missing run contract for V2 promotion".into()),
             };
 
-            let source_binding = SourceBinding::new(
+            // The source binding must be SmartRedaction here; if it is not, the
+            // task state is corrupted (invariant violation).
+            let (current_preset_id, current_active_preset_revision_id) =
+                match current.source_binding() {
+                    SourceBinding::SmartRedaction {
+                        preset_id,
+                        active_preset_revision_id,
+                        ..
+                    } => (preset_id.clone(), active_preset_revision_id.clone()),
+                    _ => return Some(
+                        "persist_terminal_outcome: unexpected non-SmartRedaction source binding"
+                            .into(),
+                    ),
+                };
+
+            let source_binding = SourceBinding::smart_redaction(
                 *content_binding.base_image_digest(),
                 *content_binding.annotation_state_digest(),
                 content_binding.state_id(),
-                current.source_binding().preset_id().to_owned(),
-                current
-                    .source_binding()
-                    .active_preset_revision_id()
-                    .map(String::from),
+                current_preset_id,
+                current_active_preset_revision_id,
             );
             let artifact_id = ArtifactId::parse(format!("artifact-{}", uuid::Uuid::new_v4()))
                 .expect("v4 UUID is valid");
@@ -894,7 +906,11 @@ async fn persist_terminal_outcome(
                 Ok(b) => Some(b),
                 Err(e) => return Some(e),
             };
-            match current.record_ready_for_review(metadata, payload, proposal_payload, now) {
+            let payload_bytes = match serde_json::to_vec(&payload) {
+                Ok(b) => b,
+                Err(e) => return Some(format!("serialize review payload: {e}")),
+            };
+            match current.record_ready_for_review(metadata, payload_bytes, proposal_payload, now) {
                 Ok(s) => s,
                 Err(e) => return Some(format!("record ready: {e}")),
             }
@@ -956,7 +972,7 @@ pub fn start_agent_run(
     budget: &RunBudget,
     session: rollshot_agent::domain::AgentSession,
     payload_mode: PayloadMode,
-    task_store: Option<Arc<super::task_store::TaskStore>>,
+    task_store: Option<Arc<crate::agent_store::TaskStore>>,
 ) -> Result<
     (
         iced::Task<crate::result_workspace::Message>,
@@ -1009,7 +1025,7 @@ pub fn start_agent_run(
                 ProductTaskSnapshot, SourceBinding, TaskAttempt, TaskAttemptId,
             };
             let now = chrono::Utc::now().timestamp_millis();
-            let source_binding = SourceBinding::new(
+            let source_binding = SourceBinding::smart_redaction(
                 *content_binding.base_image_digest(),
                 *content_binding.annotation_state_digest(),
                 content_binding.state_id(),
@@ -1208,7 +1224,7 @@ pub fn start_agent_run(
             task_id.clone(),
             rollshot_agent::product_task::TaskAttemptId::new(1),
             run_id.clone(),
-            content_binding.clone(),
+            rollshot_agent::authority::AuthoritySubject::Document(content_binding.clone()),
         );
         let authority = match rollshot_agent::authority::AuthoritySnapshot::new(
             authority_binding,
@@ -1251,7 +1267,7 @@ pub fn start_agent_run(
             let bind_result = tokio::task::spawn_blocking(move || {
                 let current = store_clone.load(&task_id_clone)?;
                 let bound = current.bind_run_contract(contract, now)
-                    .map_err(|e| super::task_store::TaskStoreError::PreCommit {
+                    .map_err(|e| crate::agent_store::TaskStoreError::PreCommit {
                         reason: format!("bind run contract: {e}"),
                     })?;
                 store_clone.transition_audited(&current, &bound, event_id, now)
@@ -1313,7 +1329,7 @@ pub fn start_agent_run(
                                 rollshot_agent::continuity::RunContinuitySource::Durable {
                                     expected: Box::new(projection),
                                     source: std::sync::Arc::new(
-                                        super::task_store::TaskStoreContinuitySource::new(store.clone()),
+                                        crate::agent_store::TaskStoreContinuitySource::new(store.clone()),
                                     ),
                                 }
                             }
@@ -1480,9 +1496,9 @@ pub fn start_agent_run(
         let sink = ChannelEventSink { tx };
 
         // Build audit sink from task store if available.
-        let audit_sink: Option<super::audit_store::TaskAuditSink> =
+        let audit_sink: Option<crate::agent_store::TaskAuditSink> =
             task_store.as_ref().map(|store| {
-                super::audit_store::TaskAuditSink::new(store.clone())
+                crate::agent_store::TaskAuditSink::new(store.clone())
             });
 
         // B4: tokio::spawn inside the stream block (runtime context).
@@ -3406,7 +3422,7 @@ mod reducer_tests {
 
     #[test]
     fn running_is_persisted_before_setup() {
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
         use rollshot_agent::product_task::{
             ProductTaskSnapshot, SourceBinding, TaskAttempt, TaskAttemptId, TaskKind,
         };
@@ -3423,7 +3439,8 @@ mod reducer_tests {
 
         // Simulate what the stream does: create a running snapshot.
         let now = chrono::Utc::now().timestamp_millis();
-        let source_binding = SourceBinding::new([0u8; 32], [0u8; 32], 0, "test".into(), None);
+        let source_binding =
+            SourceBinding::smart_redaction([0u8; 32], [0u8; 32], 0, "test".into(), None);
         let snapshot = ProductTaskSnapshot::new(
             task_id.clone(),
             TaskKind::SmartRedactionAuthor,
@@ -3448,7 +3465,7 @@ mod reducer_tests {
 
     #[test]
     fn ready_artifact_precedes_correlated_terminal() {
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
         use rollshot_agent::product_task::{
             ArtifactId, ArtifactKind, ArtifactRevision, PayloadConfigV1, PayloadDryRunV1,
             PayloadProposalV1, PayloadSourceV1, ProductArtifactMetadata, ProductTaskSnapshot,
@@ -3468,7 +3485,8 @@ mod reducer_tests {
 
         // Create and persist running snapshot.
         let now = chrono::Utc::now().timestamp_millis();
-        let source_binding = SourceBinding::new([0u8; 32], [0u8; 32], 0, "test".into(), None);
+        let source_binding =
+            SourceBinding::smart_redaction([0u8; 32], [0u8; 32], 0, "test".into(), None);
         let snapshot = ProductTaskSnapshot::new(
             task_id.clone(),
             TaskKind::SmartRedactionAuthor,
@@ -3488,7 +3506,7 @@ mod reducer_tests {
             ArtifactKind::SmartRedaction,
             1,
             String::new(),
-            SourceBinding::new([1u8; 32], [0u8; 32], 0, "test".into(), None),
+            SourceBinding::smart_redaction([1u8; 32], [0u8; 32], 0, "test".into(), None),
             task_id.clone(),
             running.attempts().last().unwrap().attempt_id(),
             run_id.clone(),
@@ -3522,7 +3540,7 @@ mod reducer_tests {
             },
         };
         let ready = running
-            .record_ready_for_review(metadata, payload, None, now2)
+            .record_ready_for_review(metadata, serde_json::to_vec(&payload).unwrap(), None, now2)
             .unwrap();
         store.compare_and_swap(&running, &ready).unwrap();
 
@@ -3538,7 +3556,7 @@ mod reducer_tests {
 
     #[test]
     fn store_precommit_failure_delivers_no_proposal() {
-        use super::super::task_store::{Failpoint, TaskStore};
+        use crate::agent_store::{Failpoint, TaskStore};
         use rollshot_agent::product_task::{
             ProductTaskSnapshot, SourceBinding, TaskAttempt, TaskAttemptId, TaskKind,
         };
@@ -3555,7 +3573,8 @@ mod reducer_tests {
 
         // Create running snapshot (without failpoint).
         let now = chrono::Utc::now().timestamp_millis();
-        let source_binding = SourceBinding::new([0u8; 32], [0u8; 32], 0, "test".into(), None);
+        let source_binding =
+            SourceBinding::smart_redaction([0u8; 32], [0u8; 32], 0, "test".into(), None);
         let snapshot = ProductTaskSnapshot::new(
             task_id.clone(),
             TaskKind::SmartRedactionAuthor,
@@ -3589,7 +3608,7 @@ mod reducer_tests {
 
     #[tokio::test]
     async fn setup_failure_persists_terminal() {
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
         use rollshot_agent::product_task::{
             ProductTaskSnapshot, SourceBinding, TaskAttempt, TaskAttemptId, TaskKind, TaskStatus,
             TaskTerminal,
@@ -3607,7 +3626,8 @@ mod reducer_tests {
 
         // Create and persist running snapshot with real source binding.
         let now = chrono::Utc::now().timestamp_millis();
-        let source_binding = SourceBinding::new([0u8; 32], [0u8; 32], 0, "test".into(), None);
+        let source_binding =
+            SourceBinding::smart_redaction([0u8; 32], [0u8; 32], 0, "test".into(), None);
         let snapshot = ProductTaskSnapshot::new(
             task_id.clone(),
             TaskKind::SmartRedactionAuthor,
@@ -3854,14 +3874,19 @@ mod reducer_tests {
 
         let proposal_bytes = serde_json::to_vec(&proposal).unwrap();
         running
-            .record_ready_for_review(metadata, payload, Some(proposal_bytes), now + 2)
+            .record_ready_for_review(
+                metadata,
+                serde_json::to_vec(&payload).unwrap(),
+                Some(proposal_bytes),
+                now + 2,
+            )
             .unwrap()
     }
 
     #[test]
     fn restore_compatible_review() {
         // 1. matching content restores exact artifact without provider call.
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
 
         let tmp = tempfile::tempdir().unwrap();
         let store = TaskStore::open(tmp.path()).unwrap();
@@ -3869,7 +3894,7 @@ mod reducer_tests {
             "task-00000000-0000-4000-8000-000000000001",
         )
         .unwrap();
-        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
         let snapshot = ready_snapshot_with_proposal(&task_id, binding.clone());
         store.create(&snapshot).unwrap();
 
@@ -3908,7 +3933,7 @@ mod reducer_tests {
     fn same_state_different_image_is_ignored() {
         // 2. unrelated image with same state ID is ignored;
         //    its task remains ReadyForReview (not restored, not stale).
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
 
         let tmp = tempfile::tempdir().unwrap();
         let store = TaskStore::open(tmp.path()).unwrap();
@@ -3917,12 +3942,12 @@ mod reducer_tests {
         )
         .unwrap();
         // Task was created with base_image = [1u8; 32].
-        let task_binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let task_binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
         let snapshot = ready_snapshot_with_proposal(&task_id, task_binding);
         store.create(&snapshot).unwrap();
 
         // Current source has a DIFFERENT base image but same state_id.
-        let current_binding = Sb::new([99u8; 32], [2u8; 32], 0, "p".into(), None);
+        let current_binding = Sb::smart_redaction([99u8; 32], [2u8; 32], 0, "p".into(), None);
         let result = store.reconcile_for_source(&current_binding, 2000).unwrap();
 
         // reconcile_for_source returns None — unrelated image skipped.
@@ -3939,7 +3964,7 @@ mod reducer_tests {
     #[test]
     fn same_image_changed_annotations_marks_stale() {
         // 3. same image, different annotation state → task marked stale.
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
 
         let tmp = tempfile::tempdir().unwrap();
         let store = TaskStore::open(tmp.path()).unwrap();
@@ -3948,12 +3973,12 @@ mod reducer_tests {
         )
         .unwrap();
         // Task: base=[1], annotations=[2], state_id=0.
-        let task_binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let task_binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
         let snapshot = ready_snapshot_with_proposal(&task_id, task_binding);
         store.create(&snapshot).unwrap();
 
         // Current: base=[1], annotations=[99], state_id=0.
-        let current_binding = Sb::new([1u8; 32], [99u8; 32], 0, "p".into(), None);
+        let current_binding = Sb::smart_redaction([1u8; 32], [99u8; 32], 0, "p".into(), None);
         let result = store.reconcile_for_source(&current_binding, 2000).unwrap();
 
         assert!(result.is_none(), "changed annotations must not restore");
@@ -3968,7 +3993,7 @@ mod reducer_tests {
     #[test]
     fn running_becomes_interrupted_on_reconcile() {
         // 4. running/applying → interrupted on reconcile_for_source.
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
         use rollshot_agent::product_task::{ProductTaskSnapshot, TaskAttempt, TaskAttemptId};
 
         let tmp = tempfile::tempdir().unwrap();
@@ -3977,7 +4002,7 @@ mod reducer_tests {
             "task-00000000-0000-4000-8000-000000000001",
         )
         .unwrap();
-        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
         let snapshot = ProductTaskSnapshot::new(
             task_id.clone(),
@@ -3994,8 +4019,10 @@ mod reducer_tests {
         );
         let running = snapshot.start_attempt(attempt, 20).unwrap();
         store.create(&running).unwrap();
+        drop(store);
+        let store = TaskStore::open(tmp.path()).unwrap();
 
-        // Reconcile — running task becomes interrupted.
+        // Reopen and reconcile — the abandoned running task becomes interrupted.
         let result = store.reconcile_for_source(&binding, 2000).unwrap();
         assert!(
             result.is_none(),
@@ -4014,7 +4041,7 @@ mod reducer_tests {
     fn stale_restore_completion_is_ignored() {
         // 5. old restore completion delivered after a new restore/run is ignored.
         let mut ws = ws_with_workbench();
-        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
         // Set up workbench with a restore operation in progress.
         let stale_op = {
@@ -4054,7 +4081,7 @@ mod reducer_tests {
         // transaction is aborted and no committed event exists. The run
         // launch path returns before dispatch on this error, so no
         // AttemptStarted evidence can follow it.
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
         use rollshot_agent::audit::AuditEventV1;
         use rollshot_agent::product_task::ProductTaskSnapshot;
 
@@ -4069,7 +4096,7 @@ mod reducer_tests {
         let snapshot = ProductTaskSnapshot::new(
             task_id.clone(),
             Tk::SmartRedactionAuthor,
-            Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None),
+            Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None),
             10,
         )
         .unwrap();
@@ -4116,7 +4143,7 @@ mod reducer_tests {
         // conflict), the audit transaction is aborted and no ArtifactPromoted
         // event is committed.  We force a CAS conflict by advancing the
         // store via a second handle before the audited transition.
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
         use rollshot_agent::audit::AuditEventV1;
         use rollshot_agent::product_task::{
             ProductTaskSnapshot, TaskAttempt, TaskAttemptId, TaskTerminal,
@@ -4131,7 +4158,7 @@ mod reducer_tests {
         let run_id =
             rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000041")
                 .unwrap();
-        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
         let snapshot =
             ProductTaskSnapshot::new(task_id.clone(), Tk::SmartRedactionAuthor, binding, 10)
@@ -4141,13 +4168,13 @@ mod reducer_tests {
 
         store.create(&running).unwrap();
 
-        // Advance store via second handle — creates CAS conflict.
-        let store2 = TaskStore::open(tmp.path()).unwrap();
-        let loaded2 = store2.load(&task_id).unwrap();
+        // Advance store to terminal via the same handle — creates CAS
+        // conflict when the stale `running` snapshot is used below.
+        let loaded2 = store.load(&task_id).unwrap();
         let terminal2 = loaded2
             .record_terminal(TaskTerminal::RuntimeFailure, 25)
             .unwrap();
-        store2.compare_and_swap(&loaded2, &terminal2).unwrap();
+        store.compare_and_swap(&loaded2, &terminal2).unwrap();
 
         // Attempt audited transition from the original running snapshot.
         // CAS conflict: disk has terminal2 (rev 2), expected is running (rev 1).
@@ -4186,7 +4213,7 @@ mod reducer_tests {
         // When the provider returns a failure (e.g. ProviderFailure),
         // the terminal is a failure state, not ReadyForReview.
         // This means no ArtifactPromoted audit event could be committed.
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
         use rollshot_agent::product_task::{
             ProductTaskSnapshot, TaskAttempt, TaskAttemptId, TaskTerminal,
         };
@@ -4200,7 +4227,7 @@ mod reducer_tests {
         let run_id =
             rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000042")
                 .unwrap();
-        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
         let snapshot =
             ProductTaskSnapshot::new(task_id.clone(), Tk::SmartRedactionAuthor, binding, 10)
@@ -4244,7 +4271,7 @@ mod reducer_tests {
         let run_id =
             rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000043")
                 .unwrap();
-        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
         let snapshot =
             ProductTaskSnapshot::new_v2(task_id.clone(), Tk::SmartRedactionAuthor, binding, 10)
@@ -4294,7 +4321,7 @@ mod reducer_tests {
         let run_id =
             rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000044")
                 .unwrap();
-        let _binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let _binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
         // Without a store, no persistence path is available.
         // The persist_* helpers return silently (no error surfaced to user).
@@ -4353,7 +4380,7 @@ mod reducer_tests {
             policy_revision: "rollshot-v1".to_owned(),
             disclosure_ceiling: DisclosureCeiling::FullScreenshot,
             existing_product_capture: true,
-            document_binding_digest: "ab".repeat(32),
+            subject_digest: "ab".repeat(32),
             prepared_capabilities: vec![PreparedCapability::RegionFeatures],
             granted_operations: vec![
                 RunOperation::ReadDraft,
@@ -4451,7 +4478,7 @@ mod reducer_tests {
             ArtifactKind::SmartRedaction,
             2,
             payload_sha,
-            Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None),
+            Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None),
             rollshot_agent::product_task::ProductTaskId::parse(
                 "task-00000000-0000-4000-8000-000000000001",
             )
@@ -4487,7 +4514,7 @@ mod reducer_tests {
         let snapshot = ProductTaskSnapshot::new_v2(
             task_id,
             Tk::SmartRedactionAuthor,
-            Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None),
+            Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None),
             10,
         )
         .unwrap();
@@ -4517,7 +4544,7 @@ mod reducer_tests {
             },
         };
         bound
-            .record_ready_for_review(meta, payload, None, 30)
+            .record_ready_for_review(meta, serde_json::to_vec(&payload).unwrap(), None, 30)
             .unwrap()
     }
 
@@ -4639,7 +4666,7 @@ mod reducer_tests {
         // This test exercises both the in-memory reducer and the store-level
         // CAS path to prove that contract binding is a prerequisite for
         // promotion at every level of the run flow.
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
         use rollshot_agent::product_task::{ProductTaskSnapshot, TaskAttempt, TaskAttemptId};
 
         let task_id = rollshot_agent::product_task::ProductTaskId::parse(
@@ -4649,7 +4676,7 @@ mod reducer_tests {
         let run_id =
             rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
                 .unwrap();
-        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
         let snapshot =
             ProductTaskSnapshot::new_v2(task_id.clone(), Tk::SmartRedactionAuthor, binding, 10)
@@ -4670,7 +4697,7 @@ mod reducer_tests {
             rollshot_agent::product_task::ArtifactKind::SmartRedaction,
             1,
             String::new(),
-            Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None),
+            Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None),
             rollshot_agent::product_task::ProductTaskId::parse(
                 "task-00000000-0000-4000-8000-000000000001",
             )
@@ -4706,7 +4733,8 @@ mod reducer_tests {
                 budget_dimensions: std::collections::BTreeMap::new(),
             },
         };
-        let result = running.record_ready_for_review(meta, payload, None, 30);
+        let result =
+            running.record_ready_for_review(meta, serde_json::to_vec(&payload).unwrap(), None, 30);
         assert!(
             matches!(
                 result,
@@ -4767,7 +4795,7 @@ mod reducer_tests {
             },
         };
         let ready = stored_after
-            .record_ready_for_review(v2_meta, v2_payload, None, 30)
+            .record_ready_for_review(v2_meta, serde_json::to_vec(&v2_payload).unwrap(), None, 30)
             .unwrap();
         assert_eq!(ready.status(), Ts::ReadyForReview);
     }
@@ -4778,7 +4806,7 @@ mod reducer_tests {
         // Running and no ReadyForReview is produced.  Additionally verifies
         // that promotion is suppressed (no provider could have run) by
         // attempting record_ready_for_review on the CAS-failed store state.
-        use super::super::task_store::{Failpoint, TaskStore};
+        use crate::agent_store::{Failpoint, TaskStore};
         use rollshot_agent::product_task::{ProductTaskSnapshot, TaskAttempt, TaskAttemptId};
 
         let tmp = tempfile::tempdir().unwrap();
@@ -4790,7 +4818,7 @@ mod reducer_tests {
         let run_id =
             rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
                 .unwrap();
-        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
         let snapshot =
             ProductTaskSnapshot::new_v2(task_id.clone(), Tk::SmartRedactionAuthor, binding, 10)
@@ -4833,7 +4861,7 @@ mod reducer_tests {
             rollshot_agent::product_task::ArtifactKind::SmartRedaction,
             1,
             String::new(),
-            Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None),
+            Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None),
             rollshot_agent::product_task::ProductTaskId::parse(
                 "task-00000000-0000-4000-8000-000000000001",
             )
@@ -4869,7 +4897,8 @@ mod reducer_tests {
                 budget_dimensions: std::collections::BTreeMap::new(),
             },
         };
-        let promo_result = loaded.record_ready_for_review(meta, payload, None, 30);
+        let promo_result =
+            loaded.record_ready_for_review(meta, serde_json::to_vec(&payload).unwrap(), None, 30);
         assert!(
             matches!(
                 promo_result,
@@ -4895,7 +4924,7 @@ mod reducer_tests {
         let run_id =
             rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
                 .unwrap();
-        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
         let snapshot =
             ProductTaskSnapshot::new_v2(task_id.clone(), Tk::SmartRedactionAuthor, binding, 10)
@@ -4924,7 +4953,7 @@ mod reducer_tests {
             rollshot_agent::product_task::ArtifactKind::SmartRedaction,
             1,
             String::new(),
-            Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None),
+            Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None),
             task_id.clone(),
             rollshot_agent::product_task::TaskAttemptId::new(1),
             wrong_run_id,
@@ -4957,7 +4986,8 @@ mod reducer_tests {
                 budget_dimensions: std::collections::BTreeMap::new(),
             },
         };
-        let result = bound.record_ready_for_review(meta, payload, None, 30);
+        let result =
+            bound.record_ready_for_review(meta, serde_json::to_vec(&payload).unwrap(), None, 30);
         assert!(
             matches!(
                 result,
@@ -4978,7 +5008,7 @@ mod reducer_tests {
         // in the contract matches.  The store's CAS compares
         // snapshot_revision: a stale snapshot has a lower revision and
         // therefore loses the CAS race.
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
         use rollshot_agent::product_task::{ProductTaskSnapshot, TaskAttempt, TaskAttemptId};
 
         let task_id = rollshot_agent::product_task::ProductTaskId::parse(
@@ -4990,7 +5020,7 @@ mod reducer_tests {
                 .unwrap();
 
         // Original source binding (what the run was started with).
-        let original_binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let original_binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
 
         let snapshot = ProductTaskSnapshot::new_v2(
             task_id.clone(),
@@ -5054,7 +5084,7 @@ mod reducer_tests {
 
     #[test]
     fn continuity_source_loads_exact_snapshot_after_cas_bind() {
-        use super::super::task_store::{TaskStore, TaskStoreContinuitySource};
+        use crate::agent_store::{TaskStore, TaskStoreContinuitySource};
         use rollshot_agent::product_task::{ProductTaskSnapshot, TaskAttempt, TaskAttemptId};
 
         let task_id = rollshot_agent::product_task::ProductTaskId::parse(
@@ -5070,7 +5100,7 @@ mod reducer_tests {
         let snapshot = ProductTaskSnapshot::new(
             task_id.clone(),
             Tk::SmartRedactionAuthor,
-            Sb::new([1u8; 32], [2u8; 32], 0, "preset".into(), None),
+            Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "preset".into(), None),
             10,
         )
         .unwrap();
@@ -5102,7 +5132,7 @@ mod reducer_tests {
 
     #[test]
     fn continuity_source_reload_reflects_store_changes() {
-        use super::super::task_store::{TaskStore, TaskStoreContinuitySource};
+        use crate::agent_store::{TaskStore, TaskStoreContinuitySource};
         use rollshot_agent::product_task::{ProductTaskSnapshot, TaskAttempt, TaskAttemptId};
 
         let task_id = rollshot_agent::product_task::ProductTaskId::parse(
@@ -5118,7 +5148,7 @@ mod reducer_tests {
         let snapshot = ProductTaskSnapshot::new(
             task_id.clone(),
             Tk::SmartRedactionAuthor,
-            Sb::new([1u8; 32], [2u8; 32], 0, "preset".into(), None),
+            Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "preset".into(), None),
             10,
         )
         .unwrap();
@@ -5126,7 +5156,8 @@ mod reducer_tests {
         let running = snapshot.start_attempt(attempt, 20).unwrap();
         store.create(&running).unwrap();
 
-        let source = TaskStoreContinuitySource::new(std::sync::Arc::new(store));
+        let store_arc = std::sync::Arc::new(store);
+        let source = TaskStoreContinuitySource::new(store_arc.clone());
         let source: std::sync::Arc<dyn rollshot_agent::continuity::ContinuitySnapshotSource> =
             std::sync::Arc::new(source);
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -5135,16 +5166,15 @@ mod reducer_tests {
         let first = rt.block_on(source.clone().load(task_id.clone())).unwrap();
         assert_eq!(first.status(), Ts::Running);
 
-        // Advance store to terminal.
-        let store2 = TaskStore::open(tmp.path()).unwrap();
-        let loaded = store2.load(&task_id).unwrap();
+        // Advance store to terminal via the same Arc handle.
+        let loaded = store_arc.load(&task_id).unwrap();
         let terminal = loaded
             .record_terminal(
                 rollshot_agent::product_task::TaskTerminal::RuntimeFailure,
                 30,
             )
             .unwrap();
-        store2.compare_and_swap(&loaded, &terminal).unwrap();
+        store_arc.compare_and_swap(&loaded, &terminal).unwrap();
 
         // Second load: terminal snapshot (revision changed).
         let second = rt.block_on(source.load(task_id.clone())).unwrap();
@@ -5154,7 +5184,7 @@ mod reducer_tests {
 
     #[test]
     fn continuity_source_returns_missing_for_empty_store() {
-        use super::super::task_store::{TaskStore, TaskStoreContinuitySource};
+        use crate::agent_store::{TaskStore, TaskStoreContinuitySource};
 
         let task_id = rollshot_agent::product_task::ProductTaskId::parse(
             "task-00000000-0000-4000-8000-000000000001",
@@ -5180,7 +5210,7 @@ mod reducer_tests {
     fn restore_validates_projection_before_display() {
         // Restored ReadyForReview with valid projection populates proposal and
         // caches the snapshot for the apply CAS path.
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
         use rollshot_agent::continuity::{ContinuityProjectionV1, ReviewContinuityStateV1};
 
         let tmp = tempfile::tempdir().unwrap();
@@ -5189,7 +5219,7 @@ mod reducer_tests {
             "task-00000000-0000-4000-8000-000000000001",
         )
         .unwrap();
-        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
         let snapshot = ready_snapshot_with_proposal(&task_id, binding.clone());
         store.create(&snapshot).unwrap();
 
@@ -5257,7 +5287,7 @@ mod reducer_tests {
             let run_id =
                 rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
                     .unwrap();
-            let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+            let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
             let snapshot = rollshot_agent::product_task::ProductTaskSnapshot::new(
                 task_id.clone(),
                 Tk::SmartRedactionAuthor,
@@ -5312,7 +5342,12 @@ mod reducer_tests {
             )
             .unwrap();
             running
-                .record_ready_for_review(metadata, payload, Some(proposal_bytes), 30)
+                .record_ready_for_review(
+                    metadata,
+                    serde_json::to_vec(&payload).unwrap(),
+                    Some(proposal_bytes),
+                    30,
+                )
                 .unwrap()
         };
 
@@ -5341,7 +5376,7 @@ mod reducer_tests {
     fn restore_caches_snapshot_for_apply_cas() {
         // After a successful restore, the cached_task_snapshot must be populated
         // so the async apply CAS path can use it.
-        use super::super::task_store::TaskStore;
+        use crate::agent_store::TaskStore;
 
         let tmp = tempfile::tempdir().unwrap();
         let store = TaskStore::open(tmp.path()).unwrap();
@@ -5349,7 +5384,7 @@ mod reducer_tests {
             "task-00000000-0000-4000-8000-000000000001",
         )
         .unwrap();
-        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
         let snapshot = ready_snapshot_with_proposal(&task_id, binding.clone());
         store.create(&snapshot).unwrap();
 
@@ -5403,7 +5438,7 @@ mod reducer_tests {
         let run_id =
             rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
                 .unwrap();
-        let binding = Sb::new([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let binding = Sb::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
         let snapshot = rollshot_agent::product_task::ProductTaskSnapshot::new(
             task_id.clone(),
             Tk::SmartRedactionAuthor,
@@ -5463,7 +5498,12 @@ mod reducer_tests {
         )
         .unwrap();
         let ready = running
-            .record_ready_for_review(metadata, payload, Some(proposal_bytes), 30)
+            .record_ready_for_review(
+                metadata,
+                serde_json::to_vec(&payload).unwrap(),
+                Some(proposal_bytes),
+                30,
+            )
             .unwrap();
 
         // Projection must fail due to task ID mismatch.
@@ -5513,7 +5553,7 @@ mod dropped_display_events {
     //! product must still repair visible state from the authoritative task
     //! snapshot — never from audit history.
 
-    use super::super::task_store::TaskStore;
+    use crate::agent_store::TaskStore;
     use rollshot_agent::audit::AuditEventId;
     use rollshot_agent::continuity::{ContinuityProjectionV1, ReviewContinuityStateV1};
     use rollshot_agent::product_task::{
@@ -5536,7 +5576,7 @@ mod dropped_display_events {
     }
 
     fn binding() -> SourceBinding {
-        SourceBinding::new([7u8; 32], [8u8; 32], 0, "preset-repair".into(), None)
+        SourceBinding::smart_redaction([7u8; 32], [8u8; 32], 0, "preset-repair".into(), None)
     }
 
     fn payload() -> SmartRedactionReviewPayload {
@@ -5561,6 +5601,10 @@ mod dropped_display_events {
                 budget_dimensions: std::collections::BTreeMap::new(),
             },
         }
+    }
+
+    fn payload_bytes() -> Vec<u8> {
+        serde_json::to_vec(&payload()).expect("fixture payload serializes")
     }
 
     fn metadata(task: &ProductTaskSnapshot, n: u64, now: i64) -> ProductArtifactMetadata {
@@ -5626,7 +5670,7 @@ mod dropped_display_events {
         let ready = running
             .record_ready_for_review(
                 metadata(&running, n, BASE_MS + 1),
-                payload(),
+                payload_bytes(),
                 None,
                 BASE_MS + 1,
             )

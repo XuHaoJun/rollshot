@@ -1,5 +1,6 @@
 pub mod audit;
 pub mod authority;
+pub mod captions;
 pub mod continuity;
 pub mod domain;
 pub mod driver;

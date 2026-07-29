@@ -126,6 +126,7 @@ impl TaskAttemptId {
 pub enum TaskKind {
     SmartRedactionAuthor,
     SmartRedactionImprove,
+    ActionGuideCaptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -168,6 +169,7 @@ pub enum TaskTerminal {
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
     SmartRedaction,
+    ActionGuideCaptions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -181,25 +183,122 @@ pub enum PayloadMode {
 // Source binding
 // ========================================================================
 
-/// Content binding: base-image SHA-256 + annotation-state SHA-256 + state ID.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SourceBinding {
-    base_image_sha256: [u8; 32],
-    annotation_state_sha256: [u8; 32],
-    document_state_id: u32,
-    preset_id: String,
-    active_preset_revision_id: Option<String>,
+/// Domain-tagged binding identifying the source a task acts on.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(tag = "domain", rename_all = "snake_case")]
+pub enum SourceBinding {
+    SmartRedaction {
+        base_image_sha256: [u8; 32],
+        annotation_state_sha256: [u8; 32],
+        document_state_id: u32,
+        preset_id: String,
+        active_preset_revision_id: Option<String>,
+    },
+    ActionGuideProject {
+        /// SHA-256 of the canonicalized project root path. The project manifest
+        /// has no stable identity, so the path is the only one available.
+        project_root_sha256: [u8; 32],
+        revision: u64,
+        projection_digest: String,
+    },
+    ActionGuideEphemeralGuide {
+        guide_digest: String,
+    },
+}
+
+/// Deserialization shim accepting both the tagged form and the pre-migration
+/// flat Smart Redaction object. Tagged is tried first; a flat object can only
+/// have been a Smart Redaction binding, because no other domain existed.
+impl<'de> Deserialize<'de> for SourceBinding {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(tag = "domain", rename_all = "snake_case")]
+        enum Tagged {
+            SmartRedaction {
+                base_image_sha256: [u8; 32],
+                annotation_state_sha256: [u8; 32],
+                document_state_id: u32,
+                preset_id: String,
+                active_preset_revision_id: Option<String>,
+            },
+            ActionGuideProject {
+                project_root_sha256: [u8; 32],
+                revision: u64,
+                projection_digest: String,
+            },
+            ActionGuideEphemeralGuide {
+                guide_digest: String,
+            },
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct LegacyFlat {
+            base_image_sha256: [u8; 32],
+            annotation_state_sha256: [u8; 32],
+            document_state_id: u32,
+            preset_id: String,
+            #[serde(default)]
+            active_preset_revision_id: Option<String>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Tagged(Tagged),
+            LegacyFlat(LegacyFlat),
+        }
+
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::Tagged(Tagged::SmartRedaction {
+                base_image_sha256,
+                annotation_state_sha256,
+                document_state_id,
+                preset_id,
+                active_preset_revision_id,
+            }) => Self::SmartRedaction {
+                base_image_sha256,
+                annotation_state_sha256,
+                document_state_id,
+                preset_id,
+                active_preset_revision_id,
+            },
+            Repr::Tagged(Tagged::ActionGuideProject {
+                project_root_sha256,
+                revision,
+                projection_digest,
+            }) => Self::ActionGuideProject {
+                project_root_sha256,
+                revision,
+                projection_digest,
+            },
+            Repr::Tagged(Tagged::ActionGuideEphemeralGuide { guide_digest }) => {
+                Self::ActionGuideEphemeralGuide { guide_digest }
+            }
+            Repr::LegacyFlat(flat) => Self::SmartRedaction {
+                base_image_sha256: flat.base_image_sha256,
+                annotation_state_sha256: flat.annotation_state_sha256,
+                document_state_id: flat.document_state_id,
+                preset_id: flat.preset_id,
+                active_preset_revision_id: flat.active_preset_revision_id,
+            },
+        })
+    }
 }
 
 impl SourceBinding {
-    pub fn new(
+    /// Constructor preserving the pre-migration argument order.
+    pub fn smart_redaction(
         base_image_sha256: [u8; 32],
         annotation_state_sha256: [u8; 32],
         document_state_id: u32,
         preset_id: String,
         active_preset_revision_id: Option<String>,
     ) -> Self {
-        Self {
+        Self::SmartRedaction {
             base_image_sha256,
             annotation_state_sha256,
             document_state_id,
@@ -208,24 +307,83 @@ impl SourceBinding {
         }
     }
 
-    pub fn base_image_sha256(&self) -> &[u8; 32] {
-        &self.base_image_sha256
+    /// Smart Redaction base-image digest, or `None` for other domains.
+    pub fn smart_redaction_base_image_sha256(&self) -> Option<&[u8; 32]> {
+        match self {
+            Self::SmartRedaction {
+                base_image_sha256, ..
+            } => Some(base_image_sha256),
+            _ => None,
+        }
     }
 
-    pub fn annotation_state_sha256(&self) -> &[u8; 32] {
-        &self.annotation_state_sha256
+    /// Is this binding about the same source as `other`, regardless of how
+    /// stale either is? Bindings from different domains never match.
+    pub fn identity_matches(&self, other: &SourceBinding) -> bool {
+        match (self, other) {
+            (
+                Self::SmartRedaction {
+                    base_image_sha256: a,
+                    ..
+                },
+                Self::SmartRedaction {
+                    base_image_sha256: b,
+                    ..
+                },
+            ) => a == b,
+            (
+                Self::ActionGuideProject {
+                    project_root_sha256: a,
+                    ..
+                },
+                Self::ActionGuideProject {
+                    project_root_sha256: b,
+                    ..
+                },
+            ) => a == b,
+            (
+                Self::ActionGuideEphemeralGuide { guide_digest: a },
+                Self::ActionGuideEphemeralGuide { guide_digest: b },
+            ) => a == b,
+            _ => false,
+        }
     }
 
-    pub fn document_state_id(&self) -> u32 {
-        self.document_state_id
-    }
-
-    pub fn preset_id(&self) -> &str {
-        &self.preset_id
-    }
-
-    pub fn active_preset_revision_id(&self) -> Option<&str> {
-        self.active_preset_revision_id.as_deref()
+    /// Given matching identity, is this binding still valid for `other`'s state?
+    ///
+    /// Ephemeral guides are trivially fresh: identity and freshness are the same
+    /// digest. Their staleness after a restart is enforced by the store's
+    /// open-time sweep, not by this comparison.
+    pub fn freshness_matches(&self, other: &SourceBinding) -> bool {
+        match (self, other) {
+            (
+                Self::SmartRedaction {
+                    annotation_state_sha256: a,
+                    ..
+                },
+                Self::SmartRedaction {
+                    annotation_state_sha256: b,
+                    ..
+                },
+            ) => a == b,
+            (
+                Self::ActionGuideProject {
+                    revision: ra,
+                    projection_digest: da,
+                    ..
+                },
+                Self::ActionGuideProject {
+                    revision: rb,
+                    projection_digest: db,
+                    ..
+                },
+            ) => ra == rb && da == db,
+            (
+                Self::ActionGuideEphemeralGuide { guide_digest: a },
+                Self::ActionGuideEphemeralGuide { guide_digest: b },
+            ) => a == b,
+            _ => false,
+        }
     }
 }
 
@@ -286,7 +444,21 @@ impl TaskAttempt {
 // Artifact metadata
 // ========================================================================
 
+/// Kind-specific artifact summary. Replaces the flat Smart Redaction dry-run
+/// counters that previously lived on `ProductArtifactMetadata`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ArtifactSummary {
+    SmartRedaction {
+        dry_run_candidate_count: u32,
+        dry_run_affected_area: f32,
+    },
+    ActionGuideCaptions {
+        suggestion_count: u32,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProductArtifactMetadata {
     artifact_id: ArtifactId,
     artifact_revision: ArtifactRevision,
@@ -301,15 +473,87 @@ pub struct ProductArtifactMetadata {
     provider_id: String,
     model_id: String,
     run_config_digest: String,
-    dry_run_candidate_count: u32,
-    dry_run_affected_area: f32,
+    summary: ArtifactSummary,
     created_at_unix_ms: i64,
     /// V2 provenance. `None` for V1 artifacts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     run_contract: Option<RunContractReceiptV1>,
 }
 
+/// Deserialization shim accepting both `summary` and the pre-migration flat
+/// dry-run counter pair. A file can carry one or the other, never neither.
+impl<'de> Deserialize<'de> for ProductArtifactMetadata {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Repr {
+            artifact_id: ArtifactId,
+            artifact_revision: ArtifactRevision,
+            kind: ArtifactKind,
+            schema_version: u32,
+            canonical_payload_sha256: String,
+            source_binding: SourceBinding,
+            task_id: ProductTaskId,
+            attempt_id: TaskAttemptId,
+            run_id: RunId,
+            proposal_id: String,
+            provider_id: String,
+            model_id: String,
+            run_config_digest: String,
+            #[serde(default)]
+            summary: Option<ArtifactSummary>,
+            #[serde(default)]
+            dry_run_candidate_count: Option<u32>,
+            #[serde(default)]
+            dry_run_affected_area: Option<f32>,
+            created_at_unix_ms: i64,
+            #[serde(default)]
+            run_contract: Option<RunContractReceiptV1>,
+        }
+
+        let r = Repr::deserialize(deserializer)?;
+        let summary = match (
+            r.summary,
+            r.dry_run_candidate_count,
+            r.dry_run_affected_area,
+        ) {
+            (Some(summary), _, _) => summary,
+            (None, Some(dry_run_candidate_count), Some(dry_run_affected_area)) => {
+                ArtifactSummary::SmartRedaction {
+                    dry_run_candidate_count,
+                    dry_run_affected_area,
+                }
+            }
+            (None, _, _) => {
+                return Err(serde::de::Error::missing_field("summary"));
+            }
+        };
+        Ok(Self {
+            artifact_id: r.artifact_id,
+            artifact_revision: r.artifact_revision,
+            kind: r.kind,
+            schema_version: r.schema_version,
+            canonical_payload_sha256: r.canonical_payload_sha256,
+            source_binding: r.source_binding,
+            task_id: r.task_id,
+            attempt_id: r.attempt_id,
+            run_id: r.run_id,
+            proposal_id: r.proposal_id,
+            provider_id: r.provider_id,
+            model_id: r.model_id,
+            run_config_digest: r.run_config_digest,
+            summary,
+            created_at_unix_ms: r.created_at_unix_ms,
+            run_contract: r.run_contract,
+        })
+    }
+}
+
 impl ProductArtifactMetadata {
+    /// V1 compatibility wrapper. Wraps the flat dry-run counters into
+    /// `ArtifactSummary::SmartRedaction`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         artifact_id: ArtifactId,
@@ -329,7 +573,7 @@ impl ProductArtifactMetadata {
         dry_run_affected_area: f32,
         created_at_unix_ms: i64,
     ) -> Self {
-        Self {
+        Self::new_v3(
             artifact_id,
             artifact_revision,
             kind,
@@ -343,14 +587,16 @@ impl ProductArtifactMetadata {
             provider_id,
             model_id,
             run_config_digest,
-            dry_run_candidate_count,
-            dry_run_affected_area,
+            ArtifactSummary::SmartRedaction {
+                dry_run_candidate_count,
+                dry_run_affected_area,
+            },
             created_at_unix_ms,
-            run_contract: None,
-        }
+        )
     }
 
-    /// V2 constructor: includes run-contract provenance.
+    /// V2 compatibility wrapper. Wraps the flat dry-run counters into
+    /// `ArtifactSummary::SmartRedaction`.
     #[allow(clippy::too_many_arguments)]
     pub fn new_v2(
         artifact_id: ArtifactId,
@@ -371,6 +617,50 @@ impl ProductArtifactMetadata {
         created_at_unix_ms: i64,
         run_contract: RunContractReceiptV1,
     ) -> Self {
+        let mut meta = Self::new_v3(
+            artifact_id,
+            artifact_revision,
+            kind,
+            schema_version,
+            canonical_payload_sha256,
+            source_binding,
+            task_id,
+            attempt_id,
+            run_id,
+            proposal_id,
+            provider_id,
+            model_id,
+            run_config_digest,
+            ArtifactSummary::SmartRedaction {
+                dry_run_candidate_count,
+                dry_run_affected_area,
+            },
+            created_at_unix_ms,
+        );
+        meta.run_contract = Some(run_contract);
+        meta
+    }
+
+    /// V3 constructor: kind-specific artifact summary. No run-contract
+    /// provenance; use `new_v2` (via wrapping) when a contract is available.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_v3(
+        artifact_id: ArtifactId,
+        artifact_revision: ArtifactRevision,
+        kind: ArtifactKind,
+        schema_version: u32,
+        canonical_payload_sha256: String,
+        source_binding: SourceBinding,
+        task_id: ProductTaskId,
+        attempt_id: TaskAttemptId,
+        run_id: RunId,
+        proposal_id: String,
+        provider_id: String,
+        model_id: String,
+        run_config_digest: String,
+        summary: ArtifactSummary,
+        created_at_unix_ms: i64,
+    ) -> Self {
         Self {
             artifact_id,
             artifact_revision,
@@ -385,11 +675,14 @@ impl ProductArtifactMetadata {
             provider_id,
             model_id,
             run_config_digest,
-            dry_run_candidate_count,
-            dry_run_affected_area,
+            summary,
             created_at_unix_ms,
-            run_contract: Some(run_contract),
+            run_contract: None,
         }
+    }
+
+    pub fn summary(&self) -> &ArtifactSummary {
+        &self.summary
     }
 
     pub fn artifact_id(&self) -> &ArtifactId {
@@ -864,6 +1157,31 @@ impl ProductTaskSnapshot {
         })
     }
 
+    /// V3 constructor: domain-tagged source binding, kind-agnostic artifact
+    /// payload. Like V2, requires a run-contract binding before promotion.
+    pub fn new_v3(
+        task_id: ProductTaskId,
+        kind: TaskKind,
+        source_binding: SourceBinding,
+        now: i64,
+    ) -> Result<Self, TaskContractError> {
+        Ok(Self {
+            store_schema_version: 3,
+            snapshot_revision: 0,
+            task_id,
+            kind,
+            source_binding,
+            status: TaskStatus::Created,
+            attempts: Vec::new(),
+            artifact_metadata: None,
+            pending_artifact_payload: None,
+            pending_proposal_payload: None,
+            review_receipt: None,
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+        })
+    }
+
     /// Bind a run-contract receipt to the active `Running` attempt.
     ///
     /// Rules:
@@ -948,7 +1266,7 @@ impl ProductTaskSnapshot {
     pub fn record_ready_for_review(
         &self,
         metadata: ProductArtifactMetadata,
-        payload: SmartRedactionReviewPayload,
+        payload_bytes: Vec<u8>,
         proposal_payload: Option<Vec<u8>>,
         now: i64,
     ) -> Result<Self, TaskContractError> {
@@ -983,8 +1301,9 @@ impl ProductTaskSnapshot {
         if self.store_schema_version >= 2 && last_attempt.run_contract.is_none() {
             return Err(TaskContractError::MissingRunContract);
         }
-        let payload_bytes =
-            serde_json::to_vec(&payload).map_err(|_e| TaskContractError::MissingPayload)?;
+        if payload_bytes.is_empty() {
+            return Err(TaskContractError::MissingPayload);
+        }
         let mut next = self.clone();
         next.status = TaskStatus::ReadyForReview;
         next.artifact_metadata = Some(metadata);
@@ -1055,24 +1374,7 @@ impl ProductTaskSnapshot {
         Ok(next)
     }
 
-    /// Transition: Applying → Completed. Clears pending payload after commit.
-    pub fn complete_apply(
-        &self,
-        receipt: ReviewReceipt,
-        now: i64,
-    ) -> Result<Self, TaskContractError> {
-        if self.status != TaskStatus::Applying {
-            return Err(TaskContractError::IllegalTransition {
-                from: self.status.clone(),
-            });
-        }
-        if now < self.updated_at_unix_ms {
-            return Err(TaskContractError::TimestampRegression {
-                current: self.updated_at_unix_ms,
-                attempted: now,
-            });
-        }
-        // Validate receipt matches embedded artifact
+    fn validate_apply_receipt(&self, receipt: &ReviewReceipt) -> Result<(), TaskContractError> {
         if let Some(meta) = &self.artifact_metadata {
             if receipt.artifact_id != meta.artifact_id {
                 return Err(TaskContractError::ArtifactMismatch {
@@ -1093,8 +1395,58 @@ impl ProductTaskSnapshot {
                 });
             }
         }
+        Ok(())
+    }
+
+    /// Transition: Applying → Completed. Clears pending payload after commit.
+    pub fn complete_apply(
+        &self,
+        receipt: ReviewReceipt,
+        now: i64,
+    ) -> Result<Self, TaskContractError> {
+        if self.status != TaskStatus::Applying {
+            return Err(TaskContractError::IllegalTransition {
+                from: self.status.clone(),
+            });
+        }
+        if now < self.updated_at_unix_ms {
+            return Err(TaskContractError::TimestampRegression {
+                current: self.updated_at_unix_ms,
+                attempted: now,
+            });
+        }
+        self.validate_apply_receipt(&receipt)?;
         let mut next = self.clone();
         next.status = TaskStatus::Completed;
+        next.review_receipt = Some(receipt);
+        next.pending_artifact_payload = None;
+        next.pending_proposal_payload = None;
+        next.snapshot_revision += 1;
+        next.updated_at_unix_ms = now;
+        Ok(next)
+    }
+
+    /// Transition: Applying → Rejected. Clears pending payload after commit.
+    pub fn reject_apply(
+        &self,
+        receipt: ReviewReceipt,
+        now: i64,
+    ) -> Result<Self, TaskContractError> {
+        if self.status != TaskStatus::Applying {
+            return Err(TaskContractError::IllegalTransition {
+                from: self.status.clone(),
+            });
+        }
+        if now < self.updated_at_unix_ms {
+            return Err(TaskContractError::TimestampRegression {
+                current: self.updated_at_unix_ms,
+                attempted: now,
+            });
+        }
+        self.validate_apply_receipt(&receipt)?;
+
+        let mut next = self.clone();
+        next.status = TaskStatus::Rejected;
         next.review_receipt = Some(receipt);
         next.pending_artifact_payload = None;
         next.pending_proposal_payload = None;
@@ -1520,7 +1872,29 @@ mod tests {
     }
 
     fn source_binding_fixture() -> SourceBinding {
-        SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None)
+        SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None)
+    }
+
+    fn artifact_metadata_fixture_v3(summary: ArtifactSummary) -> ProductArtifactMetadata {
+        // `kind` stays SmartRedaction: ArtifactKind::ActionGuideCaptions does
+        // not exist until Task 10. This test only constrains `summary`.
+        ProductArtifactMetadata::new_v3(
+            artifact_id_fixture(),
+            ArtifactRevision::new(1),
+            ArtifactKind::SmartRedaction,
+            1,
+            "aa".repeat(32),
+            source_binding_fixture(),
+            task_id_fixture(),
+            TaskAttemptId::new(1),
+            run_id_fixture(),
+            "proposal-1".to_owned(),
+            "provider".to_owned(),
+            "model".to_owned(),
+            "cfg".to_owned(),
+            summary,
+            1_000,
+        )
     }
 
     fn attempt_fixture() -> TaskAttempt {
@@ -1566,6 +1940,10 @@ mod tests {
                 },
             },
         }
+    }
+
+    fn payload_bytes_fixture() -> Vec<u8> {
+        serde_json::to_vec(&payload_fixture()).expect("fixture payload serializes")
     }
 
     fn metadata_fixture(run_id: RunId, attempt_id: TaskAttemptId) -> ProductArtifactMetadata {
@@ -1663,7 +2041,7 @@ mod tests {
         let running = running_task_fixture();
         let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
         running
-            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
             .unwrap()
     }
 
@@ -1797,7 +2175,7 @@ mod tests {
         let wrong_run = RunId::parse("run-99999999-9999-4999-8999-999999999999").unwrap();
         let meta = metadata_fixture(wrong_run, TaskAttemptId::new(1));
         assert!(matches!(
-            running.record_ready_for_review(meta, payload_fixture(), None, 30),
+            running.record_ready_for_review(meta, payload_bytes_fixture(), None, 30),
             Err(TaskContractError::RunMismatch { .. })
         ));
     }
@@ -1868,13 +2246,23 @@ mod tests {
     }
 
     #[test]
+    fn applying_batch_with_no_accepts_can_be_rejected() {
+        let applying = ready_task_fixture().begin_apply(40).unwrap();
+        let rejected = applying.reject_apply(apply_receipt_fixture(), 50).unwrap();
+
+        assert_eq!(rejected.status(), TaskStatus::Rejected);
+        assert!(rejected.pending_artifact_payload().is_none());
+        assert!(rejected.pending_proposal_payload().is_none());
+    }
+
+    #[test]
     fn mark_stale_clears_pending_payload() {
         let running = running_task_fixture();
         let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
         let ready = running
             .record_ready_for_review(
                 meta,
-                payload_fixture(),
+                payload_bytes_fixture(),
                 Some(b"proposal-bytes".to_vec()),
                 30,
             )
@@ -2129,7 +2517,7 @@ mod tests {
         let created = created_task_fixture();
         let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
         assert!(matches!(
-            created.record_ready_for_review(meta, payload_fixture(), None, 20),
+            created.record_ready_for_review(meta, payload_bytes_fixture(), None, 20),
             Err(TaskContractError::IllegalTransition { .. })
         ));
     }
@@ -2192,7 +2580,7 @@ mod tests {
         // running_task_fixture uses attempt_id=1; pass metadata with attempt_id=99
         let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(99));
         assert!(matches!(
-            running.record_ready_for_review(meta, payload_fixture(), None, 30),
+            running.record_ready_for_review(meta, payload_bytes_fixture(), None, 30),
             Err(TaskContractError::ConflictingAttempt {
                 expected: _,
                 got: _
@@ -2261,7 +2649,7 @@ mod tests {
             policy_revision: "rev-1".to_owned(),
             disclosure_ceiling: DisclosureCeiling::FullScreenshot,
             existing_product_capture: false,
-            document_binding_digest: "ab".repeat(32),
+            subject_digest: "ab".repeat(32),
             prepared_capabilities: vec![PreparedCapability::Ocr],
             granted_operations: vec![RunOperation::SubmitReviewCandidate],
             snapshot_digest: "cd".repeat(32),
@@ -2390,12 +2778,50 @@ mod tests {
         let contract = bound.active_run_contract().unwrap().clone();
         let metadata = v2_metadata_with_contract(&contract);
         let ready = bound
-            .record_ready_for_review(metadata, payload_fixture(), None, 30)
+            .record_ready_for_review(metadata, payload_bytes_fixture(), None, 30)
             .unwrap();
         assert_eq!(
             ready.artifact_metadata().unwrap().run_contract(),
             bound.active_run_contract()
         );
+    }
+
+    #[test]
+    fn promotion_accepts_caller_serialized_bytes() {
+        let task = running_with_contract_fixture();
+        let contract = task.active_run_contract().unwrap().clone();
+        let payload = br#"{"suggestions":[]}"#.to_vec();
+
+        let promoted = task
+            .record_ready_for_review(
+                v2_metadata_with_contract(&contract),
+                payload.clone(),
+                None,
+                30,
+            )
+            .unwrap();
+
+        assert_eq!(promoted.status(), TaskStatus::ReadyForReview);
+        assert_eq!(
+            promoted.pending_artifact_payload(),
+            Some(payload.as_slice())
+        );
+    }
+
+    #[test]
+    fn promotion_rejects_an_empty_payload() {
+        let task = running_with_contract_fixture();
+        let contract = task.active_run_contract().unwrap().clone();
+
+        assert!(matches!(
+            task.record_ready_for_review(
+                v2_metadata_with_contract(&contract),
+                Vec::new(),
+                None,
+                30,
+            ),
+            Err(TaskContractError::MissingPayload)
+        ));
     }
 
     #[test]
@@ -2412,7 +2838,7 @@ mod tests {
         // No bind_run_contract → MissingRunContract
         let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
         assert!(matches!(
-            running_v2.record_ready_for_review(meta, payload_fixture(), None, 30),
+            running_v2.record_ready_for_review(meta, payload_bytes_fixture(), None, 30),
             Err(TaskContractError::MissingRunContract)
         ));
     }
@@ -2422,7 +2848,7 @@ mod tests {
         let running = running_task_fixture(); // schema 1
         let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
         let ready = running
-            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
             .unwrap();
         assert_eq!(ready.status(), TaskStatus::ReadyForReview);
     }
@@ -2525,7 +2951,7 @@ mod tests {
         let running = running_task_fixture();
         let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
         let ready = running
-            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
             .unwrap();
         let json = serde_json::to_string(&ready).unwrap();
 
@@ -2679,7 +3105,7 @@ mod tests {
         let bound = running.bind_run_contract(receipt.clone(), 25).unwrap();
         let meta = v2_metadata_with_contract(&receipt);
         let ready = bound
-            .record_ready_for_review(meta, payload_fixture(), None, 30)
+            .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
             .unwrap();
         let applying = ready.begin_apply(35).unwrap();
         let completed = applying
@@ -2729,5 +3155,154 @@ mod tests {
         assert!(!json_str.contains("api_key"));
         assert!(!json_str.contains("password"));
         assert!(!json_str.contains("/home/"));
+    }
+
+    #[test]
+    fn source_binding_round_trips_all_variants() {
+        let cases = vec![
+            SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 7, "p".into(), None),
+            SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 7, "p".into(), Some("r1".into())),
+            SourceBinding::ActionGuideProject {
+                project_root_sha256: [3u8; 32],
+                revision: 9,
+                projection_digest: "ab".repeat(32),
+            },
+            SourceBinding::ActionGuideEphemeralGuide {
+                guide_digest: "cd".repeat(32),
+            },
+        ];
+
+        for case in cases {
+            let json = serde_json::to_string(&case).unwrap();
+            let back: SourceBinding = serde_json::from_str(&json).unwrap();
+            assert_eq!(case, back, "round trip failed for {json}");
+        }
+    }
+
+    #[test]
+    fn legacy_flat_source_binding_deserializes_as_smart_redaction() {
+        // Pre-migration on-disk shape: a flat object with no "domain" tag.
+        let legacy = r#"{
+            "base_image_sha256": [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+                                  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+            "annotation_state_sha256": [2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
+                                        2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],
+            "document_state_id": 4,
+            "preset_id": "preset-001",
+            "active_preset_revision_id": null
+        }"#;
+
+        let parsed: SourceBinding = serde_json::from_str(legacy).unwrap();
+
+        assert_eq!(
+            parsed,
+            SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 4, "preset-001".into(), None)
+        );
+    }
+
+    #[test]
+    fn unrelated_object_is_rejected_not_defaulted() {
+        // The untagged shim must not silently invent a SmartRedaction binding
+        // from an object it does not recognize.
+        let err = serde_json::from_str::<SourceBinding>(r#"{"nope":1}"#)
+            .expect_err("unrelated object must not deserialize");
+        assert!(
+            err.to_string().contains("did not match any variant"),
+            "unexpected error text: {err}"
+        );
+    }
+
+    #[test]
+    fn new_v3_writes_schema_three() {
+        let task = ProductTaskSnapshot::new_v3(
+            task_id_fixture(),
+            TaskKind::SmartRedactionAuthor,
+            source_binding_fixture(),
+            1_000,
+        )
+        .unwrap();
+
+        assert_eq!(task.store_schema_version(), 3);
+    }
+
+    #[test]
+    fn identity_ignores_freshness_and_rejects_other_domains() {
+        let a = SourceBinding::ActionGuideProject {
+            project_root_sha256: [1u8; 32],
+            revision: 1,
+            projection_digest: "aa".repeat(32),
+        };
+        let same_project_newer = SourceBinding::ActionGuideProject {
+            project_root_sha256: [1u8; 32],
+            revision: 2,
+            projection_digest: "bb".repeat(32),
+        };
+        let other_project = SourceBinding::ActionGuideProject {
+            project_root_sha256: [9u8; 32],
+            revision: 1,
+            projection_digest: "aa".repeat(32),
+        };
+        let smart = SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
+
+        assert!(a.identity_matches(&same_project_newer));
+        assert!(!a.freshness_matches(&same_project_newer));
+        assert!(!a.identity_matches(&other_project));
+        assert!(!a.identity_matches(&smart));
+        assert!(!smart.identity_matches(&a));
+    }
+
+    #[test]
+    fn smart_redaction_identity_is_base_image_freshness_is_annotation() {
+        let a = SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 0, "p".into(), None);
+        let edited = SourceBinding::smart_redaction([1u8; 32], [3u8; 32], 1, "p".into(), None);
+        let different_image =
+            SourceBinding::smart_redaction([8u8; 32], [2u8; 32], 0, "p".into(), None);
+
+        assert!(a.identity_matches(&edited));
+        assert!(!a.freshness_matches(&edited));
+        assert!(!a.identity_matches(&different_image));
+    }
+
+    #[test]
+    fn ephemeral_freshness_is_trivially_true_for_matching_identity() {
+        let a = SourceBinding::ActionGuideEphemeralGuide {
+            guide_digest: "ee".repeat(32),
+        };
+        let b = a.clone();
+
+        assert!(a.identity_matches(&b));
+        assert!(a.freshness_matches(&b));
+    }
+
+    #[test]
+    fn artifact_summary_is_kind_specific() {
+        let meta = artifact_metadata_fixture_v3(ArtifactSummary::ActionGuideCaptions {
+            suggestion_count: 3,
+        });
+
+        assert_eq!(
+            meta.summary(),
+            &ArtifactSummary::ActionGuideCaptions {
+                suggestion_count: 3
+            }
+        );
+
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(
+            !json.contains("dry_run_affected_area"),
+            "caption artifacts must not carry Smart Redaction dry-run fields: {json}"
+        );
+    }
+
+    #[test]
+    fn action_guide_caption_kinds_serialize_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&TaskKind::ActionGuideCaptions).unwrap(),
+            "\"action_guide_captions\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ArtifactKind::ActionGuideCaptions).unwrap(),
+            "\"action_guide_captions\""
+        );
     }
 }

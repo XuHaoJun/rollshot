@@ -124,7 +124,11 @@ pub enum Message {
     AnnotationRedo,
     AnnotationDone,
     AnnotationCancel,
-    CaptionProposalLoaded(Result<rollshot_action::CaptionProposal, String>),
+    CaptionProposalLoaded(Result<Box<super::caption_agent::CaptionRunSuccess>, String>),
+    CaptionReviewPersisted {
+        task_id: rollshot_agent::product_task::ProductTaskId,
+        result: Box<Result<rollshot_agent::product_task::ProductTaskSnapshot, String>>,
+    },
     /// Two-stage caption context preparation completed.
     CaptionContextPrepared {
         run_id: u64,
@@ -232,6 +236,141 @@ pub(crate) enum SaveWorkerOutcome {
         category: &'static str,
     },
     Failed(String),
+}
+
+#[cfg(feature = "action-guide")]
+async fn persist_caption_review_batch(
+    store: std::sync::Arc<crate::agent_store::TaskStore>,
+    snapshot: rollshot_agent::product_task::ProductTaskSnapshot,
+    proposal: rollshot_action::CaptionProposal,
+    has_accepted: bool,
+) -> Result<rollshot_agent::product_task::ProductTaskSnapshot, String> {
+    tokio::task::spawn_blocking(move || {
+        use rollshot_agent::product_task::TaskStatus;
+
+        let mut persisted = snapshot;
+        if persisted.status() == TaskStatus::ReadyForReview {
+            let now = chrono::Utc::now().timestamp_millis();
+            let applying = persisted
+                .begin_apply(now)
+                .map_err(|e| format!("begin caption apply: {e}"))?;
+            store
+                .transition_audited(
+                    &persisted,
+                    &applying,
+                    rollshot_agent::audit::AuditEventId::new_v4(),
+                    now,
+                )
+                .map_err(|e| format!("persist begin caption apply: {e}"))?;
+            persisted = applying;
+        }
+
+        if proposal.has_pending() {
+            return Ok(persisted);
+        }
+        if persisted.status() != TaskStatus::Applying {
+            return Err(format!(
+                "caption review cannot finalize from {:?}",
+                persisted.status()
+            ));
+        }
+
+        let metadata = persisted
+            .artifact_metadata()
+            .ok_or("caption review snapshot has no artifact metadata".to_string())?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let receipt = super::caption_agent::caption_review_receipt(&proposal, metadata, now)?;
+        let finalized = if has_accepted {
+            persisted
+                .complete_apply(receipt, now)
+                .map_err(|e| format!("complete caption apply: {e}"))?
+        } else {
+            persisted
+                .reject_apply(receipt, now)
+                .map_err(|e| format!("reject caption apply: {e}"))?
+        };
+        store
+            .transition_audited(
+                &persisted,
+                &finalized,
+                rollshot_agent::audit::AuditEventId::new_v4(),
+                now,
+            )
+            .map_err(|e| format!("persist caption decision: {e}"))?;
+        Ok(finalized)
+    })
+    .await
+    .map_err(|e| format!("caption review persistence task panicked: {e}"))?
+}
+
+/// Persist the current caption decision batch in one ordered background task.
+#[cfg(feature = "action-guide")]
+fn caption_review_persistence_task(state: &TimelineWorkspace) -> Task<Message> {
+    let (Some(store), Some(snapshot), Some(proposal)) = (
+        state.task_store.clone(),
+        state.caption_review_snapshot.clone(),
+        state.caption_proposal.clone(),
+    ) else {
+        return Task::none();
+    };
+    let task_id = snapshot.task_id().clone();
+    let has_accepted = proposal
+        .suggestions
+        .iter()
+        .any(|suggestion| suggestion.status == rollshot_action::CaptionSuggestionStatus::Accepted);
+    Task::perform(
+        persist_caption_review_batch(store, snapshot, proposal, has_accepted),
+        move |result| Message::CaptionReviewPersisted {
+            task_id,
+            result: Box::new(result),
+        },
+    )
+}
+
+#[cfg(feature = "action-guide")]
+fn schedule_caption_review_persistence(state: &mut TimelineWorkspace) -> Update {
+    let task = caption_review_persistence_task(state);
+    state.caption_review_persisting = task.units() > 0;
+    Update::task(task)
+}
+
+/// Try to restore a pending caption proposal from the task store after a
+/// project is opened or first-saved. Uses the loaded project to compute the
+/// projection digest needed to build a matching `SourceBinding`.
+#[cfg(feature = "action-guide")]
+pub(super) fn restore_caption_proposal_on_project_open(
+    state: &mut TimelineWorkspace,
+    loaded: &rollshot_action::project::LoadedProject,
+) {
+    use super::caption_agent::caption_source_binding;
+    use super::caption_agent::restore_caption_proposal;
+    use rollshot_action::project::ActionGuideContextProjectionV1;
+
+    let Some(ref store) = state.task_store else {
+        return;
+    };
+    let Ok(projection) = ActionGuideContextProjectionV1::from_loaded_project(loaded) else {
+        return;
+    };
+    let guide = match projection.to_guide() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    let context = super::caption_agent::PreparedCaptionContext::Durable { guide, projection };
+    let binding = caption_source_binding(&context, Some(&loaded.root));
+    let now = chrono::Utc::now().timestamp_millis();
+    if let Some((snapshot, proposal)) = restore_caption_proposal(store, &binding, now) {
+        let task_id = snapshot.task_id().clone();
+        tracing::info!(
+            target: "rollshot::action::caption_agent",
+            task_id = task_id.as_str(),
+            suggestion_count = proposal.suggestions.len(),
+            "restored pending caption proposal from prior session"
+        );
+        state.caption_task_id = Some(task_id);
+        state.caption_proposal = Some(proposal);
+        state.caption_review_snapshot = Some(snapshot);
+    }
 }
 
 pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
@@ -432,6 +571,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                         state.pending_discard = true;
                     } else {
                         cancel_active_publish(state);
+                        cancel_active_caption_run(state);
                         return Update::effect(super::Effect::CloseWorkspace);
                     }
                 } else {
@@ -452,7 +592,10 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
         Message::ConfirmDiscard => {
             state.pending_discard = false;
             #[cfg(feature = "action-guide")]
-            cancel_active_publish(state);
+            {
+                cancel_active_publish(state);
+                cancel_active_caption_run(state);
+            }
             Update::effect(super::Effect::CloseWorkspace)
         }
         Message::ExportRequested => {
@@ -1069,19 +1212,38 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             state.annotation_session = None;
             Update::none()
         }
-        Message::CaptionProposalLoaded(Ok(proposal)) => {
+        Message::CaptionProposalLoaded(Ok(success)) => {
+            tracing::info!(
+                target: "rollshot::action::caption_agent",
+                task_id = success.task_id.as_str(),
+                provider_id = success.provider_id.as_str(),
+                model_id = success.model_id.as_str(),
+                "caption suggestions promoted for review"
+            );
             state.caption_suggestions_running = false;
-            state.caption_proposal = Some(proposal);
+            state.caption_cancellation = None;
+            state.caption_task_id = Some(success.task_id);
+            state.caption_proposal = Some(success.proposal);
+            state.caption_review_snapshot = Some(success.snapshot);
             state.message = Some("Caption suggestions ready for review.".to_string());
             Update::none()
         }
         Message::CaptionProposalLoaded(Err(error)) => {
             state.caption_suggestions_running = false;
-            state.message = Some(format!("Caption suggestions failed: {error}"));
+            state.caption_cancellation = None;
+            // Preserve the frozen timeout copy verbatim — do not wrap it.
+            if error == super::caption_agent::TIMEOUT_MESSAGE {
+                state.message = Some(error);
+            } else {
+                state.message = Some(format!("Caption suggestions failed: {error}"));
+            }
             Update::none()
         }
         Message::AcceptCaptionSuggestion(id) => {
             if !state.can_mutate() {
+                return Update::none();
+            }
+            if state.caption_review_persisting {
                 return Update::none();
             }
             let context = state
@@ -1092,28 +1254,43 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             let Some(proposal) = &mut state.caption_proposal else {
                 return Update::none();
             };
-            match proposal.apply(&mut state.guide, &context, id) {
+            let decision_recorded = match proposal.apply(&mut state.guide, &context, id) {
                 rollshot_action::CaptionApplyOutcome::Applied => {
                     state.mark_project_dirty();
                     state.message = Some("Caption suggestion accepted.".to_string());
+                    true
                 }
                 rollshot_action::CaptionApplyOutcome::Stale => {
                     state.message =
                         Some("Caption suggestion is stale; regenerate suggestions.".to_string());
+                    true
                 }
                 rollshot_action::CaptionApplyOutcome::Missing
-                | rollshot_action::CaptionApplyOutcome::NotPending => {}
+                | rollshot_action::CaptionApplyOutcome::NotPending => false,
+            };
+            if !decision_recorded {
+                return Update::none();
             }
-            Update::none()
+            schedule_caption_review_persistence(state)
         }
         Message::RejectCaptionSuggestion(id) => {
-            if let Some(proposal) = &mut state.caption_proposal {
-                proposal.reject(id);
+            if state.caption_review_persisting {
+                return Update::none();
             }
-            Update::none()
+            let rejected = state
+                .caption_proposal
+                .as_mut()
+                .is_some_and(|proposal| proposal.reject(id));
+            if !rejected {
+                return Update::none();
+            }
+            schedule_caption_review_persistence(state)
         }
         Message::AcceptAllCaptionSuggestions => {
             if !state.can_mutate() {
+                return Update::none();
+            }
+            if state.caption_review_persisting {
                 return Update::none();
             }
             let context = state
@@ -1121,25 +1298,59 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                 .as_ref()
                 .map(|p| state.caption_apply_context(p))
                 .unwrap_or(rollshot_action::CaptionApplyContext::EphemeralGuide);
-            if let Some(proposal) = &mut state.caption_proposal {
-                let outcomes = proposal.apply_all(&mut state.guide, &context);
-                let applied = outcomes
-                    .iter()
-                    .filter(|&&outcome| outcome == rollshot_action::CaptionApplyOutcome::Applied)
-                    .count();
-                let stale = outcomes
-                    .iter()
-                    .filter(|&&outcome| outcome == rollshot_action::CaptionApplyOutcome::Stale)
-                    .count();
-                if applied > 0 {
-                    state.mark_project_dirty();
+            let Some(proposal) = &mut state.caption_proposal else {
+                return Update::none();
+            };
+            let outcomes = proposal.apply_all(&mut state.guide, &context);
+            let applied = outcomes
+                .iter()
+                .filter(|&&outcome| outcome == rollshot_action::CaptionApplyOutcome::Applied)
+                .count();
+            let stale = outcomes
+                .iter()
+                .filter(|&&outcome| outcome == rollshot_action::CaptionApplyOutcome::Stale)
+                .count();
+            if applied > 0 {
+                state.mark_project_dirty();
+            }
+            state.message = Some(match stale {
+                0 => format!("Accepted {applied} caption suggestions."),
+                _ => format!(
+                    "Accepted {applied} caption suggestions; {stale} stale suggestions skipped."
+                ),
+            });
+            schedule_caption_review_persistence(state)
+        }
+        Message::CaptionReviewPersisted { task_id, result } => {
+            if state.caption_task_id.as_ref() != Some(&task_id) {
+                tracing::debug!(
+                    target: "rollshot::action::caption_review",
+                    task_id = task_id.as_str(),
+                    "stale caption review persistence result ignored"
+                );
+                return Update::none();
+            }
+            state.caption_review_persisting = false;
+            match *result {
+                Ok(snapshot) => {
+                    let final_decision = matches!(
+                        snapshot.status(),
+                        rollshot_agent::product_task::TaskStatus::Completed
+                            | rollshot_agent::product_task::TaskStatus::Rejected
+                    );
+                    state.caption_review_snapshot = Some(snapshot);
+                    if final_decision {
+                        state.caption_proposal = None;
+                    }
                 }
-                state.message = Some(match stale {
-                    0 => format!("Accepted {applied} caption suggestions."),
-                    _ => format!(
-                        "Accepted {applied} caption suggestions; {stale} stale suggestions skipped."
-                    ),
-                });
+                Err(error) => {
+                    tracing::warn!(
+                        target: "rollshot::action::caption_review",
+                        %error,
+                        "caption review persistence failed"
+                    );
+                    state.message = Some(format!("Caption review could not be saved: {error}"));
+                }
             }
             Update::none()
         }
@@ -1148,7 +1359,12 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             Update::none()
         }
         Message::SuggestCaptionsRequested => {
-            if state.caption_suggestions_running {
+            if state.caption_suggestions_running || state.caption_review_persisting {
+                return Update::none();
+            }
+            if state.task_store.is_none() {
+                state.message =
+                    Some("Caption suggestions failed: task store is unavailable.".to_string());
                 return Update::none();
             }
             if state.guide.is_empty() {
@@ -1176,6 +1392,12 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                     guide: state.guide.clone(),
                 },
             };
+
+            // Cancel any in-flight caption run.
+            if let Some(existing) = state.caption_cancellation.take() {
+                existing.cancel();
+            }
+            state.caption_cancellation = Some(rollshot_agent::runtime::RunCancellation::new());
 
             state.caption_suggestions_running = true;
             state.message = Some("Preparing caption context...".to_string());
@@ -1206,6 +1428,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                 Ok(ctx) => ctx,
                 Err(error) => {
                     state.caption_suggestions_running = false;
+                    state.caption_cancellation = None;
                     state.message = Some(format!("Caption suggestions failed: {error}"));
                     return Update::none();
                 }
@@ -1223,6 +1446,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                 );
                 if !still_valid {
                     state.caption_suggestions_running = false;
+                    state.caption_cancellation = None;
                     state.message = Some(
                         "Caption suggestions failed: project was modified during preparation."
                             .to_string(),
@@ -1239,27 +1463,35 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                 Ok(cfg) => cfg,
                 Err(error) => {
                     state.caption_suggestions_running = false;
+                    state.caption_cancellation = None;
                     state.message = Some(format!("Caption suggestions failed: {error}"));
                     return Update::none();
                 }
             };
             if !crate::result_workspace::workbench::has_key(&cfg) {
                 state.caption_suggestions_running = false;
+                state.caption_cancellation = None;
                 state.message =
                     Some("Configure an agent provider before suggesting captions.".to_string());
                 return Update::none();
             }
             let model = cfg.model.clone();
+            let provider = format!("{}", cfg.provider);
             let adapter = match crate::result_workspace::workbench::build_adapter(&cfg) {
                 Ok(adapter) => adapter,
                 Err(error) => {
                     state.caption_suggestions_running = false;
+                    state.caption_cancellation = None;
                     state.message = Some(format!("Caption suggestions failed: {error}"));
                     return Update::none();
                 }
             };
 
-            state.message = Some("Suggesting captions...".to_string());
+            // Clone the token into the worker while retaining cancellation ownership.
+            let cancellation = state.caption_cancellation.clone().unwrap_or_default();
+            let store = state.task_store.clone().expect("task_store checked above");
+
+            state.message = Some(super::caption_agent::RUNNING_MESSAGE.to_string());
             tracing::info!(
                 target: "rollshot::action::caption_agent",
                 run_id,
@@ -1267,9 +1499,29 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                 is_durable = prepared.is_durable(),
                 "caption suggestion run started"
             );
+
+            // Extract the project root for durable source binding. The root is
+            // only available when the workspace is saved+clean.
+            let caption_project_root = match (&state.project_session, state.save_state) {
+                (
+                    Some(super::project::ProjectSession::Saved { root, .. }),
+                    super::ProjectSaveState::Clean,
+                ) if prepared.is_durable() => Some(root.clone()),
+                _ => None,
+            };
+
             Update::task(Task::perform(
-                super::caption_agent::suggest_captions_task(run_id, model, adapter, prepared),
-                Message::CaptionProposalLoaded,
+                super::caption_agent::suggest_captions_task(
+                    run_id,
+                    store,
+                    cancellation,
+                    model,
+                    provider,
+                    adapter,
+                    prepared,
+                    caption_project_root,
+                ),
+                |result| Message::CaptionProposalLoaded(result.map(Box::new)),
             ))
         }
         Message::FfmpegSetupCancel => {
@@ -1832,6 +2084,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                 } else {
                     state.close_intent = super::CloseIntent::None;
                     state.pending_discard = false;
+                    cancel_active_caption_run(state);
                     Update::effect(super::Effect::CloseWorkspace)
                 }
             }
@@ -1846,7 +2099,10 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             state.close_intent = super::CloseIntent::None;
             state.pending_discard = false;
             #[cfg(feature = "action-guide")]
-            cancel_active_publish(state);
+            {
+                cancel_active_publish(state);
+                cancel_active_caption_run(state);
+            }
             Update::effect(super::Effect::CloseWorkspace)
         }
         Message::CloseCancel => {
@@ -2234,6 +2490,14 @@ fn cancel_active_publish(state: &mut TimelineWorkspace) {
         op.cancel.cancel();
     }
     state.publish_operation = None;
+}
+
+#[cfg(feature = "action-guide")]
+fn cancel_active_caption_run(state: &mut TimelineWorkspace) {
+    if let Some(cancellation) = state.caption_cancellation.take() {
+        cancellation.cancel();
+    }
+    state.caption_suggestions_running = false;
 }
 
 #[cfg(feature = "action-guide")]
@@ -3411,12 +3675,14 @@ fn handle_save_worker_finished(
             );
             state.frame_source = Some(rollshot_action::StepFrameSource::Project(source));
             state.project_session = Some(ProjectSession::Saved {
-                root,
+                root: root.clone(),
                 base_revision: revision,
                 access,
             });
             // Release scratch after source switch.
             state.imported_scratch.take();
+            // Restore any pending caption proposal from a prior session.
+            restore_caption_proposal_on_project_open(state, &loaded);
             state.message = Some("Project saved.".to_string());
             tracing::info!(
                 target: "rollshot::project",
@@ -3443,12 +3709,14 @@ fn handle_save_worker_finished(
             );
             state.frame_source = Some(rollshot_action::StepFrameSource::Project(source));
             state.project_session = Some(ProjectSession::Saved {
-                root,
+                root: root.clone(),
                 base_revision: revision,
                 access: ProjectAccess::ReadOnly,
             });
             // Release scratch after source switch.
             state.imported_scratch.take();
+            // Restore any pending caption proposal from a prior session.
+            restore_caption_proposal_on_project_open(state, &loaded);
             state.message = Some(
                 "Project saved, but another process holds the write lock. Editing is disabled."
                     .to_string(),
@@ -3474,6 +3742,10 @@ fn handle_save_worker_finished(
             }
             return Update::none();
         }
+    }
+
+    if should_close {
+        cancel_active_caption_run(state);
     }
 
     if let Some((root, display_name)) = state.project_recent_metadata() {
@@ -3600,7 +3872,7 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn ws(recording: rollshot_action::Recording) -> TimelineWorkspace {
-        TimelineWorkspace::new(
+        let mut ws = TimelineWorkspace::new(
             recording,
             CaptureRegion {
                 x: 0,
@@ -3610,7 +3882,14 @@ mod tests {
             },
             InputCapability::SemanticEvents,
             InputSourceKind::LinuxEvdev,
-        )
+        );
+        // Open a temporary task store for tests that need it.
+        let dir = tempfile::tempdir().unwrap();
+        // Leak the tempdir so the store path survives the scope. Tests are
+        // short-lived so this is acceptable.
+        let path = dir.keep();
+        ws.task_store = Some(crate::agent_store::open_process_store(&path).unwrap());
+        ws
     }
 
     #[test]
@@ -4567,6 +4846,13 @@ mod tests {
             .is_some_and(|message| message.contains("Redaction failed")));
     }
 
+    fn caption_test_task_id() -> rollshot_agent::product_task::ProductTaskId {
+        rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap()
+    }
+
     fn caption_proposal_for_first_step(
         state: &TimelineWorkspace,
     ) -> rollshot_action::CaptionProposal {
@@ -4587,13 +4873,243 @@ mod tests {
         )
     }
 
+    fn caption_run_success(
+        proposal: rollshot_action::CaptionProposal,
+    ) -> Box<super::super::caption_agent::CaptionRunSuccess> {
+        let binding = super::super::caption_agent::caption_source_binding(
+            &super::super::caption_agent::provider_tests::ephemeral_context(),
+            None,
+        );
+        let snapshot = super::super::caption_agent::provider_tests::promote_caption_task_for_tests(
+            &binding, &proposal,
+        );
+
+        Box::new(super::super::caption_agent::CaptionRunSuccess {
+            task_id: caption_test_task_id(),
+            proposal,
+            snapshot,
+            provider_id: "test-provider".to_owned(),
+            model_id: "test-model".to_owned(),
+        })
+    }
+
+    async fn persisted_caption_fixture() -> (
+        tempfile::TempDir,
+        std::sync::Arc<crate::agent_store::TaskStore>,
+        rollshot_agent::product_task::ProductTaskSnapshot,
+        rollshot_action::CaptionProposal,
+    ) {
+        let state = ws(synthetic_recording(1));
+        let proposal = caption_proposal_for_first_step(&state);
+        let success = caption_run_success(proposal.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+        store.create(&success.snapshot).unwrap();
+        (dir, store, success.snapshot, proposal)
+    }
+
+    fn two_caption_persistence_fixture() -> (
+        tempfile::TempDir,
+        std::sync::Arc<crate::agent_store::TaskStore>,
+        rollshot_agent::product_task::ProductTaskSnapshot,
+        rollshot_action::CaptionProposal,
+    ) {
+        let state = ws(synthetic_recording(2));
+        assert!(state.guide.steps().len() >= 2);
+        let proposal = rollshot_action::CaptionProposal::from_agent_drafts(
+            rollshot_action::CaptionProposalId(1),
+            42,
+            rollshot_action::CaptionProposalOrigin::EphemeralGuide {
+                guide_digest: "0".repeat(64),
+            },
+            &state.guide,
+            state
+                .guide
+                .steps()
+                .iter()
+                .take(2)
+                .enumerate()
+                .map(|(index, step)| rollshot_action::CaptionSuggestionDraft {
+                    step_source: step.source,
+                    title: Some(format!("Suggested step {}", index + 1)),
+                    caption: format!("Caption {}.", index + 1),
+                    confidence: 0.8,
+                    rationale: None,
+                })
+                .collect(),
+        );
+        let success = caption_run_success(proposal.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+        store.create(&success.snapshot).unwrap();
+        (dir, store, success.snapshot, proposal)
+    }
+
+    #[tokio::test]
+    async fn ordered_caption_review_stays_applying_until_every_candidate_is_decided() {
+        let (_dir, store, ready, mut proposal) = two_caption_persistence_fixture();
+        proposal.suggestions[0].status = rollshot_action::CaptionSuggestionStatus::Accepted;
+
+        let applying = persist_caption_review_batch(store.clone(), ready, proposal.clone(), true)
+            .await
+            .unwrap();
+        assert_eq!(
+            applying.status(),
+            rollshot_agent::product_task::TaskStatus::Applying
+        );
+        assert_eq!(store.load(applying.task_id()).unwrap(), applying);
+
+        proposal.suggestions[1].status = rollshot_action::CaptionSuggestionStatus::Rejected;
+        let completed = persist_caption_review_batch(store.clone(), applying, proposal, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            completed.status(),
+            rollshot_agent::product_task::TaskStatus::Completed
+        );
+        let receipt = completed.review_receipt().unwrap();
+        assert_eq!(receipt.applied_candidates, vec![1]);
+        assert_eq!(receipt.rejected_candidates, vec![2]);
+        assert_eq!(store.load(completed.task_id()).unwrap(), completed);
+    }
+
+    #[tokio::test]
+    async fn ordered_caption_review_accept_all_finishes_in_one_batch() {
+        let (_dir, store, ready, mut proposal) = two_caption_persistence_fixture();
+        for suggestion in &mut proposal.suggestions {
+            suggestion.status = rollshot_action::CaptionSuggestionStatus::Accepted;
+        }
+
+        let completed = persist_caption_review_batch(store.clone(), ready, proposal, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            completed.status(),
+            rollshot_agent::product_task::TaskStatus::Completed
+        );
+        assert_eq!(
+            completed.review_receipt().unwrap().applied_candidates,
+            vec![1, 2]
+        );
+        assert_eq!(store.load(completed.task_id()).unwrap(), completed);
+    }
+
+    #[tokio::test]
+    async fn ordered_caption_review_persists_accepted_batch() {
+        let (_dir, store, snapshot, mut proposal) = persisted_caption_fixture().await;
+        proposal.suggestions[0].status = rollshot_action::CaptionSuggestionStatus::Accepted;
+
+        let completed = persist_caption_review_batch(store.clone(), snapshot, proposal, true)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            completed.status(),
+            rollshot_agent::product_task::TaskStatus::Completed
+        );
+        assert_eq!(
+            completed.review_receipt().unwrap().applied_candidates,
+            vec![1]
+        );
+        assert_eq!(store.load(completed.task_id()).unwrap(), completed);
+    }
+
+    #[tokio::test]
+    async fn ordered_caption_review_persists_rejected_batch() {
+        let (_dir, store, snapshot, mut proposal) = persisted_caption_fixture().await;
+        proposal.suggestions[0].status = rollshot_action::CaptionSuggestionStatus::Rejected;
+
+        let rejected = persist_caption_review_batch(store.clone(), snapshot, proposal, false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            rejected.status(),
+            rollshot_agent::product_task::TaskStatus::Rejected
+        );
+        assert_eq!(
+            rejected.review_receipt().unwrap().rejected_candidates,
+            vec![1]
+        );
+        assert_eq!(store.load(rejected.task_id()).unwrap(), rejected);
+    }
+
+    #[test]
+    fn caption_run_cancellation_stays_owned_until_workspace_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = ws(synthetic_recording(1));
+        state.task_store = Some(crate::agent_store::open_process_store(dir.path()).unwrap());
+
+        let start = update(&mut state, Message::SuggestCaptionsRequested);
+        assert!(start.task.units() > 0);
+        let cancellation = state
+            .caption_cancellation
+            .clone()
+            .expect("workspace must retain cancellation ownership");
+        assert!(!cancellation.is_cancelled());
+
+        let close = update(&mut state, Message::CloseDiscard);
+        assert!(matches!(close.effect, super::super::Effect::CloseWorkspace));
+        assert!(cancellation.is_cancelled());
+        assert!(state.caption_cancellation.is_none());
+    }
+
+    #[test]
+    fn caption_review_persistence_blocks_a_new_caption_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = ws(synthetic_recording(1));
+        state.task_store = Some(crate::agent_store::open_process_store(dir.path()).unwrap());
+        state.caption_review_persisting = true;
+
+        let result = update(&mut state, Message::SuggestCaptionsRequested);
+
+        assert_eq!(result.task.units(), 0);
+        assert!(!state.caption_suggestions_running);
+    }
+
+    #[test]
+    fn stale_caption_review_persistence_cannot_mutate_a_new_proposal() {
+        let mut state = ws(synthetic_recording(1));
+        let new_task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000002",
+        )
+        .unwrap();
+        let old_task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let proposal = caption_proposal_for_first_step(&state);
+        state.caption_task_id = Some(new_task_id);
+        state.caption_proposal = Some(proposal.clone());
+        state.caption_review_persisting = true;
+        state.message = Some("New caption suggestions ready.".to_owned());
+
+        let _ = update(
+            &mut state,
+            Message::CaptionReviewPersisted {
+                task_id: old_task_id,
+                result: Box::new(Err("old persistence failed".to_owned())),
+            },
+        );
+
+        assert!(state.caption_review_persisting);
+        assert_eq!(state.caption_proposal.as_ref(), Some(&proposal));
+        assert_eq!(
+            state.message.as_deref(),
+            Some("New caption suggestions ready.")
+        );
+    }
+
     #[test]
     fn caption_proposal_loaded_stores_review_state() {
         let mut state = ws(synthetic_recording(1));
         state.caption_suggestions_running = true;
         let proposal = caption_proposal_for_first_step(&state);
 
-        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok(proposal)));
+        let _ = update(
+            &mut state,
+            Message::CaptionProposalLoaded(Ok(caption_run_success(proposal))),
+        );
 
         assert!(state.caption_proposal.is_some());
         assert!(!state.caption_suggestions_running);
@@ -4625,7 +5141,10 @@ mod tests {
     fn accepting_caption_suggestion_updates_guide() {
         let mut state = ws(synthetic_recording(1));
         let proposal = caption_proposal_for_first_step(&state);
-        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok(proposal)));
+        let _ = update(
+            &mut state,
+            Message::CaptionProposalLoaded(Ok(caption_run_success(proposal))),
+        );
 
         let _ = update(
             &mut state,
@@ -4641,7 +5160,10 @@ mod tests {
     fn rejecting_caption_suggestion_does_not_update_guide() {
         let mut state = ws(synthetic_recording(1));
         let proposal = caption_proposal_for_first_step(&state);
-        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok(proposal)));
+        let _ = update(
+            &mut state,
+            Message::CaptionProposalLoaded(Ok(caption_run_success(proposal))),
+        );
 
         let _ = update(
             &mut state,
@@ -4657,7 +5179,10 @@ mod tests {
     fn accepting_stale_caption_suggestion_shows_message() {
         let mut state = ws(synthetic_recording(1));
         let proposal = caption_proposal_for_first_step(&state);
-        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok(proposal)));
+        let _ = update(
+            &mut state,
+            Message::CaptionProposalLoaded(Ok(caption_run_success(proposal))),
+        );
         let _ = update(
             &mut state,
             Message::TitleChanged("Manual title".to_string()),
@@ -4722,6 +5247,222 @@ mod tests {
     }
 
     #[test]
+    fn caption_request_fails_when_task_store_is_unavailable() {
+        let mut state = ws(synthetic_recording(1));
+        // Clear the task store to simulate an unavailable store.
+        state.task_store = None;
+
+        let _ = update(&mut state, Message::SuggestCaptionsRequested);
+
+        assert!(!state.caption_suggestions_running);
+        assert_eq!(
+            state.message,
+            Some("Caption suggestions failed: task store is unavailable.".to_string())
+        );
+    }
+
+    #[test]
+    fn opening_project_with_process_store_restores_task_snapshot_and_proposal() {
+        use rollshot_action::project::{
+            create_project, load_project, ActionGuideContextProjectionV1, EnabledOutputs,
+            ProjectSnapshot, ProjectStep, ProjectStepId, SnapshotFrame, SnapshotFramePayload,
+        };
+        use rollshot_action::{
+            CandidateKind, CaptionProposal, CaptionProposalId, CaptionProposalOrigin,
+            CaptionSuggestionDraft, CaptureRegion, DetectReason, InputCapability, InputSourceKind,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let project_root = dir.path().join("guide.rollshot-guide");
+        let snapshot = ProjectSnapshot {
+            base_revision: None,
+            title: "Test Guide".into(),
+            capture_region: CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 32,
+                height: 32,
+            },
+            input_source: InputSourceKind::LinuxEvdev,
+            input_capability: InputCapability::SemanticEvents,
+            enabled_outputs: EnabledOutputs::default(),
+            frames: vec![SnapshotFrame {
+                id: 1,
+                at_ms: 100,
+                payload: SnapshotFramePayload::Pixels(std::sync::Arc::new(
+                    image::RgbaImage::from_pixel(32, 32, image::Rgba([0, 0, 0, 255])),
+                )),
+            }],
+            steps: vec![ProjectStep {
+                id: ProjectStepId(10),
+                order: 1,
+                title: "Open Settings".into(),
+                caption: None,
+                kind: CandidateKind::Click,
+                reason: DetectReason::ClickConfirmed,
+                at_ms: 100,
+                keyframe: 1,
+                nearby: vec![1],
+                annotations: None,
+            }],
+            import_warnings: Vec::new(),
+        };
+        create_project(&snapshot, &project_root).unwrap();
+        let loaded = load_project(&project_root).unwrap();
+        let projection = ActionGuideContextProjectionV1::from_loaded_project(&loaded).unwrap();
+        let guide = projection.to_guide().unwrap();
+        let context = super::super::caption_agent::PreparedCaptionContext::Durable {
+            guide: guide.clone(),
+            projection: projection.clone(),
+        };
+        let binding =
+            super::super::caption_agent::caption_source_binding(&context, Some(&project_root));
+        let proposal = CaptionProposal::from_agent_drafts(
+            CaptionProposalId(42),
+            42,
+            CaptionProposalOrigin::DurableProject {
+                revision: projection.revision(),
+                projection_digest: projection.digest().to_owned(),
+            },
+            &guide,
+            vec![CaptionSuggestionDraft {
+                step_source: 10,
+                title: Some("Open Preferences".into()),
+                caption: "The preferences window appears.".into(),
+                confidence: 0.9,
+                rationale: None,
+            }],
+        );
+        let store = crate::agent_store::open_process_store(&dir.path().join("config")).unwrap();
+        let task_id =
+            super::super::caption_agent::restore_test_helpers::
+                seed_ready_for_review_caption_task_with_payload(
+                    &store,
+                    &binding,
+                    serde_json::to_vec(&proposal).unwrap(),
+                );
+
+        let workspace = crate::timeline_workspace::project::from_loaded_project_with_task_store(
+            loaded,
+            crate::timeline_workspace::project::ProjectAccess::ReadOnly,
+            store.clone(),
+        )
+        .unwrap();
+
+        assert!(std::sync::Arc::ptr_eq(
+            workspace.task_store.as_ref().unwrap(),
+            &store,
+        ));
+        assert_eq!(workspace.caption_task_id.as_ref(), Some(&task_id));
+        assert_eq!(workspace.caption_proposal.as_ref(), Some(&proposal));
+        assert_eq!(
+            workspace.caption_review_snapshot.as_ref().unwrap().status(),
+            rollshot_agent::product_task::TaskStatus::ReadyForReview
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_caption_review_survives_close_and_reopen_without_review_card() {
+        let dir = tempfile::tempdir().unwrap();
+        let (context, _, _) =
+            super::super::caption_agent::provider_tests::durable_context(dir.path());
+        let project_root = dir.path().join("guide.rollshot-guide");
+        let store = crate::agent_store::open_process_store(&dir.path().join("config")).unwrap();
+        let success = super::super::caption_agent::suggest_captions_task(
+            42,
+            store.clone(),
+            rollshot_agent::runtime::RunCancellation::new(),
+            "test-model".to_owned(),
+            "test-provider".to_owned(),
+            super::super::caption_agent::provider_tests::caption_tool_provider(1),
+            context,
+            Some(project_root.clone()),
+        )
+        .await
+        .unwrap();
+        let task_id = success.task_id.clone();
+        let suggestion_id = success.proposal.suggestions[0].id;
+
+        let opened = crate::timeline_workspace::project::load_project_worker(
+            crate::timeline_workspace::project::OpenProjectRequest {
+                root: project_root.clone(),
+                writable: true,
+            },
+        )
+        .await
+        .unwrap();
+        let crate::timeline_workspace::project::OpenProjectWorkerResult::Opened(opened) = opened
+        else {
+            panic!("project writer lock should be available");
+        };
+        let mut workspace =
+            crate::timeline_workspace::project::from_loaded_project_with_task_store(
+                opened.loaded,
+                opened.access,
+                store.clone(),
+            )
+            .unwrap();
+        assert_eq!(workspace.caption_task_id.as_ref(), Some(&task_id));
+        assert!(workspace.caption_proposal.is_some());
+
+        let _ = update(
+            &mut workspace,
+            Message::AcceptCaptionSuggestion(suggestion_id),
+        );
+        assert!(workspace.caption_review_persisting);
+        let finalized = persist_caption_review_batch(
+            store.clone(),
+            workspace.caption_review_snapshot.clone().unwrap(),
+            workspace.caption_proposal.clone().unwrap(),
+            true,
+        )
+        .await
+        .unwrap();
+        let _ = update(
+            &mut workspace,
+            Message::CaptionReviewPersisted {
+                task_id: task_id.clone(),
+                result: Box::new(Ok(finalized)),
+            },
+        );
+        assert!(workspace.caption_proposal.is_none());
+        let close = update(&mut workspace, Message::CloseDiscard);
+        assert!(matches!(close.effect, super::super::Effect::CloseWorkspace));
+        drop(workspace);
+
+        let reopened = crate::timeline_workspace::project::load_project_worker(
+            crate::timeline_workspace::project::OpenProjectRequest {
+                root: project_root.clone(),
+                writable: true,
+            },
+        )
+        .await
+        .unwrap();
+        let crate::timeline_workspace::project::OpenProjectWorkerResult::Opened(reopened) =
+            reopened
+        else {
+            panic!("project writer lock should be released on close");
+        };
+        let reopened = crate::timeline_workspace::project::from_loaded_project_with_task_store(
+            reopened.loaded,
+            reopened.access,
+            store.clone(),
+        )
+        .unwrap();
+        assert!(reopened.caption_proposal.is_none());
+        assert!(reopened.caption_review_snapshot.is_none());
+        let persisted = store.load(&task_id).unwrap();
+        assert_eq!(
+            persisted.status(),
+            rollshot_agent::product_task::TaskStatus::Completed
+        );
+        assert_eq!(
+            persisted.review_receipt().unwrap().applied_candidates,
+            vec![u32::try_from(suggestion_id.0).unwrap()]
+        );
+    }
+
+    #[test]
     fn accepted_caption_suggestion_is_used_by_storyboard_renderer() {
         let mut state = ws(recording_from_frames());
         let proposal = rollshot_action::CaptionProposal::from_agent_drafts(
@@ -4739,7 +5480,10 @@ mod tests {
                 rationale: None,
             }],
         );
-        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok(proposal)));
+        let _ = update(
+            &mut state,
+            Message::CaptionProposalLoaded(Ok(caption_run_success(proposal))),
+        );
         let _ = update(
             &mut state,
             Message::AcceptCaptionSuggestion(rollshot_action::CaptionSuggestionId(1)),
@@ -4773,7 +5517,10 @@ mod tests {
                 rationale: None,
             }],
         );
-        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok(proposal)));
+        let _ = update(
+            &mut state,
+            Message::CaptionProposalLoaded(Ok(caption_run_success(proposal))),
+        );
         let _ = update(
             &mut state,
             Message::AcceptCaptionSuggestion(rollshot_action::CaptionSuggestionId(1)),
@@ -4793,6 +5540,113 @@ mod tests {
             first_step.caption.as_deref(),
             Some("The preferences window is opened for configuration.")
         );
+    }
+
+    // ---- Task 18: Restore caption proposal ----
+
+    #[test]
+    fn restore_repopulates_the_review_surface_without_a_provider() {
+        use crate::timeline_workspace::caption_agent::restore_test_helpers::{
+            action_guide_binding_fixture, restore_caption_proposal_with_provider,
+            seed_ready_for_review_caption_task, PanicProvider,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+        // Durable ActionGuideProject binding — an ephemeral one would be swept
+        // to Stale by Task 19's open-time sweep and could never restore.
+        let binding = action_guide_binding_fixture();
+        seed_ready_for_review_caption_task(&store, &binding);
+
+        // Spec §8 item 6: prove no provider call, do not merely omit one.
+        // `PanicProvider::stream` panics if it is ever invoked.
+        let provider = PanicProvider;
+        let restored = restore_caption_proposal_with_provider(&store, &binding, 9_000, &provider);
+
+        let (_task_id, proposal) = restored.expect("a matching task must restore");
+        assert_eq!(proposal.suggestions.len(), 1);
+        assert!(proposal.has_pending());
+        assert!(matches!(
+            proposal.origin(),
+            rollshot_action::CaptionProposalOrigin::DurableProject { .. }
+        ));
+    }
+
+    #[test]
+    fn restore_declines_and_marks_stale_when_the_revision_moved() {
+        use crate::timeline_workspace::caption_agent::restore_caption_proposal;
+        use crate::timeline_workspace::caption_agent::restore_test_helpers::{
+            action_guide_binding_fixture, bump_revision, seed_ready_for_review_caption_task,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let binding = action_guide_binding_fixture();
+        let task_id = seed_ready_for_review_caption_task(&store, &binding);
+        let moved_on = bump_revision(&binding);
+
+        assert!(restore_caption_proposal(&store, &moved_on, 9_000).is_none());
+        assert_eq!(
+            store.load(&task_id).unwrap().status(),
+            rollshot_agent::product_task::TaskStatus::Stale
+        );
+    }
+
+    #[test]
+    fn restore_declines_and_leaves_other_projects_untouched() {
+        use crate::timeline_workspace::caption_agent::restore_caption_proposal;
+        use crate::timeline_workspace::caption_agent::restore_test_helpers::{
+            action_guide_binding_fixture, seed_ready_for_review_caption_task,
+            with_different_project_root,
+        };
+        // Identity mismatch is skipped, not marked stale (spec §5.3). Without
+        // this, `identity_matches` and `freshness_matches` could be swapped and
+        // the revision test above would still pass.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let binding = action_guide_binding_fixture();
+        let task_id = seed_ready_for_review_caption_task(&store, &binding);
+        let other_project = with_different_project_root(&binding);
+
+        assert!(restore_caption_proposal(&store, &other_project, 9_000).is_none());
+        assert_eq!(
+            store.load(&task_id).unwrap().status(),
+            rollshot_agent::product_task::TaskStatus::ReadyForReview,
+            "a different project must not stale another project's pending task"
+        );
+    }
+
+    #[test]
+    fn restore_is_deterministic_across_repeated_calls() {
+        use crate::timeline_workspace::caption_agent::restore_caption_proposal;
+        use crate::timeline_workspace::caption_agent::restore_test_helpers::{
+            action_guide_binding_fixture, seed_ready_for_review_caption_task,
+        };
+        // Gate A1 item 4 / spec §8: "the same input twice yields the same
+        // outcome". The first call must not consume or mutate the task.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let binding = action_guide_binding_fixture();
+        seed_ready_for_review_caption_task(&store, &binding);
+
+        let first = restore_caption_proposal(&store, &binding, 9_000);
+        let second = restore_caption_proposal(&store, &binding, 9_001);
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn an_undecodable_stored_proposal_does_not_restore() {
+        use crate::timeline_workspace::caption_agent::restore_caption_proposal;
+        use crate::timeline_workspace::caption_agent::restore_test_helpers::{
+            action_guide_binding_fixture, seed_ready_for_review_caption_task_with_payload,
+        };
+        // The `Err` arm of the payload decode (Step 3) is otherwise untested,
+        // and it is the one path that must not panic on a corrupt file.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let binding = action_guide_binding_fixture();
+        seed_ready_for_review_caption_task_with_payload(&store, &binding, b"not json".to_vec());
+
+        assert!(restore_caption_proposal(&store, &binding, 9_000).is_none());
     }
 
     // ---- Storyboard copy state machine ----

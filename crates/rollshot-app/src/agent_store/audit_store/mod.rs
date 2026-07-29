@@ -922,8 +922,8 @@ pub(crate) mod tests {
 
     fn authority_snapshot_fixture() -> rollshot_agent::authority::AuthoritySnapshot {
         use rollshot_agent::authority::{
-            AuthorityBinding, AuthoritySnapshot, DisclosureCeiling, PreparedCapability,
-            RunOperation,
+            AuthorityBinding, AuthoritySnapshot, AuthoritySubject, DisclosureCeiling,
+            PreparedCapability, RunOperation,
         };
         use rollshot_agent::product_task::{
             AnnotationStateV1, DocumentContentBinding, TaskAttemptId,
@@ -941,7 +941,7 @@ pub(crate) mod tests {
                 TaskAttemptId::new(1),
                 rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001")
                     .unwrap(),
-                document_binding,
+                AuthoritySubject::Document(document_binding),
             ),
             "rollshot-v1".into(),
             DisclosureCeiling::FullScreenshot,
@@ -974,7 +974,7 @@ pub(crate) mod tests {
         ProductTaskSnapshot::new(
             task_id(),
             TaskKind::SmartRedactionAuthor,
-            SourceBinding::new([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None),
+            SourceBinding::smart_redaction([1u8; 32], [2u8; 32], 0, "preset-001".to_owned(), None),
             10,
         )
         .unwrap()
@@ -1486,7 +1486,7 @@ pub(crate) mod tests {
         let snapshot = rollshot_agent::product_task::ProductTaskSnapshot::new(
             task_id.clone(),
             rollshot_agent::product_task::TaskKind::SmartRedactionAuthor,
-            rollshot_agent::product_task::SourceBinding::new(
+            rollshot_agent::product_task::SourceBinding::smart_redaction(
                 [1u8; 32],
                 [2u8; 32],
                 0,

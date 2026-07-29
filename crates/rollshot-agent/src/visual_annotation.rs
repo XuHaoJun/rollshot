@@ -441,7 +441,7 @@ pub(crate) fn submit_visual_annotation_suggestions_tool_arc() -> Arc<dyn Tool> {
 // ---------- Tests ----------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     // ---- Terminal type invariants ----
@@ -887,7 +887,7 @@ mod tests {
 
     // ---- Lifecycle tests (Rig-driven runner) ----
 
-    mod lifecycle {
+    pub(crate) mod lifecycle {
         use super::*;
         use crate::domain::{AttachmentDescriptor, AuthorizedModelInput, MediaType};
         use crate::driver::{AgentConfig, AgentRunner};
@@ -898,17 +898,22 @@ mod tests {
         use std::pin::Pin;
         use std::sync::Mutex;
 
-        struct ScriptedProvider {
+        pub(crate) struct ScriptedProvider {
             requests: Mutex<Vec<crate::model::ModelRequest>>,
             scripts: Mutex<VecDeque<Vec<ModelStreamEvent>>>,
         }
 
         impl ScriptedProvider {
-            fn new(scripts: Vec<Vec<ModelStreamEvent>>) -> Self {
+            pub(crate) fn new(scripts: Vec<Vec<ModelStreamEvent>>) -> Self {
                 Self {
                     requests: Mutex::new(Vec::new()),
                     scripts: Mutex::new(VecDeque::from(scripts)),
                 }
+            }
+
+            /// Number of provider requests made so far.
+            pub(crate) fn request_count(&self) -> usize {
+                self.requests.lock().unwrap().len()
             }
         }
 
@@ -969,7 +974,7 @@ mod tests {
             .expect("valid input")
         }
 
-        fn completion_event(stop: StopReason) -> ModelStreamEvent {
+        pub(crate) fn completion_event(stop: StopReason) -> ModelStreamEvent {
             ModelStreamEvent::Completed(ModelCompletion {
                 usage: ModelUsage {
                     input_tokens: 5,
@@ -980,7 +985,7 @@ mod tests {
             })
         }
 
-        fn tool_call_turn(id: &str, name: &str, args: &str) -> Vec<ModelStreamEvent> {
+        pub(crate) fn tool_call_turn(id: &str, name: &str, args: &str) -> Vec<ModelStreamEvent> {
             vec![
                 ModelStreamEvent::ToolCallStart {
                     id: id.to_string(),
@@ -994,14 +999,14 @@ mod tests {
             ]
         }
 
-        fn text_turn(text: &str) -> Vec<ModelStreamEvent> {
+        pub(crate) fn text_turn(text: &str) -> Vec<ModelStreamEvent> {
             vec![
                 ModelStreamEvent::TextDelta(text.to_string()),
                 completion_event(StopReason::EndTurn),
             ]
         }
 
-        fn va_runner() -> AgentRunner {
+        pub(crate) fn va_runner() -> AgentRunner {
             AgentRunner::new(AgentConfig {
                 max_turns: 2,
                 ..AgentConfig::default()

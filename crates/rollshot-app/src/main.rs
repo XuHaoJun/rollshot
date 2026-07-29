@@ -5,6 +5,7 @@ mod action_guide_home;
 mod action_guide_linux_product;
 #[cfg(feature = "action-guide")]
 mod action_input;
+mod agent_store;
 pub mod daemon;
 mod diagnostics;
 mod image_clipboard;

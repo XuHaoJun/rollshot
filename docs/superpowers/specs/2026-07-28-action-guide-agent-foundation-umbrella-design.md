@@ -253,18 +253,45 @@ Slice A must land all six. Slice B must need none of them changed.
    proven by a V1 fixture load test. This is additive and read-compatible, not a
    destructive schema bump; the precedent is the existing V1/V2 artifact
    metadata pair and its `#[serde(default)]` fields.
-4. **`pending_proposal_payload` interpretation dispatches on `ArtifactKind`.**
-   No new field. `canonical_payload_sha256` remains the integrity check.
+4. **The artifact payload surface becomes kind-agnostic.** Three sites move
+   together: `pending_proposal_payload`'s interpretation dispatches on
+   `ArtifactKind`; `pending_artifact_payload` likewise; and
+   `ProductTaskSnapshot::record_ready_for_review` currently takes a concrete
+   `SmartRedactionReviewPayload` and serializes it internally
+   (`crates/rollshot-agent/src/product_task.rs:948`), so its payload parameter
+   becomes kind-agnostic bytes serialized by the caller. `PromotionContext`
+   carries `PayloadSourceV1` and `PayloadProposalV1` for the same reason and
+   moves with it. No new snapshot field is added, and
+   `canonical_payload_sha256` remains the integrity check.
 5. **`DisclosureCeiling` gains a zero-image level.** Captions transmit no pixels
-   at all, so neither existing variant is honest. The enum derives `PartialOrd`
-   and `Ord` and is compared as a ceiling, so the new variant must order as
-   strictly less than `OcrLayoutOnly`, and Slice A must re-check every existing
-   ordering comparison. Inserting it in the wrong position silently changes the
-   meaning of existing comparisons.
+   at all, so neither existing variant is honest in the durable authority
+   receipt. This level buys provenance honesty, not enforcement:
+   `validate_model_input` counts attachments only, and `OcrLayoutOnly` already
+   rejects all of them, so the new level behaves identically there. A caption
+   run's actual teeth are its grant set, which never includes
+   `InspectPreparedImage`, and an empty prepared-capability set. The enum derives
+   `PartialOrd` and `Ord` and is compared as a ceiling, so the new variant must
+   order as strictly less than `OcrLayoutOnly`, and Slice A must re-check every
+   existing ordering comparison. Inserting it in the wrong position silently
+   changes the meaning of existing comparisons.
 6. **The app-side store moves out of the Smart Redaction UI module.**
    `task_store.rs` and `audit_store/` move to a shared app module that compiles
    with the `action-guide` feature disabled. Only Action Guide task-kind
    construction sites are feature-gated.
+7. **`DocumentContentBinding` becomes domain-tagged, or `AuthorityBinding` holds
+   the source binding directly.** `AuthorityBinding` requires a
+   `DocumentContentBinding` (`crates/rollshot-agent/src/authority.rs:75`), whose
+   constructor requires a base-image digest and an `AnnotationStateV1`
+   (`crates/rollshot-agent/src/product_task.rs:546`). A caption run has neither,
+   so without this change it cannot construct an `AuthoritySnapshot` at all and
+   Gate A1 item 1 is unreachable. Three attached sites move with it: the snapshot
+   digest hashes the three document fields (`authority.rs:254`), `authorize_tool`
+   compares a supplied binding for equality as its per-call staleness guard
+   (`authority.rs:165`), and the receipt exposes `document_binding_digest`
+   (`authority.rs:208`). The child spec chooses the shape. A degenerate
+   zero-valued binding is not permitted: it writes a false claim into durable
+   provenance and reduces the staleness guard to a vacuous comparison while
+   appearing to keep it.
 
 New `TaskKind`, `ArtifactKind`, `RunOperation`, source-binding, and
 artifact-summary variants are additive and are expected in both slices. Additive
@@ -278,8 +305,20 @@ blocking fs4 exclusive lock per operation
 `TaskStore::open` additionally reconciles all audit journals before returning.
 
 Today only one workspace uses the store, so cross-domain contention has never
-occurred. After sharing, Smart Redaction and Action Guide can each drive an
-agent run at the same time.
+occurred. After sharing, Smart Redaction and Action Guide task files, journals,
+and reconcile passes all live in one tree, and two Rollshot processes can operate
+on it at once.
+
+**Corrected 2026-07-28 after engineering review.** An earlier draft of this
+section claimed the two domains could each drive an agent run at the same time
+*within one process*. They cannot: `main.rs:74`'s `run` dispatches into mutually
+exclusive `LaunchMode` branches, so `result_workspace::run` and
+`timeline_workspace::run` never coexist in a process. The exposure is
+cross-process, which the blocking fs4 lock already existed to handle. The rule
+below is unchanged and is trivially satisfied; only its justification was
+overstated. Slice A's two-domain concurrency test is retained as a regression
+test that the lock and the audited-write path behave for two task kinds, not as
+mitigation of a newly created single-process race.
 
 This umbrella therefore fixes:
 
@@ -517,6 +556,14 @@ present the change for user approval, update only this umbrella and future child
 requirements, and do not rewrite completed child specs or plans.
 
 A discovery contained within one slice belongs in that slice's child spec.
+
+### 17.1 Amendment log
+
+| Date | Amendment | Record |
+|---|---|---|
+| 2026-07-28 | §9 gains item 7 (authority binding); item 5's rationale corrected to provenance honesty rather than enforcement | [`2026-07-28-action-guide-authority-binding-amendment-decision.md`](../spikes/2026-07-28-action-guide-authority-binding-amendment-decision.md) |
+| 2026-07-28 | §9 item 4 widened from `pending_proposal_payload` alone to the whole artifact payload surface, including `record_ready_for_review`'s concrete payload parameter | same record, §7 |
+| 2026-07-28 | §10's intra-process contention claim withdrawn as factually wrong; the single-`TaskStore`-per-process rule itself unchanged. Logged as a correction, not an amendment | same record, §8 |
 
 ## 18. Umbrella completion
 
