@@ -1172,6 +1172,373 @@ pub(crate) fn visual_review_receipt(
     })
 }
 
+// ========================================================================
+// Visual annotation proposal restore (Task 13)
+// ========================================================================
+
+/// Look for a durable visual annotation task ready for review, validate its
+/// proposal against the current step/image state, and rebase if matching.
+///
+/// Identity and freshness are both checked by `reconcile_for_source`, which
+/// also marks a same-identity stale task through its audited path.  No
+/// provider call is made: the proposal comes from the stored payload.
+///
+/// Returns `Some((snapshot, proposal))` only when the task is `ReadyForReview`,
+/// the stored proposal decodes, and `rebase_restored` yields `Ready`.
+pub(crate) fn restore_visual_annotation_proposal(
+    store: &crate::agent_store::TaskStore,
+    binding: &rollshot_agent::product_task::SourceBinding,
+    current_step: &GuideStep,
+    current_document_state_id: u64,
+    image_width: u32,
+    image_height: u32,
+    keyframe_sha256: [u8; 32],
+    annotation_state_sha256: [u8; 32],
+    now: i64,
+) -> Option<(
+    rollshot_agent::product_task::ProductTaskSnapshot,
+    VisualAnnotationProposal,
+)> {
+    let snapshot = store.reconcile_for_source(binding, now).ok().flatten()?;
+    if snapshot.kind() != rollshot_agent::product_task::TaskKind::ActionGuideVisualAnnotation {
+        return None;
+    }
+    let payload = snapshot.pending_proposal_payload()?;
+    let mut proposal = match serde_json::from_slice::<VisualAnnotationProposal>(payload) {
+        Ok(p) => p,
+        Err(error) => {
+            tracing::warn!(
+                target: "rollshot::action::visual_annotation_agent",
+                error = %error,
+                task_id = snapshot.task_id().as_str(),
+                "stored visual annotation proposal failed to decode; not restoring"
+            );
+            return None;
+        }
+    };
+    let outcome = proposal.rebase_restored(
+        current_step,
+        current_document_state_id,
+        image_width,
+        image_height,
+        keyframe_sha256,
+        annotation_state_sha256,
+    );
+    match outcome {
+        rollshot_action::VisualAnnotationApplyOutcome::Ready => {
+            tracing::info!(
+                target: "rollshot::action::visual_annotation_agent",
+                task_id = snapshot.task_id().as_str(),
+                suggestion_count = proposal.suggestions.len(),
+                "restored pending visual annotation proposal from prior session"
+            );
+            Some((snapshot, proposal))
+        }
+        _ => {
+            tracing::debug!(
+                target: "rollshot::action::visual_annotation_agent",
+                task_id = snapshot.task_id().as_str(),
+                ?outcome,
+                "visual annotation proposal not restorable (stale or not pending)"
+            );
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod restore_test_helpers {
+    use super::*;
+
+    pub(crate) fn test_task_id() -> rollshot_agent::product_task::ProductTaskId {
+        rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap()
+    }
+
+    pub(crate) fn test_run_id() -> rollshot_agent::domain::RunId {
+        rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap()
+    }
+
+    pub(crate) fn step_fixture() -> GuideStep {
+        GuideStep {
+            index: 1,
+            title: "Open Settings".to_string(),
+            caption: "The settings panel appears.".to_string(),
+            kind: rollshot_action::CandidateKind::Click,
+            reason: rollshot_action::DetectReason::ClickConfirmed,
+            at_ms: 120,
+            keyframe: 7,
+            nearby: vec![6, 7, 8],
+            source: 10,
+        }
+    }
+
+    pub(crate) fn visual_proposal_fixture() -> VisualAnnotationProposal {
+        let step = step_fixture();
+        suggestion_batch_to_proposal(
+            42,
+            VisualAnnotationProposalOrigin::DurableProject {
+                revision: 3,
+                projection_digest: "ab".repeat(32),
+            },
+            &step,
+            5,
+            400,
+            200,
+            [1u8; 32],
+            [2u8; 32],
+            vec![
+                VisualAnnotationDraft::NumberCallout {
+                    id: 1,
+                    tip: rollshot_agent::NormalizedPoint { x: 0.5, y: 0.5 },
+                    bubble: rollshot_agent::NormalizedPoint { x: 0.2, y: 0.3 },
+                    confidence: 0.9,
+                    rationale: Some("button center".into()),
+                },
+                VisualAnnotationDraft::TextNote {
+                    id: 2,
+                    position: rollshot_agent::NormalizedPoint { x: 0.75, y: 0.1 },
+                    text: "Save button".into(),
+                    confidence: 0.8,
+                    rationale: None,
+                },
+            ],
+        )
+        .expect("fixture proposal")
+    }
+
+    /// Durable `ActionGuideVisualAnnotationProject` binding fixture.
+    pub fn visual_binding_fixture() -> rollshot_agent::product_task::SourceBinding {
+        rollshot_agent::product_task::SourceBinding::ActionGuideVisualAnnotationProject {
+            project_root_sha256: [0xAA; 32],
+            revision: 3,
+            projection_digest: "ab".repeat(32),
+            step_source: 10,
+            keyframe: 7,
+            keyframe_sha256: [1u8; 32],
+            annotation_state_sha256: [2u8; 32],
+        }
+    }
+
+    /// Return the same binding with a bumped revision (freshness mismatch).
+    pub fn bump_visual_revision(
+        binding: &rollshot_agent::product_task::SourceBinding,
+    ) -> rollshot_agent::product_task::SourceBinding {
+        match binding {
+            rollshot_agent::product_task::SourceBinding::ActionGuideVisualAnnotationProject {
+                project_root_sha256,
+                revision,
+                projection_digest,
+                step_source,
+                keyframe,
+                keyframe_sha256,
+                annotation_state_sha256,
+            } => rollshot_agent::product_task::SourceBinding::ActionGuideVisualAnnotationProject {
+                project_root_sha256: *project_root_sha256,
+                revision: revision + 1,
+                projection_digest: projection_digest.clone(),
+                step_source: *step_source,
+                keyframe: *keyframe,
+                keyframe_sha256: *keyframe_sha256,
+                annotation_state_sha256: *annotation_state_sha256,
+            },
+            _ => panic!("bump_visual_revision only supports ActionGuideVisualAnnotationProject"),
+        }
+    }
+
+    /// Return the same kind of binding but with a different project root (identity mismatch).
+    pub fn with_different_visual_project_root(
+        binding: &rollshot_agent::product_task::SourceBinding,
+    ) -> rollshot_agent::product_task::SourceBinding {
+        match binding {
+            rollshot_agent::product_task::SourceBinding::ActionGuideVisualAnnotationProject {
+                revision,
+                projection_digest,
+                step_source,
+                keyframe,
+                keyframe_sha256,
+                annotation_state_sha256,
+                ..
+            } => rollshot_agent::product_task::SourceBinding::ActionGuideVisualAnnotationProject {
+                project_root_sha256: [0xBB; 32],
+                revision: *revision,
+                projection_digest: projection_digest.clone(),
+                step_source: *step_source,
+                keyframe: *keyframe,
+                keyframe_sha256: *keyframe_sha256,
+                annotation_state_sha256: *annotation_state_sha256,
+            },
+            _ => panic!("with_different_visual_project_root only supports ActionGuideVisualAnnotationProject"),
+        }
+    }
+
+    /// Build a promoted `ReadyForReview` visual annotation task in the store.
+    /// Returns the task id.
+    pub fn seed_ready_for_review_visual_task(
+        store: &crate::agent_store::TaskStore,
+        binding: &rollshot_agent::product_task::SourceBinding,
+    ) -> rollshot_agent::product_task::ProductTaskId {
+        let proposal = visual_proposal_fixture();
+        seed_ready_for_review_visual_task_with_payload(
+            store,
+            binding,
+            serde_json::to_vec(&proposal).unwrap(),
+        )
+    }
+
+    /// Build a promoted `ReadyForReview` visual annotation task with a custom
+    /// proposal payload. Returns the task id.
+    pub fn seed_ready_for_review_visual_task_with_payload(
+        store: &crate::agent_store::TaskStore,
+        binding: &rollshot_agent::product_task::SourceBinding,
+        proposal_payload: Vec<u8>,
+    ) -> rollshot_agent::product_task::ProductTaskId {
+        use rollshot_agent::product_task::{
+            ArtifactId, ArtifactKind, ArtifactRevision, ArtifactSummary, ProductArtifactMetadata,
+            ProductTaskSnapshot, RunContractReceiptV1, TaskAttempt, TaskAttemptId, TaskKind,
+        };
+        use sha2::{Digest, Sha256};
+
+        let task_id = test_task_id();
+        let run_id = test_run_id();
+        let now: i64 = 5_000;
+
+        let created = ProductTaskSnapshot::new_v3(
+            task_id.clone(),
+            TaskKind::ActionGuideVisualAnnotation,
+            binding.clone(),
+            now,
+        )
+        .unwrap();
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), now);
+        let running = created.start_attempt(attempt, now).unwrap();
+
+        let subject = match binding {
+            rollshot_agent::product_task::SourceBinding::ActionGuideVisualAnnotationProject {
+                project_root_sha256,
+                revision,
+                projection_digest,
+                ..
+            } => rollshot_agent::authority::AuthoritySubject::ActionGuideProject {
+                project_root_sha256: *project_root_sha256,
+                revision: *revision,
+                projection_digest: projection_digest.clone(),
+            },
+            rollshot_agent::product_task::SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
+                guide_digest,
+                ..
+            } => rollshot_agent::authority::AuthoritySubject::ActionGuideEphemeralGuide {
+                guide_digest: guide_digest.clone(),
+            },
+            _ => panic!("unexpected binding domain for visual seed"),
+        };
+        let authority =
+            crate::timeline_workspace::visual_annotation_agent::visual_authority(
+                task_id.clone(),
+                run_id.clone(),
+                subject,
+            )
+            .unwrap();
+        let run_contract = RunContractReceiptV1 {
+            authority: authority.receipt(now),
+            skill_use: rollshot_agent::skills::bundled_action_guide_visual_annotations_use()
+                .unwrap()
+                .receipt(),
+            bound_at_unix_ms: now,
+        };
+        let bound = running.bind_run_contract(run_contract, now).unwrap();
+
+        let payload_bytes = proposal_payload;
+        let meta = ProductArtifactMetadata::new_v3(
+            ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000001").unwrap(),
+            ArtifactRevision::new(1),
+            ArtifactKind::ActionGuideVisualAnnotation,
+            1,
+            format!("{:x}", Sha256::digest(&payload_bytes)),
+            binding.clone(),
+            task_id.clone(),
+            TaskAttemptId::new(1),
+            run_id,
+            "1".to_string(),
+            "test-provider".to_string(),
+            "test-model".to_string(),
+            "run-config-digest".to_string(),
+            ArtifactSummary::ActionGuideVisualAnnotation { suggestion_count: 2 },
+            now,
+        );
+
+        let ready = bound
+            .record_ready_for_review(meta, payload_bytes.clone(), Some(payload_bytes), now)
+            .unwrap();
+        store.create(&ready).unwrap();
+        ready.task_id().clone()
+    }
+
+    /// Provider adapter that panics if `stream` is ever called. Used to prove
+    /// that `restore_visual_annotation_proposal` makes no provider calls.
+    pub struct PanicProvider;
+
+    impl rollshot_agent::ProviderAdapter for PanicProvider {
+        fn stream(
+            &self,
+            _request: rollshot_agent::model::ModelRequest,
+            _bounds: rollshot_agent::StreamBounds,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            std::pin::Pin<
+                                Box<
+                                    dyn iced::futures::Stream<
+                                            Item = Result<
+                                                rollshot_agent::model::ModelStreamEvent,
+                                                rollshot_agent::model::ModelError,
+                                            >,
+                                        > + Send,
+                                >,
+                            >,
+                            rollshot_agent::model::ModelError,
+                        >,
+                    > + Send,
+            >,
+        > {
+            panic!("PanicProvider::stream must not be called during restore")
+        }
+    }
+
+    /// `restore_visual_annotation_proposal` with an explicit provider argument
+    /// (used to prove no provider call is made). The provider is unused.
+    pub fn restore_visual_with_provider(
+        store: &crate::agent_store::TaskStore,
+        binding: &rollshot_agent::product_task::SourceBinding,
+        current_step: &GuideStep,
+        current_document_state_id: u64,
+        image_width: u32,
+        image_height: u32,
+        keyframe_sha256: [u8; 32],
+        annotation_state_sha256: [u8; 32],
+        now: i64,
+        _provider: &dyn rollshot_agent::ProviderAdapter,
+    ) -> Option<(
+        rollshot_agent::product_task::ProductTaskSnapshot,
+        VisualAnnotationProposal,
+    )> {
+        restore_visual_annotation_proposal(
+            store,
+            binding,
+            current_step,
+            current_document_state_id,
+            image_width,
+            image_height,
+            keyframe_sha256,
+            annotation_state_sha256,
+            now,
+        )
+    }
+}
+
 #[cfg(test)]
 fn visual_authority_with_grants(
     task_id: rollshot_agent::product_task::ProductTaskId,
@@ -2504,5 +2871,254 @@ mod tests {
         assert_eq!(receipt.resulting_document_state_id, Some(42u32));
         assert_eq!(receipt.resulting_document_digest, Some([3u8; 32]));
         assert_eq!(receipt.decided_at_unix_ms, 5000);
+    }
+
+    // ------------------------------------------------------------------
+    // Visual annotation restore tests (Task 13)
+    // ------------------------------------------------------------------
+
+    use restore_test_helpers::*;
+
+    #[test]
+    fn restore_visual_matching_task_returns_proposal_without_provider_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::TaskStore::open(dir.path()).unwrap();
+        let binding = visual_binding_fixture();
+        seed_ready_for_review_visual_task(&store, &binding);
+
+        let provider = PanicProvider;
+        let result = restore_visual_with_provider(
+            &store,
+            &binding,
+            &step_fixture(),
+            0,
+            400,
+            200,
+            [1u8; 32],
+            [2u8; 32],
+            9_000,
+            &provider,
+        );
+
+        let (snapshot, proposal) = result.expect("a matching task must restore");
+        assert_eq!(proposal.suggestions.len(), 2);
+        assert_eq!(
+            snapshot.status(),
+            rollshot_agent::product_task::TaskStatus::ReadyForReview
+        );
+    }
+
+    #[test]
+    fn restore_visual_declines_and_marks_stale_when_revision_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::TaskStore::open(dir.path()).unwrap();
+        let binding = visual_binding_fixture();
+        let task_id = seed_ready_for_review_visual_task(&store, &binding);
+
+        let moved_on = bump_visual_revision(&binding);
+        assert!(restore_visual_annotation_proposal(
+            &store,
+            &moved_on,
+            &step_fixture(),
+            0,
+            400,
+            200,
+            [1u8; 32],
+            [2u8; 32],
+            9_000,
+        )
+        .is_none());
+        assert_eq!(
+            store.load(&task_id).unwrap().status(),
+            rollshot_agent::product_task::TaskStatus::Stale
+        );
+    }
+
+    #[test]
+    fn restore_visual_declines_different_project_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::TaskStore::open(dir.path()).unwrap();
+        let binding = visual_binding_fixture();
+        let task_id = seed_ready_for_review_visual_task(&store, &binding);
+
+        let other_root = with_different_visual_project_root(&binding);
+        assert!(restore_visual_annotation_proposal(
+            &store,
+            &other_root,
+            &step_fixture(),
+            0,
+            400,
+            200,
+            [1u8; 32],
+            [2u8; 32],
+            9_000,
+        )
+        .is_none());
+        // Task is untouched (not marked stale for a different root).
+        assert_eq!(
+            store.load(&task_id).unwrap().status(),
+            rollshot_agent::product_task::TaskStatus::ReadyForReview
+        );
+    }
+
+    #[test]
+    fn restore_visual_declines_when_keyframe_digest_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::TaskStore::open(dir.path()).unwrap();
+        let binding = visual_binding_fixture();
+        let task_id = seed_ready_for_review_visual_task(&store, &binding);
+
+        // Same binding (passes reconcile_for_source), but keyframe digest
+        // differs — rebase_restored marks all suggestions Stale.
+        let result = restore_visual_annotation_proposal(
+            &store,
+            &binding,
+            &step_fixture(),
+            0,
+            400,
+            200,
+            [99u8; 32], // different keyframe digest
+            [2u8; 32],
+            9_000,
+        );
+        assert!(result.is_none(), "digest mismatch must not restore");
+    }
+
+    #[test]
+    fn restore_visual_declines_when_annotation_digest_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::TaskStore::open(dir.path()).unwrap();
+        let binding = visual_binding_fixture();
+        let task_id = seed_ready_for_review_visual_task(&store, &binding);
+
+        let result = restore_visual_annotation_proposal(
+            &store,
+            &binding,
+            &step_fixture(),
+            0,
+            400,
+            200,
+            [1u8; 32],
+            [99u8; 32], // different annotation digest
+            9_000,
+        );
+        assert!(result.is_none(), "annotation mismatch must not restore");
+    }
+
+    #[test]
+    fn restore_visual_declines_when_image_dimensions_differ() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::TaskStore::open(dir.path()).unwrap();
+        let binding = visual_binding_fixture();
+        let task_id = seed_ready_for_review_visual_task(&store, &binding);
+
+        // Different image width.
+        let result = restore_visual_annotation_proposal(
+            &store,
+            &binding,
+            &step_fixture(),
+            0,
+            999, // wrong width
+            200,
+            [1u8; 32],
+            [2u8; 32],
+            9_000,
+        );
+        assert!(result.is_none(), "dimension mismatch must not restore");
+
+        // Different image height.
+        let result = restore_visual_annotation_proposal(
+            &store,
+            &binding,
+            &step_fixture(),
+            0,
+            400,
+            999, // wrong height
+            [1u8; 32],
+            [2u8; 32],
+            9_000,
+        );
+        assert!(result.is_none(), "height mismatch must not restore");
+    }
+
+    #[test]
+    fn restore_visual_declines_when_step_source_differs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::TaskStore::open(dir.path()).unwrap();
+        let binding = visual_binding_fixture();
+        seed_ready_for_review_visual_task(&store, &binding);
+
+        let mut changed_step = step_fixture();
+        changed_step.source = 999; // different source
+
+        let result = restore_visual_annotation_proposal(
+            &store,
+            &binding,
+            &changed_step,
+            0,
+            400,
+            200,
+            [1u8; 32],
+            [2u8; 32],
+            9_000,
+        );
+        assert!(result.is_none(), "step source mismatch must not restore");
+    }
+
+    #[test]
+    fn restore_visual_is_deterministic_across_repeated_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::TaskStore::open(dir.path()).unwrap();
+        let binding = visual_binding_fixture();
+        seed_ready_for_review_visual_task(&store, &binding);
+
+        let first = restore_visual_annotation_proposal(
+            &store,
+            &binding,
+            &step_fixture(),
+            0,
+            400,
+            200,
+            [1u8; 32],
+            [2u8; 32],
+            9_000,
+        );
+        let second = restore_visual_annotation_proposal(
+            &store,
+            &binding,
+            &step_fixture(),
+            0,
+            400,
+            200,
+            [1u8; 32],
+            [2u8; 32],
+            9_001,
+        );
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn restore_visual_undecodable_payload_does_not_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::TaskStore::open(dir.path()).unwrap();
+        let binding = visual_binding_fixture();
+        seed_ready_for_review_visual_task_with_payload(
+            &store,
+            &binding,
+            b"not valid json".to_vec(),
+        );
+
+        let result = restore_visual_annotation_proposal(
+            &store,
+            &binding,
+            &step_fixture(),
+            0,
+            400,
+            200,
+            [1u8; 32],
+            [2u8; 32],
+            9_000,
+        );
+        assert!(result.is_none(), "undecodable payload must not restore");
     }
 }

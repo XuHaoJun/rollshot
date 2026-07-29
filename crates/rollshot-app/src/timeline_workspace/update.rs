@@ -525,6 +525,113 @@ pub(super) fn restore_caption_proposal_on_project_open(
     }
 }
 
+/// Try to restore a pending visual annotation proposal from the task store
+/// for the currently selected step. Only attempts restore when:
+///   1. The project is saved and clean (not ephemeral/dirty),
+///   2. A task store is available,
+///   3. A step is selected with a hydrated keyframe (image in presentation),
+///   4. No visual annotation run or persistence is active.
+///
+/// On success, installs the task ID, snapshot, and proposal into workspace
+/// state and sets the status to "ready for review".
+#[cfg(feature = "action-guide")]
+pub(super) fn restore_visual_annotation_proposal_for_selected_step(
+    state: &mut TimelineWorkspace,
+) {
+    use super::caption_agent::project_root_digest;
+    use super::project::ProjectSession;
+    use super::visual_annotation_agent::restore_visual_annotation_proposal;
+    use rollshot_action::project::ActionGuideContextProjectionV1;
+
+    // Only for saved clean projects with a writable lock.
+    let (root, _base_revision) = match &state.project_session {
+        Some(ProjectSession::Saved {
+            root,
+            base_revision,
+            access: super::project::ProjectAccess::Writable(_),
+        }) => (root, base_revision),
+        _ => return,
+    };
+    let Some(store) = &state.task_store else {
+        return;
+    };
+    // No visual annotation run or persistence already active.
+    if matches!(
+        state.visual_annotation_suggestion,
+        super::VisualAnnotationSuggestionState::Running { .. }
+            | super::VisualAnnotationSuggestionState::ConsentPending(_)
+    ) || state.visual_annotation_review_persisting
+    {
+        return;
+    }
+    // Need a selected step with hydrated keyframe.
+    let Some(step) = state.selected_step().cloned() else {
+        return;
+    };
+    // Extract frame_source temporarily to call cached() (requires &mut self for LRU).
+    let mut frame_source = state.frame_source.take();
+    let image_data = frame_source.as_mut().and_then(|s| {
+        s.cached(step.keyframe).map(|img| {
+            let sha = super::visual_annotation_agent::visual_keyframe_digest(&*img);
+            (img.width(), img.height(), sha)
+        })
+    });
+    state.frame_source = frame_source;
+    let Some((img_width, img_height, keyframe_sha)) = image_data else {
+        return;
+    };
+    let annotations = state
+        .presentation
+        .document_for_step(&step, &state.store)
+        .map(|d| d.document.annotations().to_vec())
+        .unwrap_or_default();
+    let annotation_sha =
+        match super::visual_annotation_agent::visual_annotation_state_digest(&annotations) {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+    // Load the project to build the projection for the source binding.
+    let loaded = match rollshot_action::project::load_project(root) {
+        Ok(l) => l,
+        Err(_) => return,
+    };
+    let projection = match ActionGuideContextProjectionV1::from_loaded_project(&loaded) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let binding = {
+        use rollshot_agent::product_task::SourceBinding;
+        SourceBinding::ActionGuideVisualAnnotationProject {
+            project_root_sha256: project_root_digest(root),
+            revision: projection.revision(),
+            projection_digest: projection.digest().to_owned(),
+            step_source: step.source,
+            keyframe: step.keyframe,
+            keyframe_sha256: keyframe_sha,
+            annotation_state_sha256: annotation_sha,
+        }
+    };
+    let now = chrono::Utc::now().timestamp_millis();
+    if let Some((snapshot, proposal)) = restore_visual_annotation_proposal(
+        store,
+        &binding,
+        &step,
+        0, // document_state_id is rebased inside restore
+        img_width,
+        img_height,
+        keyframe_sha,
+        annotation_sha,
+        now,
+    ) {
+        let task_id = snapshot.task_id().clone();
+        state.visual_annotation_task_id = Some(task_id);
+        state.visual_annotation_review_snapshot = Some(snapshot);
+        state.visual_annotation_suggestion =
+            super::VisualAnnotationSuggestionState::PendingReview(proposal);
+        state.message = Some(VISUAL_ANNOTATION_STATUS_READY.to_string());
+    }
+}
+
 // ---- Visual annotation status constants (frozen baseline) ----
 
 /// Shown while the visual annotation suggestion run is in flight.
@@ -554,6 +661,9 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
         Message::SelectStep(index) => {
             if state.guide.steps().iter().any(|s| s.index == index) {
                 state.selected = Some(index);
+                // Dismiss any in-memory visual annotation review before
+                // attempting restore for the newly selected step.
+                dismiss_stale_visual_annotation_review(state);
                 #[cfg(feature = "action-guide")]
                 {
                     // Extract selected step info before borrowing frame_source.
@@ -568,6 +678,9 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                         .map(|s| s.nearby.clone())
                         .unwrap_or_default();
 
+                    // Track whether the keyframe was hydrated from cache
+                    // so we can attempt restore after releasing the mutable borrow.
+                    let mut keyframe_hydrated = false;
                     if let Some(ref mut source) = state.frame_source {
                         // Project-backed: clear old handles, use cache, spawn decodes.
                         state.keyframe_handle = None;
@@ -588,6 +701,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                             state
                                 .presentation
                                 .hydrate_for_step(source_id, keyframe, img);
+                            keyframe_hydrated = true;
                         }
                         // Try cache for nearby strip frames.
                         for &id in &nearby {
@@ -618,6 +732,12 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                             }
                         }
                         if uncached.is_empty() {
+                            // All frames cached — attempt visual restore now.
+                            // The mutable borrow on frame_source is about to be released.
+                            drop(source);
+                            if keyframe_hydrated {
+                                restore_visual_annotation_proposal_for_selected_step(state);
+                            }
                             return Update::none();
                         }
                         // Build load requests for uncached frames.
@@ -626,6 +746,10 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                             .filter_map(|&id| source.load_request(id).map(|req| (id, req)))
                             .collect();
                         if requests.is_empty() {
+                            drop(source);
+                            if keyframe_hydrated {
+                                restore_visual_annotation_proposal_for_selected_step(state);
+                            }
                             return Update::none();
                         }
                         // Spawn up to 2 concurrent decode tasks.
@@ -647,7 +771,17 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                             ),
                             move |msg| msg,
                         );
+                        // Keyframe was cached but nearby frames need loading.
+                        // Attempt restore before spawning the decode task.
+                        // Note: source borrow is still active here, but we don't
+                        // need it for restore. We'll attempt restore after
+                        // frame decode completes instead.
                         return Update::task(task);
+                    }
+                    // Ephemeral or no frame_source — attempt restore if keyframe
+                    // was hydrated above (won't reach here for project-backed).
+                    if keyframe_hydrated {
+                        restore_visual_annotation_proposal_for_selected_step(state);
                     }
                 }
                 #[cfg(not(feature = "action-guide"))]
@@ -3375,6 +3509,7 @@ fn handle_frame_load_completed(
     };
 
     let mut any_required_failed = false;
+    let mut keyframe_loaded = false;
 
     for result in results {
         match result {
@@ -3396,6 +3531,7 @@ fn handle_frame_load_completed(
                         state
                             .presentation
                             .hydrate_for_step(source_id, keyframe, img);
+                        keyframe_loaded = true;
                     }
                 } else {
                     // Build strip handle for nearby frame.
@@ -3429,6 +3565,9 @@ fn handle_frame_load_completed(
         }
     }
 
+    // Release the mutable borrow on frame_source before attempting restore.
+    drop(source);
+
     if any_required_failed {
         // Set CorruptReadOnly access to prevent further mutations.
         if let Some(ProjectSession::Saved { access, .. }) = &mut state.project_session {
@@ -3439,6 +3578,11 @@ fn handle_frame_load_completed(
             "A required frame could not be decoded. The project is now read-only.".to_string(),
         );
         return Update::none();
+    }
+
+    // Attempt visual annotation restore now that the keyframe is hydrated.
+    if keyframe_loaded {
+        restore_visual_annotation_proposal_for_selected_step(state);
     }
 
     // Spawn remaining frames if any.
