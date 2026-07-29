@@ -484,6 +484,7 @@ pub(crate) fn caption_review_receipt(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn suggest_captions_task(
     run_id: u64,
     store: std::sync::Arc<crate::agent_store::TaskStore>,
@@ -515,6 +516,7 @@ pub(crate) async fn suggest_captions_task(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn suggest_captions_with_store(
     run_id: u64,
     store: std::sync::Arc<crate::agent_store::TaskStore>,
@@ -803,6 +805,7 @@ pub(crate) mod restore_test_helpers {
         }
     }
 
+    #[allow(dead_code)]
     fn promote_caption_task_for_tests(
         binding: &rollshot_agent::product_task::SourceBinding,
         proposal: &rollshot_action::CaptionProposal,
@@ -1295,6 +1298,7 @@ mod provider_tests {
         )
     }
 
+    #[allow(dead_code)]
     fn run<F: Future>(future: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread()
             .enable_time()

@@ -136,7 +136,7 @@ pub enum Message {
         >,
     ),
     /// Caption task snapshot persisted as ReadyForReview.
-    CaptionReviewPromoted(Result<rollshot_agent::product_task::ProductTaskSnapshot, String>),
+    CaptionReviewPromoted(Box<Result<rollshot_agent::product_task::ProductTaskSnapshot, String>>),
     /// Two-stage caption context preparation completed.
     CaptionContextPrepared {
         run_id: u64,
@@ -271,7 +271,7 @@ fn promote_caption_ready_for_review(
         .last()
         .ok_or("caption task has no attempt".to_string())?;
     let meta = ProductArtifactMetadata::new_v3(
-        ArtifactId::parse(&format!(
+        ArtifactId::parse(format!(
             "artifact-{}",
             task_id
                 .as_str()
@@ -1341,7 +1341,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                         .await
                         .unwrap_or_else(|e| Err(format!("spawn: {e}")))
                     },
-                    Message::CaptionReviewPromoted,
+                    |r| Message::CaptionReviewPromoted(Box::new(r)),
                 ));
             }
             Update::none()
@@ -1356,18 +1356,20 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             }
             Update::none()
         }
-        Message::CaptionReviewPromoted(Ok(snapshot)) => {
-            state.caption_review_snapshot = Some(snapshot);
-            Update::none()
-        }
-        Message::CaptionReviewPromoted(Err(error)) => {
-            tracing::warn!(
-                target: "rollshot::action::caption_review",
-                %error,
-                "caption task promotion failed"
-            );
-            Update::none()
-        }
+        Message::CaptionReviewPromoted(result) => match *result {
+            Ok(snapshot) => {
+                state.caption_review_snapshot = Some(snapshot);
+                Update::none()
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "rollshot::action::caption_review",
+                    %error,
+                    "caption task promotion failed"
+                );
+                Update::none()
+            }
+        },
         Message::AcceptCaptionSuggestion(id) => {
             if !state.can_mutate() {
                 return Update::none();
@@ -1571,10 +1573,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             };
 
             // Take the cancellation token so it can be moved into the task.
-            let cancellation = state
-                .caption_cancellation
-                .take()
-                .unwrap_or_else(rollshot_agent::runtime::RunCancellation::new);
+            let cancellation = state.caption_cancellation.take().unwrap_or_default();
             let store = state.task_store.clone().expect("task_store checked above");
 
             state.message = Some(super::caption_agent::RUNNING_MESSAGE.to_string());
@@ -3957,7 +3956,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // Leak the tempdir so the store path survives the scope. Tests are
         // short-lived so this is acceptable.
-        let path = dir.into_path();
+        let path = dir.keep();
         ws.task_store = Some(crate::agent_store::open_process_store(&path).unwrap());
         ws
     }
