@@ -373,6 +373,30 @@ pub(super) fn restore_caption_proposal_on_project_open(
     }
 }
 
+// ---- Visual annotation status constants (frozen baseline) ----
+
+/// Shown while the visual annotation suggestion run is in flight.
+pub(crate) const VISUAL_ANNOTATION_STATUS_RUNNING: &str =
+    "Suggesting visual annotations...";
+/// Shown when the model returns a reviewable proposal.
+pub(crate) const VISUAL_ANNOTATION_STATUS_READY: &str =
+    "Visual annotation suggestions ready for review.";
+/// Shown when the user cancels an in-flight run.
+pub(crate) const VISUAL_ANNOTATION_STATUS_CANCELLED: &str =
+    "Visual annotation suggestion cancelled.";
+/// Shown when the background task returns an Err.
+pub(crate) const VISUAL_ANNOTATION_STATUS_FAILED: &str =
+    "Visual annotation suggestion failed. See the annotation modal for details.";
+/// Shown when a state-changing action discards a pending review.
+pub(crate) const VISUAL_ANNOTATION_STATUS_STALE: &str =
+    "Annotation suggestions are stale; regenerate them.";
+/// Shown when the model returns NoSuggestion without a reason.
+pub(crate) const VISUAL_ANNOTATION_NO_SUGGESTION_DEFAULT: &str =
+    "Visual annotation suggestion: no suggestion returned.";
+/// Shown when no annotations were applicable after accept-all.
+pub(crate) const VISUAL_ANNOTATION_ACCEPT_NONE: &str =
+    "No visual annotations to accept.";
+
 pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
     match message {
         Message::SelectStep(index) => {
@@ -1753,7 +1777,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                 run_id,
                 cancellation,
             };
-            state.message = Some("Suggesting visual annotations...".to_string());
+            state.message = Some(VISUAL_ANNOTATION_STATUS_RUNNING.to_string());
             tracing::info!(
                 target: "rollshot::action::visual_annotation_agent",
                 run_id,
@@ -1804,14 +1828,14 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                     state.visual_annotation_suggestion =
                         super::VisualAnnotationSuggestionState::PendingReview(proposal);
                     state.message =
-                        Some("Visual annotation suggestions ready for review.".to_string());
+                        Some(VISUAL_ANNOTATION_STATUS_READY.to_string());
                 }
                 Ok(super::visual_annotation_agent::VisualAnnotationTaskResult::NoSuggestion {
                     reason,
                 }) => {
                     let message = match &reason {
                         Some(text) => format!("Visual annotation suggestion: {text}"),
-                        None => "Visual annotation suggestion: no suggestion returned.".to_string(),
+                        None => VISUAL_ANNOTATION_NO_SUGGESTION_DEFAULT.to_string(),
                     };
                     state.visual_annotation_suggestion =
                         super::VisualAnnotationSuggestionState::NoSuggestion { reason };
@@ -1827,8 +1851,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                     state.visual_annotation_suggestion =
                         super::VisualAnnotationSuggestionState::Failed { message };
                     state.message = Some(
-                        "Visual annotation suggestion failed. See the annotation modal for details."
-                            .to_string(),
+                        VISUAL_ANNOTATION_STATUS_FAILED.to_string(),
                     );
                 }
             }
@@ -1848,7 +1871,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                     cancellation.cancel();
                     state.visual_annotation_suggestion =
                         super::VisualAnnotationSuggestionState::Idle;
-                    state.message = Some("Visual annotation suggestion cancelled.".to_string());
+                    state.message = Some(VISUAL_ANNOTATION_STATUS_CANCELLED.to_string());
                 }
                 super::VisualAnnotationSuggestionState::ConsentPending(_) => {
                     state.visual_annotation_suggestion =
@@ -1910,7 +1933,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             }
             state.message = Some(match stale {
                 0 if applied > 0 => format!("Accepted {applied} visual annotation suggestions."),
-                0 => "No visual annotations to accept.".to_string(),
+                0 => VISUAL_ANNOTATION_ACCEPT_NONE.to_string(),
                 _ if applied > 0 => format!(
                     "Accepted {applied} visual annotation suggestions; {stale} stale suggestions skipped."
                 ),
@@ -3332,7 +3355,7 @@ fn dismiss_stale_visual_annotation_review(state: &mut TimelineWorkspace) {
         super::VisualAnnotationSuggestionState::PendingReview(_)
     ) {
         state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
-        state.message = Some("Annotation suggestions are stale; regenerate them.".to_string());
+        state.message = Some(VISUAL_ANNOTATION_STATUS_STALE.to_string());
     }
 }
 
@@ -6121,7 +6144,7 @@ mod tests {
         ));
         assert_eq!(
             state.message.as_deref(),
-            Some("Annotation suggestions are stale; regenerate them.")
+            Some(VISUAL_ANNOTATION_STATUS_STALE)
         );
     }
 
@@ -6147,7 +6170,7 @@ mod tests {
         ));
         assert_eq!(
             state.message.as_deref(),
-            Some("Annotation suggestions are stale; regenerate them.")
+            Some(VISUAL_ANNOTATION_STATUS_STALE)
         );
     }
 

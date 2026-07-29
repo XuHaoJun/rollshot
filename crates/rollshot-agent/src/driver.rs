@@ -63,7 +63,7 @@ use crate::tools::{ToolCall, ToolContext, ToolOutcome, ToolRegistry};
 
 // SMART_REDACTION_SYSTEM_PROMPT removed: all runs now use compose_smart_redaction_prompt().
 
-const VISUAL_ANNOTATION_SYSTEM_PROMPT: &str = r#"You are Rollshot Visual Annotation Agent.
+pub(crate) const VISUAL_ANNOTATION_SYSTEM_PROMPT_BASELINE: &str = r#"You are Rollshot Visual Annotation Agent.
 Your only job is to suggest visual annotations for the single most important UI
 element(s) in the screenshot the user is reviewing. Rollshot has already
 authorized the screenshot for this run as an image attachment; do not ask the
@@ -218,7 +218,7 @@ pub(crate) enum AgentTaskProfile {
 impl AgentTaskProfile {
     pub(crate) fn system_prompt(&self) -> &'static str {
         match self {
-            Self::VisualAnnotation => VISUAL_ANNOTATION_SYSTEM_PROMPT,
+            Self::VisualAnnotation => VISUAL_ANNOTATION_SYSTEM_PROMPT_BASELINE,
             // Envelope only. The skill body and digest are appended by
             // `compose_caption_prompt`, which cannot return `&'static str`.
             Self::Captions => CAPTION_SYSTEM_ENVELOPE,
@@ -2493,12 +2493,25 @@ pub(crate) mod tests {
     fn visual_annotation_profile_advertises_only_submit_visual_annotation_suggestions() {
         assert_eq!(
             AgentTaskProfile::VisualAnnotation.system_prompt(),
-            VISUAL_ANNOTATION_SYSTEM_PROMPT,
+            VISUAL_ANNOTATION_SYSTEM_PROMPT_BASELINE,
         );
         assert_eq!(
             AgentTaskProfile::VisualAnnotation.terminal_tools(),
             &["submit_visual_annotation_suggestions"],
         );
+    }
+
+    #[test]
+    fn visual_annotation_system_prompt_baseline_is_exact() {
+        use sha2::{Digest, Sha256};
+        assert_eq!(
+            format!(
+                "{:x}",
+                Sha256::digest(VISUAL_ANNOTATION_SYSTEM_PROMPT_BASELINE.as_bytes())
+            ),
+            "7aeccfb58bd4be0ad9efbcf875724c58a8b032aa397dc8914f42ce939847c3b1",
+        );
+        assert_eq!(VISUAL_ANNOTATION_SYSTEM_PROMPT_BASELINE.len(), 2_598);
     }
 
     #[test]

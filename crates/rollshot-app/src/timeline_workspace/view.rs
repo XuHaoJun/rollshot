@@ -1295,6 +1295,15 @@ fn annotation_modal<'a>(
     stack![base, scrim].into()
 }
 
+/// Produce the consent body text for the visual annotation consent dialog.
+/// Pure function extracted for baseline testing.
+fn visual_consent_body(provider: &str, model: &str) -> String {
+    format!(
+        "Rollshot will send this one reviewed keyframe to {} using {} to suggest callouts, notes, or redactions. Review every suggestion before it changes your guide. Original keyframes and Issue Packs may still contain unredacted evidence.",
+        provider, model
+    )
+}
+
 fn visual_consent_modal<'a>(
     base: Element<'a, Message>,
     state: &'a TimelineWorkspace,
@@ -1306,10 +1315,7 @@ fn visual_consent_modal<'a>(
     let dialog_view = container(
         column![
             text("Suggest annotations").size(18),
-            text(format!(
-                "Rollshot will send this one reviewed keyframe to {} using {} to suggest callouts, notes, or redactions. Review every suggestion before it changes your guide. Original keyframes and Issue Packs may still contain unredacted evidence.",
-                consent.provider, consent.model
-            )).size(13),
+            text(visual_consent_body(&consent.provider, &consent.model)).size(13),
             row![
                 button(text("Confirm"))
                     .on_press(Message::VisualSuggestionConsentConfirmed)
@@ -1971,6 +1977,14 @@ mod tests {
         assert!(
             snapshot.matches_image(base).expect("write restore PNG"),
             "restore scenario baseline mismatch"
+        );
+    }
+
+    #[test]
+    fn visual_consent_body_is_frozen() {
+        assert_eq!(
+            visual_consent_body("openai", "gpt-test"),
+            "Rollshot will send this one reviewed keyframe to openai using gpt-test to suggest callouts, notes, or redactions. Review every suggestion before it changes your guide. Original keyframes and Issue Packs may still contain unredacted evidence.",
         );
     }
 }

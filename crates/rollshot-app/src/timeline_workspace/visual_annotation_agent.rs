@@ -489,4 +489,113 @@ mod tests {
             model: "test".into(),
         };
     }
+
+    #[test]
+    fn visual_annotation_user_prompt_baseline_is_exact() {
+        assert_eq!(
+            build_visual_annotation_prompt(&step()),
+            "Inspect this reviewed Action Guide step and suggest visual annotation overlays \
+             (Number Callout, Text Note, or Opaque Redaction) on the attached keyframe. \
+             Prefer calling the submit_visual_annotation_suggestions tool. If tool calling \
+             is unavailable, return only JSON in the same schema. The image is the only \
+             source of truth. Use the step metadata as context only. \
+             Step source=10, keyframe=7, title=\"Open Settings\"",
+        );
+    }
+
+    #[test]
+    fn terminal_budget_exhausted_maps_to_no_suggestion_with_reason() {
+        use rollshot_agent::runtime::BudgetDimension;
+        let result = map_terminal_to_result(
+            VisualAnnotationRunTerminal::BudgetExhausted {
+                dimension: BudgetDimension::WallTime,
+            },
+            7,
+            &step(),
+            0,
+            100,
+            80,
+        );
+        let VisualAnnotationTaskResult::NoSuggestion { reason } = result else {
+            panic!("expected no-suggestion result");
+        };
+        assert_eq!(
+            reason.as_deref(),
+            Some("Visual annotation suggestion budget exhausted."),
+        );
+    }
+
+    #[test]
+    fn terminal_provider_failure_maps_to_no_suggestion_with_reason() {
+        let result = map_terminal_to_result(
+            VisualAnnotationRunTerminal::ProviderFailure,
+            7,
+            &step(),
+            0,
+            100,
+            80,
+        );
+        let VisualAnnotationTaskResult::NoSuggestion { reason } = result else {
+            panic!("expected no-suggestion result");
+        };
+        assert_eq!(
+            reason.as_deref(),
+            Some("Visual annotation provider failed."),
+        );
+    }
+
+    #[test]
+    fn terminal_protocol_failure_maps_to_no_suggestion_with_reason() {
+        let result = map_terminal_to_result(
+            VisualAnnotationRunTerminal::ProtocolFailure,
+            7,
+            &step(),
+            0,
+            100,
+            80,
+        );
+        let VisualAnnotationTaskResult::NoSuggestion { reason } = result else {
+            panic!("expected no-suggestion result");
+        };
+        assert_eq!(
+            reason.as_deref(),
+            Some("Visual annotation model did not return a usable suggestion."),
+        );
+    }
+
+    #[test]
+    fn terminal_cancelled_maps_to_no_suggestion_without_reason() {
+        let result = map_terminal_to_result(
+            VisualAnnotationRunTerminal::Cancelled,
+            7,
+            &step(),
+            0,
+            100,
+            80,
+        );
+        let VisualAnnotationTaskResult::NoSuggestion { reason } = result else {
+            panic!("expected no-suggestion result");
+        };
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn terminal_no_suggestion_maps_to_no_suggestion_without_reason() {
+        let result = map_terminal_to_result(
+            VisualAnnotationRunTerminal::NoSuggestion(
+                rollshot_agent::VisualAnnotationNoSuggestion::NoClearTarget {
+                    reason: Some("model declined".to_string()),
+                },
+            ),
+            7,
+            &step(),
+            0,
+            100,
+            80,
+        );
+        let VisualAnnotationTaskResult::NoSuggestion { reason } = result else {
+            panic!("expected no-suggestion result");
+        };
+        assert!(reason.is_none());
+    }
 }
