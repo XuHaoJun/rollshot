@@ -2355,7 +2355,12 @@ mod tests {
             let proposal = caption_proposal_for_ws(&ws);
             let _ = super::super::update::update(
                 &mut ws,
-                Message::CaptionProposalLoaded(Ok((caption_test_task_id(), proposal, "test-provider".to_string(), "test-model".to_string()))),
+                Message::CaptionProposalLoaded(Ok((
+                    caption_test_task_id(),
+                    proposal,
+                    "test-provider".to_string(),
+                    "test-model".to_string(),
+                ))),
             );
 
             let _ = super::super::update::update(
@@ -2373,7 +2378,12 @@ mod tests {
             let proposal = caption_proposal_for_ws(&ws);
             let _ = super::super::update::update(
                 &mut ws,
-                Message::CaptionProposalLoaded(Ok((caption_test_task_id(), proposal, "test-provider".to_string(), "test-model".to_string()))),
+                Message::CaptionProposalLoaded(Ok((
+                    caption_test_task_id(),
+                    proposal,
+                    "test-provider".to_string(),
+                    "test-model".to_string(),
+                ))),
             );
 
             let _ = super::super::update::update(&mut ws, Message::AcceptAllCaptionSuggestions);

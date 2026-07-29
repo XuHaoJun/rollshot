@@ -341,10 +341,7 @@ fn persist_caption_review_transition(
 /// Both `AcceptCaptionSuggestion` and `RejectCaptionSuggestion` call this
 /// after mutating the proposal.
 #[cfg(feature = "action-guide")]
-fn maybe_advance_caption_review(
-    state: &mut TimelineWorkspace,
-    has_accepted: bool,
-) {
+fn maybe_advance_caption_review(state: &mut TimelineWorkspace, has_accepted: bool) {
     use rollshot_agent::product_task::TaskStatus;
 
     // Transition ReadyForReview → Applying on the first decision.
@@ -1396,14 +1393,11 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                 | rollshot_action::CaptionApplyOutcome::NotPending => {}
             }
 
-            let has_accepted = state
-                .caption_proposal
-                .as_ref()
-                .is_some_and(|p| {
-                    p.suggestions
-                        .iter()
-                        .any(|s| s.status == rollshot_action::CaptionSuggestionStatus::Accepted)
-                });
+            let has_accepted = state.caption_proposal.as_ref().is_some_and(|p| {
+                p.suggestions
+                    .iter()
+                    .any(|s| s.status == rollshot_action::CaptionSuggestionStatus::Accepted)
+            });
             maybe_advance_caption_review(state, has_accepted);
 
             Update::none()
@@ -4957,7 +4951,12 @@ mod tests {
 
         let _ = update(
             &mut state,
-            Message::CaptionProposalLoaded(Ok((caption_test_task_id(), proposal, "test-provider".to_string(), "test-model".to_string()))),
+            Message::CaptionProposalLoaded(Ok((
+                caption_test_task_id(),
+                proposal,
+                "test-provider".to_string(),
+                "test-model".to_string(),
+            ))),
         );
 
         assert!(state.caption_proposal.is_some());
@@ -4992,7 +4991,12 @@ mod tests {
         let proposal = caption_proposal_for_first_step(&state);
         let _ = update(
             &mut state,
-            Message::CaptionProposalLoaded(Ok((caption_test_task_id(), proposal, "test-provider".to_string(), "test-model".to_string()))),
+            Message::CaptionProposalLoaded(Ok((
+                caption_test_task_id(),
+                proposal,
+                "test-provider".to_string(),
+                "test-model".to_string(),
+            ))),
         );
 
         let _ = update(
@@ -5011,7 +5015,12 @@ mod tests {
         let proposal = caption_proposal_for_first_step(&state);
         let _ = update(
             &mut state,
-            Message::CaptionProposalLoaded(Ok((caption_test_task_id(), proposal, "test-provider".to_string(), "test-model".to_string()))),
+            Message::CaptionProposalLoaded(Ok((
+                caption_test_task_id(),
+                proposal,
+                "test-provider".to_string(),
+                "test-model".to_string(),
+            ))),
         );
 
         let _ = update(
@@ -5030,7 +5039,12 @@ mod tests {
         let proposal = caption_proposal_for_first_step(&state);
         let _ = update(
             &mut state,
-            Message::CaptionProposalLoaded(Ok((caption_test_task_id(), proposal, "test-provider".to_string(), "test-model".to_string()))),
+            Message::CaptionProposalLoaded(Ok((
+                caption_test_task_id(),
+                proposal,
+                "test-provider".to_string(),
+                "test-model".to_string(),
+            ))),
         );
         let _ = update(
             &mut state,
@@ -5130,7 +5144,12 @@ mod tests {
         );
         let _ = update(
             &mut state,
-            Message::CaptionProposalLoaded(Ok((caption_test_task_id(), proposal, "test-provider".to_string(), "test-model".to_string()))),
+            Message::CaptionProposalLoaded(Ok((
+                caption_test_task_id(),
+                proposal,
+                "test-provider".to_string(),
+                "test-model".to_string(),
+            ))),
         );
         let _ = update(
             &mut state,
@@ -5167,7 +5186,12 @@ mod tests {
         );
         let _ = update(
             &mut state,
-            Message::CaptionProposalLoaded(Ok((caption_test_task_id(), proposal, "test-provider".to_string(), "test-model".to_string()))),
+            Message::CaptionProposalLoaded(Ok((
+                caption_test_task_id(),
+                proposal,
+                "test-provider".to_string(),
+                "test-model".to_string(),
+            ))),
         );
         let _ = update(
             &mut state,
