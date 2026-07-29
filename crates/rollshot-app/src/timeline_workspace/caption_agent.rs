@@ -1029,7 +1029,7 @@ pub(crate) mod restore_test_helpers {
                         Output = Result<
                             std::pin::Pin<
                                 Box<
-                                    dyn futures_util::Stream<
+                                    dyn iced::futures::Stream<
                                             Item = Result<
                                                 rollshot_agent::model::ModelStreamEvent,
                                                 rollshot_agent::model::ModelError,
