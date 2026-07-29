@@ -124,7 +124,9 @@ pub enum Message {
     AnnotationRedo,
     AnnotationDone,
     AnnotationCancel,
-    CaptionProposalLoaded(Result<rollshot_action::CaptionProposal, String>),
+    CaptionProposalLoaded(Result<(rollshot_agent::product_task::ProductTaskId, rollshot_action::CaptionProposal), String>),
+    /// Caption task snapshot persisted as ReadyForReview.
+    CaptionReviewPromoted(Result<rollshot_agent::product_task::ProductTaskSnapshot, String>),
     /// Two-stage caption context preparation completed.
     CaptionContextPrepared {
         run_id: u64,
@@ -232,6 +234,85 @@ pub(crate) enum SaveWorkerOutcome {
         category: &'static str,
     },
     Failed(String),
+}
+
+/// Load a caption task snapshot from the store and promote it to
+/// `ReadyForReview`. Returns the promoted snapshot.
+#[cfg(feature = "action-guide")]
+fn promote_caption_ready_for_review(
+    store: &crate::agent_store::TaskStore,
+    task_id: &rollshot_agent::product_task::ProductTaskId,
+    payload_bytes: &[u8],
+    suggestion_count: u32,
+) -> Result<rollshot_agent::product_task::ProductTaskSnapshot, String> {
+    use sha2::{Digest, Sha256};
+    use rollshot_agent::product_task::{
+        ArtifactId, ArtifactKind, ArtifactRevision, ArtifactSummary,
+        ProductArtifactMetadata,
+    };
+
+    let snapshot = store
+        .load(task_id)
+        .map_err(|e| format!("load caption task: {e}"))?;
+
+    let last_attempt = snapshot
+        .attempts()
+        .last()
+        .ok_or("caption task has no attempt" .to_string())?;
+    let meta = ProductArtifactMetadata::new_v3(
+        ArtifactId::parse(&format!(
+            "artifact-{}",
+            task_id.as_str().strip_prefix("task-").unwrap_or(task_id.as_str())
+        ))
+        .unwrap_or_else(|_| ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000000").unwrap()),
+        ArtifactRevision::new(snapshot.snapshot_revision() + 1),
+        ArtifactKind::ActionGuideCaptions,
+        1,
+        format!("{:x}", Sha256::digest(payload_bytes)),
+        snapshot.source_binding().clone(),
+        task_id.clone(),
+        last_attempt.attempt_id(),
+        last_attempt.run_id().clone(),
+        task_id.as_str().to_owned(),
+        "unknown".to_string(),
+        "unknown".to_string(),
+        String::new(),
+        ArtifactSummary::ActionGuideCaptions {
+            suggestion_count,
+        },
+        chrono::Utc::now().timestamp_millis(),
+    );
+    let now = chrono::Utc::now().timestamp_millis();
+    let promoted = snapshot
+        .record_ready_for_review(meta, payload_bytes.to_vec(), None, now)
+        .map_err(|e| format!("record ready: {e}"))?;
+    store
+        .transition_audited(&snapshot, &promoted, rollshot_agent::audit::AuditEventId::new_v4(), now)
+        .map_err(|e| format!("persist promotion: {e}"))?;
+    Ok(promoted)
+}
+
+/// Persist a caption review transition (begin_apply / complete_apply / reject)
+/// to the store in the background. Fire-and-forget.
+#[cfg(feature = "action-guide")]
+fn persist_caption_review_transition(
+    store: std::sync::Arc<crate::agent_store::TaskStore>,
+    old: rollshot_agent::product_task::ProductTaskSnapshot,
+    new: rollshot_agent::product_task::ProductTaskSnapshot,
+) {
+    let result = store.transition_audited(
+        &old,
+        &new,
+        rollshot_agent::audit::AuditEventId::new_v4(),
+        chrono::Utc::now().timestamp_millis(),
+    );
+    if let Err(e) = result {
+        tracing::warn!(
+            target: "rollshot::action::caption_review",
+            error = %e,
+            "caption review transition persist failed"
+        );
+    }
 }
 
 pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
@@ -1069,10 +1150,39 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             state.annotation_session = None;
             Update::none()
         }
-        Message::CaptionProposalLoaded(Ok(proposal)) => {
+        Message::CaptionProposalLoaded(Ok((task_id, proposal))) => {
             state.caption_suggestions_running = false;
+            state.caption_task_id = Some(task_id.clone());
             state.caption_proposal = Some(proposal);
             state.message = Some("Caption suggestions ready for review.".to_string());
+
+            // Promote the task to ReadyForReview if a store is available.
+            if let Some(store) = state.task_store.clone() {
+                // Capture the payload bytes before the async boundary.
+                let payload_bytes = super::caption_agent::caption_artifact_payload(
+                    state.caption_proposal.as_ref().unwrap(),
+                );
+                let suggestion_count = state
+                    .caption_proposal
+                    .as_ref()
+                    .map(|p| p.suggestions.len() as u32)
+                    .unwrap_or(0);
+                return Update::task(Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            promote_caption_ready_for_review(
+                                &store,
+                                &task_id,
+                                &payload_bytes,
+                                suggestion_count,
+                            )
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(format!("spawn: {e}")))
+                    },
+                    Message::CaptionReviewPromoted,
+                ));
+            }
             Update::none()
         }
         Message::CaptionProposalLoaded(Err(error)) => {
@@ -1083,6 +1193,18 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             } else {
                 state.message = Some(format!("Caption suggestions failed: {error}"));
             }
+            Update::none()
+        }
+        Message::CaptionReviewPromoted(Ok(snapshot)) => {
+            state.caption_review_snapshot = Some(snapshot);
+            Update::none()
+        }
+        Message::CaptionReviewPromoted(Err(error)) => {
+            tracing::warn!(
+                target: "rollshot::action::caption_review",
+                %error,
+                "caption task promotion failed"
+            );
             Update::none()
         }
         Message::AcceptCaptionSuggestion(id) => {
@@ -1109,12 +1231,204 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                 rollshot_action::CaptionApplyOutcome::Missing
                 | rollshot_action::CaptionApplyOutcome::NotPending => {}
             }
+
+            // Review lifecycle: begin_apply on first decision, then
+            // complete_apply when all suggestions are decided.
+            let needs_begin = state
+                .caption_review_snapshot
+                .as_ref()
+                .is_some_and(|s| s.status() == rollshot_agent::product_task::TaskStatus::ReadyForReview);
+            if needs_begin {
+                if let Some(snapshot) = state.caption_review_snapshot.take() {
+                    let now = chrono::Utc::now().timestamp_millis();
+                    match snapshot.begin_apply(now) {
+                        Ok(applying) => {
+                            if let Some(store) = state.task_store.clone() {
+                                let store2 = store.clone();
+                                let old = snapshot.clone();
+                                let new = applying.clone();
+                                std::thread::spawn(move || {
+                                    persist_caption_review_transition(store2, old, new);
+                                });
+                            }
+                            state.caption_review_snapshot = Some(applying);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "rollshot::action::caption_review",
+                                error = %e,
+                                "begin_apply failed"
+                            );
+                            state.caption_review_snapshot = Some(snapshot);
+                        }
+                    }
+                }
+            }
+
+            // If no pending suggestions remain, finalize the review.
+            let all_decided = state
+                .caption_proposal
+                .as_ref()
+                .is_some_and(|p| !p.has_pending());
+            if all_decided {
+                if let Some(snapshot) = state.caption_review_snapshot.take() {
+                    if snapshot.status() == rollshot_agent::product_task::TaskStatus::Applying {
+                        let has_accepted = state
+                            .caption_proposal
+                            .as_ref()
+                            .map(|p| {
+                                p.suggestions.iter().any(|s| {
+                                    s.status == rollshot_action::CaptionSuggestionStatus::Accepted
+                                })
+                            })
+                            .unwrap_or(false);
+                        if let Some(proposal) = &state.caption_proposal {
+                            if let Some(meta) = snapshot.artifact_metadata() {
+                                let now = chrono::Utc::now().timestamp_millis();
+                                match super::caption_agent::caption_review_receipt(proposal, meta, now)
+                                {
+                                    Ok(receipt) => {
+                                        let final_result = if has_accepted {
+                                            snapshot.complete_apply(receipt, now)
+                                        } else {
+                                            snapshot.reject(receipt, now)
+                                        };
+                                        match final_result {
+                                            Ok(finalized) => {
+                                                if let Some(store) = state.task_store.clone() {
+                                                    let store2 = store.clone();
+                                                    let old = snapshot.clone();
+                                                    let new = finalized.clone();
+                                                    std::thread::spawn(move || {
+                                                        persist_caption_review_transition(
+                                                            store2, old, new,
+                                                        );
+                                                    });
+                                                }
+                                                state.caption_review_snapshot = Some(finalized);
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    target: "rollshot::action::caption_review",
+                                                    error = %e,
+                                                    "complete_apply/reject failed"
+                                                );
+                                                state.caption_review_snapshot = Some(snapshot);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            target: "rollshot::action::caption_review",
+                                            error = %e,
+                                            "caption_review_receipt failed"
+                                        );
+                                        state.caption_review_snapshot = Some(snapshot);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        state.caption_review_snapshot = Some(snapshot);
+                    }
+                }
+            }
+
             Update::none()
         }
         Message::RejectCaptionSuggestion(id) => {
             if let Some(proposal) = &mut state.caption_proposal {
                 proposal.reject(id);
             }
+
+            // Review lifecycle: begin_apply on first decision, then
+            // reject when all suggestions are decided.
+            let needs_begin = state
+                .caption_review_snapshot
+                .as_ref()
+                .is_some_and(|s| s.status() == rollshot_agent::product_task::TaskStatus::ReadyForReview);
+            if needs_begin {
+                if let Some(snapshot) = state.caption_review_snapshot.take() {
+                    let now = chrono::Utc::now().timestamp_millis();
+                    match snapshot.begin_apply(now) {
+                        Ok(applying) => {
+                            if let Some(store) = state.task_store.clone() {
+                                let store2 = store.clone();
+                                let old = snapshot.clone();
+                                let new = applying.clone();
+                                std::thread::spawn(move || {
+                                    persist_caption_review_transition(store2, old, new);
+                                });
+                            }
+                            state.caption_review_snapshot = Some(applying);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "rollshot::action::caption_review",
+                                error = %e,
+                                "begin_apply failed"
+                            );
+                            state.caption_review_snapshot = Some(snapshot);
+                        }
+                    }
+                }
+            }
+
+            // If no pending suggestions remain, finalize the review.
+            let all_decided = state
+                .caption_proposal
+                .as_ref()
+                .is_some_and(|p| !p.has_pending());
+            if all_decided {
+                if let Some(snapshot) = state.caption_review_snapshot.take() {
+                    if snapshot.status() == rollshot_agent::product_task::TaskStatus::Applying {
+                        if let Some(proposal) = &state.caption_proposal {
+                            if let Some(meta) = snapshot.artifact_metadata() {
+                                let now = chrono::Utc::now().timestamp_millis();
+                                match super::caption_agent::caption_review_receipt(proposal, meta, now)
+                                {
+                                    Ok(receipt) => {
+                                        match snapshot.reject(receipt, now) {
+                                            Ok(rejected) => {
+                                                if let Some(store) = state.task_store.clone() {
+                                                    let store2 = store.clone();
+                                                    let old = snapshot.clone();
+                                                    let new = rejected.clone();
+                                                    std::thread::spawn(move || {
+                                                        persist_caption_review_transition(
+                                                            store2, old, new,
+                                                        );
+                                                    });
+                                                }
+                                                state.caption_review_snapshot = Some(rejected);
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    target: "rollshot::action::caption_review",
+                                                    error = %e,
+                                                    "reject failed"
+                                                );
+                                                state.caption_review_snapshot = Some(snapshot);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            target: "rollshot::action::caption_review",
+                                            error = %e,
+                                            "caption_review_receipt failed"
+                                        );
+                                        state.caption_review_snapshot = Some(snapshot);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        state.caption_review_snapshot = Some(snapshot);
+                    }
+                }
+            }
+
             Update::none()
         }
         Message::AcceptAllCaptionSuggestions => {
@@ -4622,6 +4936,13 @@ mod tests {
             .is_some_and(|message| message.contains("Redaction failed")));
     }
 
+    fn caption_test_task_id() -> rollshot_agent::product_task::ProductTaskId {
+        rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap()
+    }
+
     fn caption_proposal_for_first_step(
         state: &TimelineWorkspace,
     ) -> rollshot_action::CaptionProposal {
@@ -4648,7 +4969,7 @@ mod tests {
         state.caption_suggestions_running = true;
         let proposal = caption_proposal_for_first_step(&state);
 
-        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok(proposal)));
+        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok((caption_test_task_id(), proposal))));
 
         assert!(state.caption_proposal.is_some());
         assert!(!state.caption_suggestions_running);
@@ -4680,7 +5001,7 @@ mod tests {
     fn accepting_caption_suggestion_updates_guide() {
         let mut state = ws(synthetic_recording(1));
         let proposal = caption_proposal_for_first_step(&state);
-        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok(proposal)));
+        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok((caption_test_task_id(), proposal))));
 
         let _ = update(
             &mut state,
@@ -4696,7 +5017,7 @@ mod tests {
     fn rejecting_caption_suggestion_does_not_update_guide() {
         let mut state = ws(synthetic_recording(1));
         let proposal = caption_proposal_for_first_step(&state);
-        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok(proposal)));
+        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok((caption_test_task_id(), proposal))));
 
         let _ = update(
             &mut state,
@@ -4712,7 +5033,7 @@ mod tests {
     fn accepting_stale_caption_suggestion_shows_message() {
         let mut state = ws(synthetic_recording(1));
         let proposal = caption_proposal_for_first_step(&state);
-        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok(proposal)));
+        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok((caption_test_task_id(), proposal))));
         let _ = update(
             &mut state,
             Message::TitleChanged("Manual title".to_string()),
@@ -4809,7 +5130,7 @@ mod tests {
                 rationale: None,
             }],
         );
-        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok(proposal)));
+        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok((caption_test_task_id(), proposal))));
         let _ = update(
             &mut state,
             Message::AcceptCaptionSuggestion(rollshot_action::CaptionSuggestionId(1)),
@@ -4843,7 +5164,7 @@ mod tests {
                 rationale: None,
             }],
         );
-        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok(proposal)));
+        let _ = update(&mut state, Message::CaptionProposalLoaded(Ok((caption_test_task_id(), proposal))));
         let _ = update(
             &mut state,
             Message::AcceptCaptionSuggestion(rollshot_action::CaptionSuggestionId(1)),

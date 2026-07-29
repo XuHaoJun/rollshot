@@ -333,6 +333,12 @@ pub struct TimelineWorkspace {
     /// exits — leaving the workspace, starting another run, closing the project
     /// — with no new UI affordance.
     pub(crate) caption_cancellation: Option<rollshot_agent::runtime::RunCancellation>,
+    /// Task store ID of the caption task created for the current proposal.
+    /// `None` until `SuggestCaptionsRequested` creates a task.
+    pub(crate) caption_task_id: Option<rollshot_agent::product_task::ProductTaskId>,
+    /// Cached `ReadyForReview` snapshot for the current caption proposal.
+    /// `None` until `CaptionProposalLoaded` promotes the task.
+    pub(crate) caption_review_snapshot: Option<rollshot_agent::product_task::ProductTaskSnapshot>,
     /// Current visual annotation suggestion state. See [`VisualAnnotationSuggestionState`].
     #[allow(dead_code)] // Read by Task 8's view; only the update path uses it here.
     pub(crate) visual_annotation_suggestion: VisualAnnotationSuggestionState,
@@ -431,6 +437,8 @@ impl TimelineWorkspace {
             caption_agent_run_id: 0,
             task_store: None,
             caption_cancellation: None,
+            caption_task_id: None,
+            caption_review_snapshot: None,
             visual_annotation_suggestion: VisualAnnotationSuggestionState::Idle,
             visual_annotation_agent_run_id: 0,
             storyboard_copy_operation_id: 0,
@@ -520,6 +528,8 @@ impl TimelineWorkspace {
             caption_agent_run_id: 0,
             task_store: None,
             caption_cancellation: None,
+            caption_task_id: None,
+            caption_review_snapshot: None,
             visual_annotation_suggestion: VisualAnnotationSuggestionState::Idle,
             visual_annotation_agent_run_id: 0,
             storyboard_copy_operation_id: 0,
@@ -2344,7 +2354,7 @@ mod tests {
             ws.save_state = ProjectSaveState::Clean;
             let proposal = caption_proposal_for_ws(&ws);
             let _ =
-                super::super::update::update(&mut ws, Message::CaptionProposalLoaded(Ok(proposal)));
+                super::super::update::update(&mut ws, Message::CaptionProposalLoaded(Ok((caption_test_task_id(), proposal))));
 
             let _ = super::super::update::update(
                 &mut ws,
@@ -2360,7 +2370,7 @@ mod tests {
             ws.save_state = ProjectSaveState::Clean;
             let proposal = caption_proposal_for_ws(&ws);
             let _ =
-                super::super::update::update(&mut ws, Message::CaptionProposalLoaded(Ok(proposal)));
+                super::super::update::update(&mut ws, Message::CaptionProposalLoaded(Ok((caption_test_task_id(), proposal))));
 
             let _ = super::super::update::update(&mut ws, Message::AcceptAllCaptionSuggestions);
 
@@ -2440,6 +2450,13 @@ mod tests {
         }
 
         // ---- Helpers for the new tests ----
+
+        fn caption_test_task_id() -> rollshot_agent::product_task::ProductTaskId {
+            rollshot_agent::product_task::ProductTaskId::parse(
+                "task-00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap()
+        }
 
         fn caption_proposal_for_ws(state: &TimelineWorkspace) -> rollshot_action::CaptionProposal {
             rollshot_action::CaptionProposal::from_agent_drafts(

@@ -400,6 +400,92 @@ pub(crate) fn decode_caption_terminal(
     }
 }
 
+// ========================================================================
+// Caption artifact promotion (Task 17)
+// ========================================================================
+
+/// Serialize the caption proposal's suggestions as a review artifact payload.
+/// Carries only the suggestions — the whole guide is not included.
+pub(crate) fn caption_artifact_payload(
+    proposal: &rollshot_action::CaptionProposal,
+) -> Vec<u8> {
+    #[derive(serde::Serialize)]
+    struct Suggestion<'a> {
+        id: u64,
+        step_source: rollshot_action::CandidateId,
+        suggested_title: &'a Option<String>,
+        suggested_caption: &'a str,
+        confidence: f32,
+        rationale: &'a Option<String>,
+    }
+    #[derive(serde::Serialize)]
+    struct Payload<'a> {
+        suggestions: Vec<Suggestion<'a>>,
+    }
+    let payload = Payload {
+        suggestions: proposal
+            .suggestions
+            .iter()
+            .map(|s| Suggestion {
+                id: s.id.0,
+                step_source: s.base.source,
+                suggested_title: &s.suggested_title,
+                suggested_caption: &s.suggested_caption,
+                confidence: s.confidence,
+                rationale: &s.rationale,
+            })
+            .collect(),
+    };
+    serde_json::to_vec(&payload).expect("caption payload is always serializable")
+}
+
+/// Build a [`ReviewReceipt`] for the caption proposal by partitioning
+/// each suggestion into applied/rejected by its current status.
+///
+/// `Stale` suggestions are recorded as rejected — they were valid at
+/// proposal time but no longer match the guide.
+pub(crate) fn caption_review_receipt(
+    proposal: &rollshot_action::CaptionProposal,
+    metadata: &rollshot_agent::product_task::ProductArtifactMetadata,
+    now: i64,
+) -> Result<rollshot_agent::product_task::ReviewReceipt, String> {
+    use rollshot_action::CaptionSuggestionStatus;
+    use rollshot_agent::product_task::{LocalReviewDeltaV1, ReviewReceipt};
+
+    let narrow = |id: u64| -> Result<u32, String> {
+        u32::try_from(id).map_err(|_| format!("caption suggestion id {id} exceeds u32"))
+    };
+
+    let mut applied = Vec::new();
+    let mut rejected = Vec::new();
+    for suggestion in &proposal.suggestions {
+        match suggestion.status {
+            CaptionSuggestionStatus::Accepted => applied.push(narrow(suggestion.id.0)?),
+            CaptionSuggestionStatus::Rejected | CaptionSuggestionStatus::Stale => {
+                rejected.push(narrow(suggestion.id.0)?)
+            }
+            CaptionSuggestionStatus::Pending => {}
+        }
+    }
+
+    Ok(ReviewReceipt {
+        artifact_id: metadata.artifact_id().clone(),
+        artifact_revision: metadata.artifact_revision(),
+        proposal_id: metadata.proposal_id().to_owned(),
+        applied_candidates: applied,
+        rejected_candidates: rejected,
+        // Captions have no move or manual-add review editing:
+        // CaptionProposal::apply has no edit-then-accept path.
+        local_delta: LocalReviewDeltaV1 {
+            moved_candidates: Vec::new(),
+            manual_additions: Vec::new(),
+        },
+        resulting_document_state_id: None,
+        resulting_document_digest: None,
+        decided_at_unix_ms: now,
+    })
+}
+
 pub(crate) async fn suggest_captions_task(
     run_id: u64,
     store: std::sync::Arc<crate::agent_store::TaskStore>,
@@ -409,7 +495,7 @@ pub(crate) async fn suggest_captions_task(
     adapter: Box<dyn rollshot_agent::ProviderAdapter>,
     context: PreparedCaptionContext,
     project_root: Option<PathBuf>,
-) -> Result<rollshot_action::CaptionProposal, String> {
+) -> Result<(rollshot_agent::product_task::ProductTaskId, rollshot_action::CaptionProposal), String> {
     suggest_captions_with_store(
         run_id,
         store,
@@ -432,7 +518,7 @@ async fn suggest_captions_with_store(
     adapter: Box<dyn rollshot_agent::ProviderAdapter>,
     context: PreparedCaptionContext,
     project_root: Option<std::path::PathBuf>,
-) -> Result<rollshot_action::CaptionProposal, String> {
+) -> Result<(rollshot_agent::product_task::ProductTaskId, rollshot_action::CaptionProposal), String> {
     use rollshot_agent::captions::caption_run_budget;
     use rollshot_agent::driver::{AgentConfig, AgentRunner, SingleSubmitProfile};
     use rollshot_agent::product_task::{
@@ -604,7 +690,7 @@ async fn suggest_captions_with_store(
     if proposal.suggestions.is_empty() {
         return Err("Agent returned no usable caption suggestions.".to_string());
     }
-    Ok(proposal)
+    Ok((task_id, proposal))
 }
 
 #[cfg(test)]
@@ -1012,5 +1098,241 @@ mod provider_tests {
             err.contains("InspectPreparedImage"),
             "authority denial must name the operation, got: {err}"
         );
+    }
+
+    // ---- Task 17: Artifact promotion and review receipt ----
+
+    /// One-suggestion caption proposal fixture. `from_agent_drafts` assigns
+    /// `CaptionSuggestionId(index + 1)` — so id is `1`.
+    pub(crate) fn caption_proposal_fixture() -> rollshot_action::CaptionProposal {
+        let guide = guide();
+        let drafts = vec![rollshot_action::CaptionSuggestionDraft {
+            step_source: 10,
+            title: Some("Open Settings".into()),
+            caption: "The user opens the settings panel.".into(),
+            confidence: 0.85,
+            rationale: Some("Click begins the flow.".into()),
+        }];
+        rollshot_action::CaptionProposal::from_agent_drafts(
+            rollshot_action::CaptionProposalId(42),
+            42,
+            rollshot_action::CaptionProposalOrigin::EphemeralGuide {
+                guide_digest: "0".repeat(64),
+            },
+            &guide,
+            drafts,
+        )
+    }
+
+    /// Metadata fixture whose proposal_id matches `caption_proposal_fixture`.
+    pub(crate) fn caption_artifact_metadata_fixture(
+    ) -> rollshot_agent::product_task::ProductArtifactMetadata {
+        use rollshot_agent::product_task::{
+            ArtifactId, ArtifactKind, ArtifactRevision, ArtifactSummary,
+            ProductArtifactMetadata, TaskAttemptId,
+        };
+        ProductArtifactMetadata::new_v3(
+            ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000001").unwrap(),
+            ArtifactRevision::new(1),
+            ArtifactKind::ActionGuideCaptions,
+            1,
+            "".to_string(),
+            caption_source_binding(&ephemeral_context(), None),
+            test_task_id(),
+            TaskAttemptId::new(1),
+            test_run_id(),
+            "42".to_string(),
+            "test-provider".to_string(),
+            "test-model".to_string(),
+            "run-config-digest".to_string(),
+            ArtifactSummary::ActionGuideCaptions { suggestion_count: 1 },
+            5_000,
+        )
+    }
+
+    /// Promote a caption proposal through the full Created → Running →
+    /// ReadyForReview lifecycle and return the `ReadyForReview` snapshot.
+    pub(crate) fn promote_caption_task_for_tests(
+        binding: &rollshot_agent::product_task::SourceBinding,
+        proposal: &rollshot_action::CaptionProposal,
+    ) -> rollshot_agent::product_task::ProductTaskSnapshot {
+        use sha2::{Digest, Sha256};
+        use rollshot_agent::product_task::{
+            ArtifactId, ArtifactKind, ArtifactRevision, ArtifactSummary,
+            ProductArtifactMetadata, ProductTaskSnapshot, RunContractReceiptV1,
+            TaskAttempt, TaskAttemptId, TaskKind,
+        };
+
+        let task_id = test_task_id();
+        let run_id = test_run_id();
+        let now: i64 = 5_000;
+
+        let created =
+            ProductTaskSnapshot::new_v3(task_id.clone(), TaskKind::ActionGuideCaptions, binding.clone(), now)
+                .unwrap();
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), now);
+        let running = created.start_attempt(attempt, now).unwrap();
+
+        // Minimal run-contract binding — the test does not exercise provenance.
+        let subject = match binding {
+            rollshot_agent::product_task::SourceBinding::ActionGuideProject {
+                project_root_sha256,
+                revision,
+                projection_digest,
+            } => rollshot_agent::authority::AuthoritySubject::ActionGuideProject {
+                project_root_sha256: *project_root_sha256,
+                revision: *revision,
+                projection_digest: projection_digest.clone(),
+            },
+            rollshot_agent::product_task::SourceBinding::ActionGuideEphemeralGuide {
+                guide_digest,
+            } => rollshot_agent::authority::AuthoritySubject::ActionGuideEphemeralGuide {
+                guide_digest: guide_digest.clone(),
+            },
+            _ => panic!("unexpected binding domain"),
+        };
+        let authority = caption_authority(task_id.clone(), run_id.clone(), subject).unwrap();
+        let run_contract = RunContractReceiptV1 {
+            authority: authority.receipt(now),
+            skill_use: rollshot_agent::skills::bundled_action_guide_captions_use()
+                .unwrap()
+                .receipt(),
+            bound_at_unix_ms: now,
+        };
+        let bound = running.bind_run_contract(run_contract, now).unwrap();
+
+        let payload_bytes = caption_artifact_payload(proposal);
+        let meta = ProductArtifactMetadata::new_v3(
+            ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000001").unwrap(),
+            ArtifactRevision::new(1),
+            ArtifactKind::ActionGuideCaptions,
+            1,
+            format!("{:x}", Sha256::digest(&payload_bytes)),
+            binding.clone(),
+            task_id,
+            TaskAttemptId::new(1),
+            run_id,
+            proposal.id.0.to_string(),
+            "test-provider".to_string(),
+            "test-model".to_string(),
+            "run-config-digest".to_string(),
+            ArtifactSummary::ActionGuideCaptions {
+                suggestion_count: proposal.suggestions.len() as u32,
+            },
+            now,
+        );
+
+        bound
+            .record_ready_for_review(meta, payload_bytes, None, now)
+            .unwrap()
+    }
+
+    #[test]
+    fn artifact_payload_carries_suggestions_and_nothing_else() {
+        let proposal = caption_proposal_fixture();
+
+        let bytes = caption_artifact_payload(&proposal);
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(json["suggestions"].as_array().unwrap().len(), 1);
+        assert!(json.get("guide").is_none(), "no whole-guide copy: {json}");
+    }
+
+    #[test]
+    fn review_receipt_partitions_decisions_and_binds_the_artifact_revision() {
+        let mut proposal = caption_proposal_fixture();
+        proposal.reject(rollshot_action::CaptionSuggestionId(1));
+        let metadata = caption_artifact_metadata_fixture();
+
+        let receipt = caption_review_receipt(&proposal, &metadata, 5_000).unwrap();
+
+        assert_eq!(receipt.artifact_revision, metadata.artifact_revision());
+        assert_eq!(receipt.rejected_candidates, vec![1]);
+        assert!(receipt.applied_candidates.is_empty());
+        assert!(receipt.local_delta.moved_candidates.is_empty());
+        assert!(receipt.local_delta.manual_additions.is_empty());
+        assert_eq!(receipt.resulting_document_state_id, None);
+    }
+
+    #[test]
+    fn suggestion_ids_above_u32_are_rejected_not_truncated() {
+        let mut proposal = caption_proposal_fixture();
+        let oversized = rollshot_action::CaptionSuggestionId(u64::from(u32::MAX) + 1);
+        proposal.suggestions[0].id = oversized;
+        // The narrowing guard only runs for decided suggestions
+        // (Accepted / Rejected / Stale). A Pending suggestion is skipped
+        // entirely, so without this line the test would pass for the wrong
+        // reason — `caption_review_receipt` would return Ok and `is_err()`
+        // would fail.
+        assert!(proposal.reject(oversized), "reject must find the mutated id");
+        let metadata = caption_artifact_metadata_fixture();
+
+        let err = caption_review_receipt(&proposal, &metadata, 5_000)
+            .expect_err("an out-of-range suggestion id must be rejected");
+        assert!(err.contains("exceeds u32"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn accepted_suggestions_land_in_applied_not_rejected() {
+        // The mirror of the reject case: without this, the Accepted arm of the
+        // partition is never exercised and could be swapped with Rejected
+        // without any test noticing.
+        let mut proposal = caption_proposal_fixture();
+        proposal.suggestions[0].status = rollshot_action::CaptionSuggestionStatus::Accepted;
+        let metadata = caption_artifact_metadata_fixture();
+
+        let receipt = caption_review_receipt(&proposal, &metadata, 5_000).unwrap();
+
+        assert_eq!(receipt.applied_candidates, vec![1]);
+        assert!(receipt.rejected_candidates.is_empty());
+    }
+
+    #[test]
+    fn stale_suggestions_are_recorded_as_rejected() {
+        let mut proposal = caption_proposal_fixture();
+        proposal.suggestions[0].status = rollshot_action::CaptionSuggestionStatus::Stale;
+        let metadata = caption_artifact_metadata_fixture();
+
+        let receipt = caption_review_receipt(&proposal, &metadata, 5_000).unwrap();
+
+        assert_eq!(receipt.rejected_candidates, vec![1]);
+    }
+
+    #[test]
+    fn promotion_binds_the_kind_the_origin_and_the_payload_digest() {
+        // Gate A1 item 2 and spec §8 item 2: both origins, with the recorded
+        // binding and canonical_payload_sha256 asserted, not just the payload
+        // shape.
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().unwrap();
+
+        for (label, binding) in [
+            (
+                "durable",
+                caption_source_binding(&durable_context(root.path()).0, Some(root.path())),
+            ),
+            ("ephemeral", caption_source_binding(&ephemeral_context(), None)),
+        ] {
+            let proposal = caption_proposal_fixture();
+            let bytes = caption_artifact_payload(&proposal);
+            let ready = promote_caption_task_for_tests(&binding, &proposal);
+            let meta = ready.artifact_metadata().expect(label);
+
+            assert_eq!(meta.kind(), rollshot_agent::product_task::ArtifactKind::ActionGuideCaptions);
+            assert_eq!(meta.source_binding(), &binding, "{label}");
+            assert_eq!(
+                meta.summary(),
+                &rollshot_agent::product_task::ArtifactSummary::ActionGuideCaptions {
+                    suggestion_count: proposal.suggestions.len() as u32,
+                },
+                "{label}"
+            );
+            assert_eq!(
+                meta.canonical_payload_sha256(),
+                format!("{:x}", Sha256::digest(&bytes)),
+                "{label}: digest must cover exactly the promoted bytes"
+            );
+            assert_eq!(ready.pending_artifact_payload(), Some(bytes.as_slice()), "{label}");
+        }
     }
 }
