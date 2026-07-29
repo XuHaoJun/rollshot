@@ -1727,39 +1727,15 @@ impl AgentRunner {
                     // the run's terminal reason (spec §10.3).
                     match (audit_sink, authority) {
                         (Some(sink), Some(auth)) => {
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis() as i64;
-                            let envelope = match crate::audit::authority_denied_envelope(
+                            if let Err(category) = record_authority_denial(
                                 auth,
-                                tool.clone(),
-                                format!("{operation:?}"),
-                                crate::audit::AuditEventId::new_v4(),
-                                now,
-                            ) {
-                                Ok(envelope) => envelope,
-                                Err(e) => {
-                                    tracing::error!(
-                                        target: "rollshot::agent::driver",
-                                        tool = tool.as_str(),
-                                        error = %e,
-                                        "authority denial evidence could not be built"
-                                    );
-                                    return Err(DriverError::AuditFailure(
-                                        crate::audit::AuditFailureCategory::CorrelationMismatch,
-                                    ));
-                                }
-                            };
-                            if let Err(crate::audit::AuditAppendError::AppendFailed { category }) =
-                                sink.append(envelope).await
+                                &tool,
+                                operation,
+                                "rollshot::agent::driver",
+                                sink,
+                            )
+                            .await
                             {
-                                tracing::error!(
-                                    target: "rollshot::agent::driver",
-                                    tool = tool.as_str(),
-                                    category = ?category,
-                                    "authority denial evidence could not be acknowledged"
-                                );
                                 return Err(DriverError::AuditFailure(category));
                             }
                         }
@@ -2360,35 +2336,15 @@ impl AgentRunner {
                             );
                             return SingleSubmitTerminal::ProtocolFailure;
                         };
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as i64;
-                        let envelope = match crate::audit::authority_denied_envelope(
+                        if let Err(category) = record_authority_denial(
                             authority,
-                            terminal_tool_name.clone(),
-                            format!("{:?}", profile.required_operation),
-                            crate::audit::AuditEventId::new_v4(),
-                            now,
-                        ) {
-                            Ok(envelope) => envelope,
-                            Err(error) => {
-                                tracing::error!(
-                                    target = profile.tracing_target,
-                                    error = %error,
-                                    "single-submit authority denial evidence could not be built"
-                                );
-                                return SingleSubmitTerminal::ProtocolFailure;
-                            }
-                        };
-                        if let Err(crate::audit::AuditAppendError::AppendFailed { category }) =
-                            sink.append(envelope).await
+                            &terminal_tool_name,
+                            profile.required_operation,
+                            profile.tracing_target,
+                            sink,
+                        )
+                        .await
                         {
-                            tracing::error!(
-                                target = profile.tracing_target,
-                                category = ?category,
-                                "single-submit authority denial evidence could not be acknowledged"
-                            );
                             return SingleSubmitTerminal::AuditFailure { category };
                         }
                         return SingleSubmitTerminal::AuthorityDenied {
@@ -2498,6 +2454,103 @@ fn map_budget_error_to_single_submit(err: BudgetError) -> SingleSubmitTerminal {
         BudgetError::Exceeded(dim) => SingleSubmitTerminal::BudgetExhausted { dimension: dim },
         BudgetError::Overflow => SingleSubmitTerminal::ProtocolFailure,
     }
+}
+
+// ---------- Shared authority-denial recorder ----------
+
+/// Persist a durable authority-denial audit record.
+///
+/// Builds the [`AuditEventV1::AuthorityDenied`] envelope from the bound
+/// authority snapshot and appends it to the provided sink. Returns `Ok(())`
+/// when the evidence was durably acknowledged; returns
+/// `Err(AuditFailureCategory)` only when the durable record could not be
+/// written.
+async fn record_authority_denial(
+    authority: &crate::authority::AuthoritySnapshot,
+    tool_name: &str,
+    required_operation: crate::authority::RunOperation,
+    tracing_target: &'static str,
+    audit_sink: &dyn crate::audit::AuditAppendSink,
+) -> Result<(), crate::audit::AuditFailureCategory> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let envelope = match crate::audit::authority_denied_envelope(
+        authority,
+        tool_name.to_owned(),
+        format!("{required_operation:?}"),
+        crate::audit::AuditEventId::new_v4(),
+        now,
+    ) {
+        Ok(envelope) => envelope,
+        Err(e) => {
+            tracing::error!(
+                target = tracing_target,
+                tool = tool_name,
+                error = %e,
+                "authority denial evidence could not be built"
+            );
+            return Err(crate::audit::AuditFailureCategory::CorrelationMismatch);
+        }
+    };
+    if let Err(crate::audit::AuditAppendError::AppendFailed { category }) =
+        audit_sink.append(envelope).await
+    {
+        tracing::error!(
+            target = tracing_target,
+            tool = tool_name,
+            category = ?category,
+            "authority denial evidence could not be acknowledged"
+        );
+        return Err(category);
+    }
+    Ok(())
+}
+
+/// Authorize a visual-operation call, appending durable denial evidence
+/// when the authority snapshot does not grant the required operation.
+///
+/// A missing audit sink returns `ProtocolFailure` — it never reports an
+/// unaudited typed denial. When the sink is present but appending fails,
+/// returns `AuditFailure` with the sink's category.
+async fn authorize_visual_operation(
+    authority: &crate::authority::AuthoritySnapshot,
+    subject: &crate::authority::AuthoritySubject,
+    operation: crate::authority::RunOperation,
+    operation_name: &str,
+    audit_sink: Option<&dyn crate::audit::AuditAppendSink>,
+) -> Result<(), crate::visual_annotation::VisualAnnotationRunTerminal> {
+    if let Err(_err) =
+        authority.authorize_tool(authority.run_id(), subject, operation)
+    {
+        tracing::debug!(
+            target: "rollshot::agent::visual_annotation",
+            operation = ?operation,
+            "visual authority denied"
+        );
+        let Some(sink) = audit_sink else {
+            tracing::error!(
+                target: "rollshot::agent::visual_annotation",
+                operation = ?operation,
+                "visual authority denial has no audit sink"
+            );
+            return Err(crate::visual_annotation::VisualAnnotationRunTerminal::ProtocolFailure);
+        };
+        if let Err(category) = record_authority_denial(
+            authority,
+            operation_name,
+            operation,
+            "rollshot::agent::visual_annotation",
+            sink,
+        )
+        .await
+        {
+            return Err(crate::visual_annotation::VisualAnnotationRunTerminal::AuditFailure { category });
+        }
+        return Err(crate::visual_annotation::VisualAnnotationRunTerminal::AuthorityDenied { operation });
+    }
+    Ok(())
 }
 
 // ---------- Tests ----------
@@ -7857,5 +7910,237 @@ main = "SKILL.md"
         .await;
 
         assert!(matches!(terminal, SingleSubmitTerminal::ProtocolFailure));
+    }
+
+    // ------------------------------------------------------------------
+    // authorize_visual_operation helper
+    // ------------------------------------------------------------------
+
+    /// Authority without `DiscloseScreenshotAttachment` grant →
+    /// helper returns `AuthorityDenied` and records evidence.
+    #[tokio::test]
+    async fn visual_authority_helper_records_denial() {
+        let (sink, events) = RecordingAuditSink::channel();
+        let run_id = RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap();
+        let subject = AuthoritySubject::ActionGuideEphemeralGuide {
+            guide_digest: "test-digest".to_string(),
+        };
+        // Grants only SubmitReviewCandidate — not DiscloseScreenshotAttachment.
+        let authority = caption_authority_for_tests(
+            &run_id,
+            &subject,
+            DisclosureCeiling::FullScreenshot,
+            BTreeSet::from([RunOperation::SubmitReviewCandidate]),
+        );
+
+        let result = super::authorize_visual_operation(
+            &authority,
+            &subject,
+            RunOperation::DiscloseScreenshotAttachment,
+            "model_attachment",
+            Some(&sink),
+        )
+        .await;
+        assert_eq!(
+            result,
+            Err(crate::visual_annotation::VisualAnnotationRunTerminal::AuthorityDenied {
+                operation: RunOperation::DiscloseScreenshotAttachment,
+            }),
+        );
+        // Exactly one authority-denied envelope was recorded.
+        let envelope = events.try_recv().expect("authority denial was audited");
+        assert_eq!(
+            envelope.event().kind(),
+            crate::audit::AuditEventKindV1::AuthorityDenied
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "exactly one authority denial event is expected"
+        );
+    }
+
+    /// Wrong subject → authority denied.
+    #[tokio::test]
+    async fn visual_authority_helper_denies_wrong_subject() {
+        let (sink, _events) = RecordingAuditSink::channel();
+        let run_id = RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap();
+        let subject = AuthoritySubject::ActionGuideEphemeralGuide {
+            guide_digest: "test-digest".to_string(),
+        };
+        let other_subject = AuthoritySubject::ActionGuideEphemeralGuide {
+            guide_digest: "other-digest".to_string(),
+        };
+        let authority = caption_authority_for_tests(
+            &run_id,
+            &subject,
+            DisclosureCeiling::FullScreenshot,
+            BTreeSet::from([
+                RunOperation::DiscloseScreenshotAttachment,
+                RunOperation::SubmitReviewCandidate,
+            ]),
+        );
+
+        let result = super::authorize_visual_operation(
+            &authority,
+            &other_subject,
+            RunOperation::DiscloseScreenshotAttachment,
+            "model_attachment",
+            Some(&sink),
+        )
+        .await;
+        assert_eq!(
+            result,
+            Err(crate::visual_annotation::VisualAnnotationRunTerminal::AuthorityDenied {
+                operation: RunOperation::DiscloseScreenshotAttachment,
+            }),
+        );
+    }
+
+    /// Missing `SubmitReviewCandidate` → authority denied.
+    #[tokio::test]
+    async fn visual_authority_helper_denies_missing_submit_review() {
+        let (sink, _events) = RecordingAuditSink::channel();
+        let run_id = RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap();
+        let subject = AuthoritySubject::ActionGuideEphemeralGuide {
+            guide_digest: "test-digest".to_string(),
+        };
+        // Grants only DiscloseScreenshotAttachment — not SubmitReviewCandidate.
+        let authority = caption_authority_for_tests(
+            &run_id,
+            &subject,
+            DisclosureCeiling::FullScreenshot,
+            BTreeSet::from([RunOperation::DiscloseScreenshotAttachment]),
+        );
+
+        let result = super::authorize_visual_operation(
+            &authority,
+            &subject,
+            RunOperation::SubmitReviewCandidate,
+            "submit_visual_annotation_suggestions",
+            Some(&sink),
+        )
+        .await;
+        assert_eq!(
+            result,
+            Err(crate::visual_annotation::VisualAnnotationRunTerminal::AuthorityDenied {
+                operation: RunOperation::SubmitReviewCandidate,
+            }),
+        );
+    }
+
+    /// No audit sink → ProtocolFailure; never an unaudited typed denial.
+    #[tokio::test]
+    async fn visual_authority_helper_returns_protocol_failure_without_sink() {
+        let run_id = RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap();
+        let subject = AuthoritySubject::ActionGuideEphemeralGuide {
+            guide_digest: "test-digest".to_string(),
+        };
+        let authority = caption_authority_for_tests(
+            &run_id,
+            &subject,
+            DisclosureCeiling::FullScreenshot,
+            BTreeSet::new(),
+        );
+
+        let result = super::authorize_visual_operation(
+            &authority,
+            &subject,
+            RunOperation::DiscloseScreenshotAttachment,
+            "model_attachment",
+            None,
+        )
+        .await;
+        assert_eq!(
+            result,
+            Err(crate::visual_annotation::VisualAnnotationRunTerminal::ProtocolFailure),
+        );
+    }
+
+    /// Audit sink append failure → AuditFailure, not ProtocolFailure.
+    #[tokio::test]
+    async fn visual_authority_helper_preserves_audit_failure() {
+        struct FailingSink;
+        impl crate::audit::AuditAppendSink for FailingSink {
+            fn append(
+                &self,
+                _envelope: crate::audit::AuditEnvelopeV1,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn Future<
+                            Output = Result<
+                                crate::audit::AuditAppendReceiptV1,
+                                crate::audit::AuditAppendError,
+                            >,
+                        > + Send
+                        + '_
+                >
+            > {
+                Box::pin(async {
+                    Err(crate::audit::AuditAppendError::from_category(
+                        crate::audit::AuditFailureCategory::AppendPreCommitFailure,
+                    ))
+                })
+            }
+        }
+
+        let sink = FailingSink;
+        let run_id = RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap();
+        let subject = AuthoritySubject::ActionGuideEphemeralGuide {
+            guide_digest: "test-digest".to_string(),
+        };
+        let authority = caption_authority_for_tests(
+            &run_id,
+            &subject,
+            DisclosureCeiling::FullScreenshot,
+            BTreeSet::new(),
+        );
+
+        let result = super::authorize_visual_operation(
+            &authority,
+            &subject,
+            RunOperation::DiscloseScreenshotAttachment,
+            "model_attachment",
+            Some(&sink),
+        )
+        .await;
+        assert_eq!(
+            result,
+            Err(crate::visual_annotation::VisualAnnotationRunTerminal::AuditFailure {
+                category: crate::audit::AuditFailureCategory::AppendPreCommitFailure,
+            }),
+        );
+    }
+
+    /// Happy path — authority grants the operation.
+    #[tokio::test]
+    async fn visual_authority_helper_succeeds_when_granted() {
+        let (sink, events) = RecordingAuditSink::channel();
+        let run_id = RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap();
+        let subject = AuthoritySubject::ActionGuideEphemeralGuide {
+            guide_digest: "test-digest".to_string(),
+        };
+        let authority = caption_authority_for_tests(
+            &run_id,
+            &subject,
+            DisclosureCeiling::FullScreenshot,
+            BTreeSet::from([
+                RunOperation::DiscloseScreenshotAttachment,
+                RunOperation::SubmitReviewCandidate,
+            ]),
+        );
+
+        let result = super::authorize_visual_operation(
+            &authority,
+            &subject,
+            RunOperation::DiscloseScreenshotAttachment,
+            "model_attachment",
+            Some(&sink),
+        )
+        .await;
+        assert_eq!(result, Ok(()));
+        assert!(
+            events.try_recv().is_err(),
+            "no audit event on success"
+        );
     }
 }

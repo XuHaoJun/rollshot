@@ -77,6 +77,14 @@ pub enum VisualAnnotationRunTerminal {
     BudgetExhausted { dimension: BudgetDimension },
     ProviderFailure,
     ProtocolFailure,
+    /// The authority snapshot does not grant the required operation.
+    AuthorityDenied {
+        operation: crate::authority::RunOperation,
+    },
+    /// Required audit evidence could not be durably appended.
+    AuditFailure {
+        category: crate::audit::AuditFailureCategory,
+    },
 }
 
 // ---------- Internal tagged schema (private) ----------

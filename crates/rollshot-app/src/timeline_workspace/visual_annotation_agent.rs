@@ -537,6 +537,28 @@ fn map_terminal_to_result(
             );
             VisualAnnotationTaskResult::NoSuggestion { reason: None }
         }
+        VisualAnnotationRunTerminal::AuthorityDenied { operation } => {
+            tracing::warn!(
+                target: "rollshot::action::visual_annotation_agent",
+                run_id,
+                operation = ?operation,
+                "visual annotation authority denied"
+            );
+            VisualAnnotationTaskResult::NoSuggestion {
+                reason: Some("Visual annotation model did not return a usable suggestion.".to_string()),
+            }
+        }
+        VisualAnnotationRunTerminal::AuditFailure { category } => {
+            tracing::warn!(
+                target: "rollshot::action::visual_annotation_agent",
+                run_id,
+                category = ?category,
+                "visual annotation audit failure"
+            );
+            VisualAnnotationTaskResult::NoSuggestion {
+                reason: Some("Visual annotation model did not return a usable suggestion.".to_string()),
+            }
+        }
     }
 }
 
@@ -545,6 +567,8 @@ mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
     use rollshot_action::{CandidateKind, DetectReason};
+    use rollshot_agent::audit::AuditFailureCategory;
+    use rollshot_agent::authority::RunOperation;
     use rollshot_agent::NormalizedPoint;
     use rollshot_agent::NormalizedRect;
     use std::sync::Arc;
@@ -1010,5 +1034,49 @@ mod tests {
             }
             other => panic!("expected Ephemeral context, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn authority_denied_maps_to_no_suggestion() {
+        let terminal = VisualAnnotationRunTerminal::AuthorityDenied {
+            operation: RunOperation::DiscloseScreenshotAttachment,
+        };
+        let result = map_terminal_to_result(
+            terminal,
+            1,
+            test_origin(),
+            &step(),
+            5,
+            400,
+            200,
+            test_keyframe_sha(),
+            test_annotation_sha(),
+        );
+        assert!(matches!(
+            result,
+            VisualAnnotationTaskResult::NoSuggestion { reason: Some(_) }
+        ));
+    }
+
+    #[test]
+    fn audit_failure_maps_to_no_suggestion() {
+        let terminal = VisualAnnotationRunTerminal::AuditFailure {
+            category: AuditFailureCategory::AppendPreCommitFailure,
+        };
+        let result = map_terminal_to_result(
+            terminal,
+            1,
+            test_origin(),
+            &step(),
+            5,
+            400,
+            200,
+            test_keyframe_sha(),
+            test_annotation_sha(),
+        );
+        assert!(matches!(
+            result,
+            VisualAnnotationTaskResult::NoSuggestion { reason: Some(_) }
+        ));
     }
 }
