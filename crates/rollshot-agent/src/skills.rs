@@ -986,6 +986,12 @@ pub const ACTION_GUIDE_CAPTIONS_PACKAGE_ID: &str = "action-guide-captions";
 const CAPTIONS_BUNDLED_BODY: &str = include_str!("../skills/action-guide-captions/SKILL.md");
 const CAPTIONS_BUNDLED_MANIFEST: &str = include_str!("../skills/action-guide-captions/skill.toml");
 
+/// Well-known package ID for the bundled Action Guide visual annotations skill.
+pub const ACTION_GUIDE_VISUAL_ANNOTATIONS_PACKAGE_ID: &str = "action-guide-visual-annotations";
+
+const VISUAL_ANNOTATIONS_BUNDLED_BODY: &str = include_str!("../skills/action-guide-visual-annotations/SKILL.md");
+const VISUAL_ANNOTATIONS_BUNDLED_MANIFEST: &str = include_str!("../skills/action-guide-visual-annotations/skill.toml");
+
 static BUNDLED_REPORT: LazyLock<CatalogBuildReport> = LazyLock::new(|| {
     let limits = SkillCatalogLimits::v1();
     let sources: Vec<SkillSource<'_>> = vec![SkillSource::Bundled(vec![
@@ -1001,6 +1007,13 @@ static BUNDLED_REPORT: LazyLock<CatalogBuildReport> = LazyLock::new(|| {
             vec![
                 ("skill.toml", CAPTIONS_BUNDLED_MANIFEST.as_bytes()),
                 ("SKILL.md", CAPTIONS_BUNDLED_BODY.as_bytes()),
+            ],
+        ),
+        (
+            ACTION_GUIDE_VISUAL_ANNOTATIONS_PACKAGE_ID,
+            vec![
+                ("skill.toml", VISUAL_ANNOTATIONS_BUNDLED_MANIFEST.as_bytes()),
+                ("SKILL.md", VISUAL_ANNOTATIONS_BUNDLED_BODY.as_bytes()),
             ],
         ),
     ])];
@@ -1043,6 +1056,24 @@ pub fn bundled_action_guide_captions_use() -> Option<SkillUse> {
             &SkillInvocationRequest {
                 source_authority: SkillAuthorityId::parse("rollshot.bundled").unwrap(),
                 package_id: SkillPackageId::parse(ACTION_GUIDE_CAPTIONS_PACKAGE_ID).unwrap(),
+                expected_digest: None,
+                invocation_kind: SkillInvocationKind::HostExplicit,
+            },
+            0,
+        )
+        .ok()
+}
+
+/// Resolve the bundled Action Guide visual annotations skill.  Returns `None`
+/// if the package was not loaded (diagnostic in the build report).
+pub fn bundled_action_guide_visual_annotations_use() -> Option<SkillUse> {
+    let report = bundled_skill_catalog();
+    report
+        .catalog
+        .invoke(
+            &SkillInvocationRequest {
+                source_authority: SkillAuthorityId::parse("rollshot.bundled").unwrap(),
+                package_id: SkillPackageId::parse(ACTION_GUIDE_VISUAL_ANNOTATIONS_PACKAGE_ID).unwrap(),
                 expected_digest: None,
                 invocation_kind: SkillInvocationKind::HostExplicit,
             },
@@ -2084,7 +2115,7 @@ main = "SKILL.md"
             "unexpected diagnostics: {:?}",
             report.diagnostics
         );
-        assert_eq!(report.catalog.entries.len(), 2);
+        assert_eq!(report.catalog.entries.len(), 3);
     }
 
     #[test]
@@ -2172,5 +2203,28 @@ main = "SKILL.md"
     fn bundled_caption_skill_body_below_16kib() {
         let skill_use = super::bundled_action_guide_captions_use().unwrap();
         assert!(skill_use.body().len() <= 16 * 1024);
+    }
+
+    #[test]
+    fn bundled_visual_skill_body_matches_frozen_system_prompt() {
+        let skill = super::bundled_action_guide_visual_annotations_use().unwrap();
+        assert_eq!(skill.package_id().as_str(), "action-guide-visual-annotations");
+        assert_eq!(skill.source_authority().as_str(), "rollshot.bundled");
+        assert_eq!(skill.body(), crate::driver::VISUAL_ANNOTATION_SYSTEM_PROMPT_BASELINE);
+    }
+
+    #[test]
+    fn bundled_visual_skill_golden_digest_is_stable() {
+        let skill = super::bundled_action_guide_visual_annotations_use().unwrap();
+        assert_eq!(
+            skill.digest(),
+            "00829fdce733b6b8ffd65340c2ae35b6a986055f63d3c5844cc0ee5df11f6f5e",
+        );
+    }
+
+    #[test]
+    fn bundled_visual_skill_body_below_16kib() {
+        let skill = super::bundled_action_guide_visual_annotations_use().unwrap();
+        assert!(skill.body().len() <= 16 * 1024);
     }
 }
