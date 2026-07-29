@@ -324,6 +324,15 @@ pub struct TimelineWorkspace {
     pub(crate) caption_suggestions_running: bool,
     /// Monotonic local run id for caption proposal provenance.
     pub(crate) caption_agent_run_id: u64,
+    /// The single process-wide task store, opened once at workspace boot.
+    /// `None` when the config directory or the store is unavailable; the caption
+    /// run then reports the existing "Caption suggestions failed: {error}"
+    /// copy rather than running unpersisted and unaudited.
+    pub(crate) task_store: Option<std::sync::Arc<crate::agent_store::TaskStore>>,
+    /// Cancellation for the in-flight caption run. Triggered on the existing
+    /// exits — leaving the workspace, starting another run, closing the project
+    /// — with no new UI affordance.
+    pub(crate) caption_cancellation: Option<rollshot_agent::runtime::RunCancellation>,
     /// Current visual annotation suggestion state. See [`VisualAnnotationSuggestionState`].
     #[allow(dead_code)] // Read by Task 8's view; only the update path uses it here.
     pub(crate) visual_annotation_suggestion: VisualAnnotationSuggestionState,
@@ -420,6 +429,8 @@ impl TimelineWorkspace {
             caption_proposal: None,
             caption_suggestions_running: false,
             caption_agent_run_id: 0,
+            task_store: None,
+            caption_cancellation: None,
             visual_annotation_suggestion: VisualAnnotationSuggestionState::Idle,
             visual_annotation_agent_run_id: 0,
             storyboard_copy_operation_id: 0,
@@ -507,6 +518,8 @@ impl TimelineWorkspace {
             caption_proposal: None,
             caption_suggestions_running: false,
             caption_agent_run_id: 0,
+            task_store: None,
+            caption_cancellation: None,
             visual_annotation_suggestion: VisualAnnotationSuggestionState::Idle,
             visual_annotation_agent_run_id: 0,
             storyboard_copy_operation_id: 0,
@@ -881,10 +894,19 @@ pub fn run(
             .unwrap()
             .take()
             .expect("timeline workspace boot data already consumed");
-        (
-            TimelineWorkspace::new(recording, region, capability, source_kind),
-            iced::Task::none(),
-        )
+        let mut ws = TimelineWorkspace::new(recording, region, capability, source_kind);
+        // Open the process-wide task store once at workspace boot.
+        if let Ok(config_dir) = crate::daemon::config::rollshot_config_dir() {
+            match crate::agent_store::open_process_store(&config_dir) {
+                Ok(store) => ws.task_store = Some(store),
+                Err(e) => tracing::warn!(
+                    target: "rollshot::app::timeline_workspace",
+                    error = %e,
+                    "failed to open task store; caption runs will be unaudited"
+                ),
+            }
+        }
+        (ws, iced::Task::none())
     };
 
     fn update_task(state: &mut TimelineWorkspace, message: Message) -> iced::Task<Message> {

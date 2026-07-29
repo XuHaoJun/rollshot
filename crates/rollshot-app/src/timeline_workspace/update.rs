@@ -1077,7 +1077,12 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
         }
         Message::CaptionProposalLoaded(Err(error)) => {
             state.caption_suggestions_running = false;
-            state.message = Some(format!("Caption suggestions failed: {error}"));
+            // Preserve the frozen timeout copy verbatim — do not wrap it.
+            if error == super::caption_agent::TIMEOUT_MESSAGE {
+                state.message = Some(error);
+            } else {
+                state.message = Some(format!("Caption suggestions failed: {error}"));
+            }
             Update::none()
         }
         Message::AcceptCaptionSuggestion(id) => {
@@ -1151,6 +1156,12 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             if state.caption_suggestions_running {
                 return Update::none();
             }
+            if state.task_store.is_none() {
+                state.message = Some(
+                    "Caption suggestions failed: task store is unavailable.".to_string(),
+                );
+                return Update::none();
+            }
             if state.guide.is_empty() {
                 state.message = Some("No reviewed steps to caption.".to_string());
                 return Update::none();
@@ -1176,6 +1187,12 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                     guide: state.guide.clone(),
                 },
             };
+
+            // Cancel any in-flight caption run.
+            if let Some(existing) = state.caption_cancellation.take() {
+                existing.cancel();
+            }
+            state.caption_cancellation = Some(rollshot_agent::runtime::RunCancellation::new());
 
             state.caption_suggestions_running = true;
             state.message = Some("Preparing caption context...".to_string());
@@ -1250,6 +1267,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                 return Update::none();
             }
             let model = cfg.model.clone();
+            let provider = format!("{}", cfg.provider);
             let adapter = match crate::result_workspace::workbench::build_adapter(&cfg) {
                 Ok(adapter) => adapter,
                 Err(error) => {
@@ -1258,6 +1276,16 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                     return Update::none();
                 }
             };
+
+            // Take the cancellation token so it can be moved into the task.
+            let cancellation = state
+                .caption_cancellation
+                .take()
+                .unwrap_or_else(rollshot_agent::runtime::RunCancellation::new);
+            let store = state
+                .task_store
+                .clone()
+                .expect("task_store checked above");
 
             state.message = Some(super::caption_agent::RUNNING_MESSAGE.to_string());
             tracing::info!(
@@ -1268,7 +1296,15 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                 "caption suggestion run started"
             );
             Update::task(Task::perform(
-                super::caption_agent::suggest_captions_task(run_id, model, adapter, prepared),
+                super::caption_agent::suggest_captions_task(
+                    run_id,
+                    store,
+                    cancellation,
+                    model,
+                    provider,
+                    adapter,
+                    prepared,
+                ),
                 Message::CaptionProposalLoaded,
             ))
         }
@@ -3600,7 +3636,7 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn ws(recording: rollshot_action::Recording) -> TimelineWorkspace {
-        TimelineWorkspace::new(
+        let mut ws = TimelineWorkspace::new(
             recording,
             CaptureRegion {
                 x: 0,
@@ -3610,7 +3646,14 @@ mod tests {
             },
             InputCapability::SemanticEvents,
             InputSourceKind::LinuxEvdev,
-        )
+        );
+        // Open a temporary task store for tests that need it.
+        let dir = tempfile::tempdir().unwrap();
+        // Leak the tempdir so the store path survives the scope. Tests are
+        // short-lived so this is acceptable.
+        let path = dir.into_path();
+        ws.task_store = Some(crate::agent_store::open_process_store(&path).unwrap());
+        ws
     }
 
     #[test]
@@ -4718,6 +4761,21 @@ mod tests {
         assert_eq!(
             state.message,
             Some("Configure an agent provider before suggesting captions.".to_string())
+        );
+    }
+
+    #[test]
+    fn caption_request_fails_when_task_store_is_unavailable() {
+        let mut state = ws(synthetic_recording(1));
+        // Clear the task store to simulate an unavailable store.
+        state.task_store = None;
+
+        let _ = update(&mut state, Message::SuggestCaptionsRequested);
+
+        assert!(!state.caption_suggestions_running);
+        assert_eq!(
+            state.message,
+            Some("Caption suggestions failed: task store is unavailable.".to_string())
         );
     }
 

@@ -384,6 +384,8 @@ pub(crate) fn from_loaded_project(
         caption_proposal: None,
         caption_suggestions_running: false,
         caption_agent_run_id: 0,
+        task_store: None,
+        caption_cancellation: None,
         visual_annotation_suggestion: super::VisualAnnotationSuggestionState::Idle,
         visual_annotation_agent_run_id: 0,
         storyboard_copy_operation_id: 0,

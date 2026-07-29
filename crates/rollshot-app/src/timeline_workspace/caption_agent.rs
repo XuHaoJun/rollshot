@@ -1,4 +1,3 @@
-use iced::futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -106,6 +105,7 @@ pub(crate) fn steps_from_guide(guide: &rollshot_action::Guide) -> Vec<CaptionAge
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn build_caption_prompt(steps: &[CaptionAgentStep]) -> String {
     let json = serde_json::to_string(steps).unwrap_or_else(|_| "[]".to_string());
     format!(
@@ -268,91 +268,339 @@ pub(crate) const TIMEOUT_MESSAGE: &str = "Caption suggestions timed out.";
 /// that sets it.
 pub(crate) const RUNNING_MESSAGE: &str = "Suggesting captions...";
 
+// ========================================================================
+// Caption run wiring (Task 16)
+// ========================================================================
+
+/// Stub tool for the caption run. The driver needs an `Arc<dyn Tool>` to
+/// validate the model's tool call; this stub accepts any valid payload and
+/// returns success.
+struct CaptionSubmitTool;
+
+impl rollshot_agent::tools::Tool for CaptionSubmitTool {
+    fn name(&self) -> &str {
+        "submit_caption_suggestions"
+    }
+    fn json_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn call<'a>(
+        &'a self,
+        _arguments: &'a serde_json::Value,
+    ) -> rollshot_agent::tools::ToolFuture<'a> {
+        Box::pin(async move {
+            Ok(rollshot_agent::tools::ToolOutcome::Success {
+                result_json: serde_json::json!({"submitted": true}),
+            })
+        })
+    }
+}
+
+fn caption_tool_stub() -> std::sync::Arc<dyn rollshot_agent::tools::Tool> {
+    std::sync::Arc::new(CaptionSubmitTool)
+}
+
+/// SHA-256 of a canonicalized project root path. The Action Guide project
+/// manifest has no stable identity, so the path is the only one available.
+pub(crate) fn project_root_digest(root: &std::path::Path) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut hasher = Sha256::new();
+    hasher.update(b"rollshot-action-guide-project-root-v1\0");
+    hasher.update(canonical.as_os_str().as_encoded_bytes());
+    hasher.finalize().into()
+}
+
+pub(crate) fn caption_source_binding(
+    context: &PreparedCaptionContext,
+    project_root: Option<&std::path::Path>,
+) -> rollshot_agent::product_task::SourceBinding {
+    use rollshot_agent::product_task::SourceBinding;
+    match (context, project_root) {
+        (PreparedCaptionContext::Durable { projection, .. }, Some(root)) => {
+            SourceBinding::ActionGuideProject {
+                project_root_sha256: project_root_digest(root),
+                revision: projection.revision(),
+                projection_digest: projection.digest().to_owned(),
+            }
+        }
+        (PreparedCaptionContext::Durable { projection, .. }, None) => {
+            // A durable projection without a root cannot be restored later, so
+            // bind it as ephemeral rather than inventing an identity.
+            SourceBinding::ActionGuideEphemeralGuide {
+                guide_digest: projection.digest().to_owned(),
+            }
+        }
+        (PreparedCaptionContext::Ephemeral { guide_digest, .. }, _) => {
+            SourceBinding::ActionGuideEphemeralGuide {
+                guide_digest: guide_digest.clone(),
+            }
+        }
+    }
+}
+
+pub(crate) fn caption_authority(
+    task_id: rollshot_agent::product_task::ProductTaskId,
+    run_id: rollshot_agent::domain::RunId,
+    subject: rollshot_agent::authority::AuthoritySubject,
+) -> Result<rollshot_agent::authority::AuthoritySnapshot, String> {
+    use rollshot_agent::authority::{
+        AuthorityBinding, AuthoritySnapshot, DisclosureCeiling, RunOperation,
+    };
+    use rollshot_agent::product_task::TaskAttemptId;
+
+    let binding = AuthorityBinding::new(task_id, TaskAttemptId::new(1), run_id, subject);
+    AuthoritySnapshot::new(
+        binding,
+        "rollshot-v1".to_owned(),
+        DisclosureCeiling::TextMetadataOnly,
+        false,
+        std::collections::BTreeSet::new(),
+        std::collections::BTreeSet::from([RunOperation::SubmitReviewCandidate]),
+    )
+    .map_err(|e| format!("build caption authority: {e}"))
+}
+
+/// Decode a `SingleSubmitTerminal` into caption drafts or a user-visible error.
+///
+/// This is the single place that maps the driver terminal onto caption-domain
+/// results, so the frozen user-visible copy is exercised end to end.
+pub(crate) fn decode_caption_terminal(
+    terminal: &rollshot_agent::driver::SingleSubmitTerminal,
+) -> Result<Vec<rollshot_action::CaptionSuggestionDraft>, String> {
+    match terminal {
+        rollshot_agent::driver::SingleSubmitTerminal::Submitted { arguments } => {
+            parse_caption_tool_args(arguments)
+        }
+        rollshot_agent::driver::SingleSubmitTerminal::TextCompleted { text } => {
+            parse_caption_response(text)
+        }
+        rollshot_agent::driver::SingleSubmitTerminal::Cancelled => {
+            Err("Caption suggestions cancelled.".to_string())
+        }
+        rollshot_agent::driver::SingleSubmitTerminal::BudgetExhausted { dimension } => {
+            use rollshot_agent::runtime::BudgetDimension;
+            if *dimension == BudgetDimension::WallTime {
+                Err(TIMEOUT_MESSAGE.to_string())
+            } else {
+                Err(format!("Caption suggestions exhausted budget: {dimension:?}"))
+            }
+        }
+        rollshot_agent::driver::SingleSubmitTerminal::ProviderFailure => {
+            Err("Caption suggestions failed: provider error".to_string())
+        }
+        rollshot_agent::driver::SingleSubmitTerminal::ProtocolFailure => {
+            Err("Caption suggestions failed: agent protocol error".to_string())
+        }
+        rollshot_agent::driver::SingleSubmitTerminal::AuthorityDenied { operation } => {
+            Err(format!(
+                "Caption suggestions denied: operation {operation:?} not authorized"
+            ))
+        }
+    }
+}
+
 pub(crate) async fn suggest_captions_task(
     run_id: u64,
+    store: std::sync::Arc<crate::agent_store::TaskStore>,
+    cancellation: rollshot_agent::runtime::RunCancellation,
     model: String,
+    provider: String,
     adapter: Box<dyn rollshot_agent::ProviderAdapter>,
     context: PreparedCaptionContext,
 ) -> Result<rollshot_action::CaptionProposal, String> {
-    suggest_captions_with_timeout(
+    let project_root = match &context {
+        PreparedCaptionContext::Durable { .. } => {
+            // The project root is only known to the caller; we extract it from
+            // the source binding once the context is prepared.
+            None
+        }
+        PreparedCaptionContext::Ephemeral { .. } => None,
+    };
+    suggest_captions_with_store(
         run_id,
+        store,
+        cancellation,
         model,
+        provider,
         adapter,
         context,
-        std::time::Duration::from_secs(30),
+        project_root,
     )
     .await
 }
 
-async fn suggest_captions_with_timeout(
+async fn suggest_captions_with_store(
     run_id: u64,
+    store: std::sync::Arc<crate::agent_store::TaskStore>,
+    cancellation: rollshot_agent::runtime::RunCancellation,
     model: String,
+    provider: String,
     adapter: Box<dyn rollshot_agent::ProviderAdapter>,
     context: PreparedCaptionContext,
-    timeout: std::time::Duration,
+    project_root: Option<std::path::PathBuf>,
 ) -> Result<rollshot_action::CaptionProposal, String> {
+    use rollshot_agent::captions::caption_run_budget;
+    use rollshot_agent::driver::{AgentConfig, AgentRunner, SingleSubmitProfile};
+    use rollshot_agent::product_task::{
+        ProductTaskSnapshot, RunContractReceiptV1, TaskAttempt, TaskKind,
+    };
+    use rollshot_agent::skills::bundled_action_guide_captions_use;
+    use rollshot_agent::authority::AuthoritySubject;
+
     let guide = context.guide();
     let origin = context.origin();
     let steps = steps_from_guide(guide);
     if steps.is_empty() {
         return Err("No reviewed steps to caption.".to_string());
     }
-    let prompt = build_caption_prompt(&steps);
-    let cancellation = rollshot_agent::runtime::RunCancellation::new();
-    let deadline = tokio::time::Instant::now() + timeout;
-    let bounds = rollshot_agent::StreamBounds::new(cancellation, deadline);
-    let request = rollshot_agent::model::ModelRequest {
-        model,
-        prompt,
-        history: Vec::new(),
-        turn: 0,
-        tool_definitions: vec![caption_tool_definition()],
-        system_prompt: Some(
-            "You produce compact structured suggestions for Rollshot Action Guide captions."
-                .to_string(),
-        ),
-        max_tokens: Some(1200),
-        attachments: vec![],
-    };
 
-    let mut stream = tokio::time::timeout_at(deadline, adapter.stream(request, bounds))
-        .await
-        .map_err(|_| TIMEOUT_MESSAGE.to_string())?
-        .map_err(|e| e.to_string())?;
-    let mut text = String::new();
-    let mut tool_args = None;
-    tokio::time::timeout_at(deadline, async {
-        while let Some(event) = stream.next().await {
-            match event.map_err(|e| e.to_string())? {
-                rollshot_agent::model::ModelStreamEvent::TextDelta(delta) => {
-                    text.push_str(&delta);
-                }
-                rollshot_agent::model::ModelStreamEvent::ToolCallComplete {
-                    name,
-                    arguments,
-                    ..
-                } if name == "submit_caption_suggestions" => {
-                    tool_args = Some(arguments);
-                }
-                rollshot_agent::model::ModelStreamEvent::Completed(_) => break,
-                rollshot_agent::model::ModelStreamEvent::Error(error) => {
-                    return Err(error.to_string());
-                }
-                rollshot_agent::model::ModelStreamEvent::ToolCallStart { .. }
-                | rollshot_agent::model::ModelStreamEvent::ToolCallArgumentDelta { .. }
-                | rollshot_agent::model::ModelStreamEvent::ToolCallComplete { .. }
-                | rollshot_agent::model::ModelStreamEvent::UsageDelta(_) => {}
-            }
-        }
-        Ok::<(), String>(())
+    // 1. Build source binding and create the task.
+    let source_binding = caption_source_binding(&context, project_root.as_deref());
+    let task_id_str = format!("task-{}", uuid::Uuid::new_v4());
+    let task_id = rollshot_agent::product_task::ProductTaskId::parse(&task_id_str)
+        .map_err(|e| format!("build task id: {e}"))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+
+    let created =
+        ProductTaskSnapshot::new_v3(task_id.clone(), TaskKind::ActionGuideCaptions, source_binding.clone(), now)
+            .map_err(|e| format!("create task: {e}"))?;
+    let store_clone = store.clone();
+    let created_clone = created.clone();
+    tokio::task::spawn_blocking(move || {
+        store_clone.create_audited(
+            &created_clone,
+            rollshot_agent::audit::AuditEventId::new_v4(),
+            now,
+        )
     })
     .await
-    .map_err(|_| TIMEOUT_MESSAGE.to_string())??;
+    .map_err(|e| format!("spawn_blocking create: {e}"))?
+    .map_err(|e| format!("audit create: {e}"))?;
 
-    let drafts = match tool_args {
-        Some(arguments) => parse_caption_tool_args(&arguments)?,
-        None => parse_caption_response(&text)?,
+    // 2. Start attempt → transition_audited.
+    let run_id_str = format!("run-{}", uuid::Uuid::new_v4());
+    let run_id_parsed = rollshot_agent::domain::RunId::parse(&run_id_str)
+        .map_err(|e| format!("build run id: {e}"))?;
+    let attempt = TaskAttempt::new(
+        rollshot_agent::product_task::TaskAttemptId::new(1),
+        run_id_parsed.clone(),
+        now,
+    );
+    let running = created
+        .start_attempt(attempt, now)
+        .map_err(|e| format!("start attempt: {e}"))?;
+    let store_clone = store.clone();
+    let created_for_attempt = created.clone();
+    let running_clone = running.clone();
+    tokio::task::spawn_blocking(move || {
+        store_clone.transition_audited(
+            &created_for_attempt,
+            &running_clone,
+            rollshot_agent::audit::AuditEventId::new_v4(),
+            now,
+        )
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking start attempt: {e}"))?
+    .map_err(|e| format!("audit start attempt: {e}"))?;
+
+    // 3. Resolve bundled skill; build authority; bind run contract.
+    let skill_use = bundled_action_guide_captions_use()
+        .ok_or_else(|| "Caption skill not found.".to_string())?;
+
+    let subject = match &source_binding {
+        rollshot_agent::product_task::SourceBinding::ActionGuideProject {
+            project_root_sha256,
+            revision,
+            projection_digest,
+        } => AuthoritySubject::ActionGuideProject {
+            project_root_sha256: *project_root_sha256,
+            revision: *revision,
+            projection_digest: projection_digest.clone(),
+        },
+        rollshot_agent::product_task::SourceBinding::ActionGuideEphemeralGuide {
+            guide_digest,
+        } => AuthoritySubject::ActionGuideEphemeralGuide {
+            guide_digest: guide_digest.clone(),
+        },
+        _ => return Err("unexpected source binding domain for captions".to_string()),
     };
+
+    let authority = caption_authority(task_id.clone(), run_id_parsed.clone(), subject.clone())
+        .map_err(|e| format!("build authority: {e}"))?;
+
+    let receipt = authority.receipt(now);
+    let run_contract = RunContractReceiptV1 {
+        authority: receipt,
+        skill_use: skill_use.receipt(),
+        bound_at_unix_ms: now,
+    };
+    let bound = running
+        .bind_run_contract(run_contract, now)
+        .map_err(|e| format!("bind run contract: {e}"))?;
+    let store_clone = store.clone();
+    let running_for_bind = running.clone();
+    let bound_clone = bound.clone();
+    tokio::task::spawn_blocking(move || {
+        store_clone.transition_audited(
+            &running_for_bind,
+            &bound_clone,
+            rollshot_agent::audit::AuditEventId::new_v4(),
+            now,
+        )
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking bind contract: {e}"))?
+    .map_err(|e| format!("audit bind contract: {e}"))?;
+
+    // 4. Build profile and authorized input.
+    let prompt = format!(
+        "{envelope}\n\n<rollshot-skill package=\"{pkg}\" digest=\"{digest}\">\n{body}\n</rollshot-skill>",
+        envelope = "You produce compact structured suggestions for Rollshot Action Guide captions.",
+        pkg = skill_use.package_id().as_str(),
+        digest = skill_use.digest(),
+        body = skill_use.body(),
+    );
+    let profile = SingleSubmitProfile::from_skill(
+        &skill_use,
+        prompt.clone(),
+        caption_tool_definition(),
+        caption_tool_stub(),
+        rollshot_agent::authority::RunOperation::SubmitReviewCandidate,
+        "rollshot::action::caption_agent",
+    )
+    .map_err(|e| format!("build caption profile: {e:?}"))?;
+
+    let input = rollshot_agent::domain::AuthorizedModelInput::new(
+        provider,
+        model,
+        prompt,
+        vec![],
+        vec![],
+    )
+    .map_err(|e| format!("build model input: {e}"))?;
+
+    // 5. Run the single-submit profile.
+    let runner = AgentRunner::new(AgentConfig::default());
+    let terminal = runner
+        .run_single_submit_with_provider(
+            profile,
+            input,
+            adapter.as_ref(),
+            caption_run_budget(),
+            &cancellation,
+            &authority,
+            &subject,
+            None,
+        )
+        .await;
+
+    // 6. Map terminal to caption drafts.
+    let drafts = decode_caption_terminal(&terminal)?;
     let proposal = rollshot_action::CaptionProposal::from_agent_drafts(
         rollshot_action::CaptionProposalId(run_id),
         run_id,
@@ -514,55 +762,20 @@ mod tests {
 #[cfg(test)]
 mod provider_tests {
     use super::*;
-    use iced::futures::stream;
-    use rollshot_agent::model::{ModelError, ModelRequest, ModelStreamEvent};
-    use rollshot_agent::StreamBounds;
+    use rollshot_agent::driver::SingleSubmitTerminal;
+    use rollshot_agent::runtime::BudgetDimension;
     use std::future::Future;
-    use std::pin::Pin;
+    use std::sync::Arc;
 
-    #[derive(Clone)]
-    struct FakeProvider {
-        events: Vec<Result<ModelStreamEvent, ModelError>>,
-        delay: Option<std::time::Duration>,
+    fn test_task_id() -> rollshot_agent::product_task::ProductTaskId {
+        rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap()
     }
 
-    impl rollshot_agent::ProviderAdapter for FakeProvider {
-        fn stream(
-            &self,
-            _request: ModelRequest,
-            _bounds: StreamBounds,
-        ) -> Pin<
-            Box<
-                dyn Future<
-                        Output = Result<
-                            Pin<
-                                Box<
-                                    dyn iced::futures::Stream<
-                                            Item = Result<ModelStreamEvent, ModelError>,
-                                        > + Send,
-                                >,
-                            >,
-                            ModelError,
-                        >,
-                    > + Send
-                    + '_,
-            >,
-        > {
-            let events = self.events.clone();
-            let delay = self.delay;
-            Box::pin(async move {
-                if let Some(delay) = delay {
-                    tokio::time::sleep(delay).await;
-                }
-                Ok(Box::pin(stream::iter(events))
-                    as Pin<
-                        Box<
-                            dyn iced::futures::Stream<Item = Result<ModelStreamEvent, ModelError>>
-                                + Send,
-                        >,
-                    >)
-            })
-        }
+    fn test_run_id() -> rollshot_agent::domain::RunId {
+        rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap()
     }
 
     fn guide() -> rollshot_action::Guide {
@@ -576,11 +789,69 @@ mod provider_tests {
         }])
     }
 
-    fn ephemeral_context() -> PreparedCaptionContext {
+    pub(crate) fn ephemeral_context() -> PreparedCaptionContext {
         PreparedCaptionContext::Ephemeral {
             guide: guide(),
             guide_digest: "0".repeat(64),
         }
+    }
+
+    /// Build a durable `PreparedCaptionContext` by writing a minimal project
+    /// under `root` and loading it back.
+    pub(crate) fn durable_context(
+        root: &std::path::Path,
+    ) -> (PreparedCaptionContext, u64, String) {
+        use rollshot_action::project::{
+            create_project, load_project, ActionGuideContextProjectionV1,
+            EnabledOutputs, ProjectSnapshot, ProjectStep,
+            ProjectStepId, SnapshotFrame, SnapshotFramePayload,
+        };
+
+        let project_dir = root.join("guide.rollshot-guide");
+        let steps = vec![ProjectStep {
+            id: ProjectStepId(1),
+            order: 1,
+            title: "Step 1".into(),
+            caption: Some("Caption 1".into()),
+            kind: rollshot_action::CandidateKind::Click,
+            reason: rollshot_action::DetectReason::ClickConfirmed,
+            at_ms: 100,
+            keyframe: 1,
+            nearby: vec![1],
+            annotations: None,
+        }];
+        let snapshot = ProjectSnapshot {
+            base_revision: None,
+            title: "Test Guide".into(),
+            capture_region: rollshot_action::CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            input_source: rollshot_action::InputSourceKind::VisualOnly,
+            input_capability: rollshot_action::InputCapability::SemanticEvents,
+            enabled_outputs: EnabledOutputs::default(),
+            frames: vec![SnapshotFrame {
+                id: 1,
+                at_ms: 100,
+                payload: SnapshotFramePayload::Pixels(Arc::new(image::RgbaImage::new(8, 8))),
+            }],
+            steps,
+            import_warnings: Vec::new(),
+        };
+        create_project(&snapshot, &project_dir).unwrap();
+        let loaded = load_project(&project_dir).unwrap();
+        let projection =
+            ActionGuideContextProjectionV1::from_loaded_project(&loaded).unwrap();
+        let revision = projection.revision();
+        let digest = projection.digest().to_owned();
+        let guide = projection.to_guide().unwrap();
+        (
+            PreparedCaptionContext::Durable { guide, projection },
+            revision,
+            digest,
+        )
     }
 
     fn run<F: Future>(future: F) -> F::Output {
@@ -591,109 +862,162 @@ mod provider_tests {
             .block_on(future)
     }
 
-    #[test]
-    fn runner_accepts_text_json_from_fake_provider() {
-        let provider = FakeProvider {
-            events: vec![
-                Ok(ModelStreamEvent::TextDelta(
-                    r#"{"suggestions":[{"source":10,"title":"Open Settings","caption":"The settings panel appears.","confidence":0.8,"rationale":null}]}"#
-                        .to_string(),
-                )),
-                Ok(ModelStreamEvent::Completed(rollshot_agent::model::ModelCompletion {
-                    usage: rollshot_agent::model::ModelUsage::default(),
-                    stop_reason: rollshot_agent::model::StopReason::EndTurn,
-                })),
-            ],
-            delay: None,
-        };
-
-        let proposal = run(suggest_captions_with_timeout(
-            42,
-            "fake-model".to_string(),
-            Box::new(provider),
-            ephemeral_context(),
-            std::time::Duration::from_secs(1),
-        ))
-        .unwrap();
-
-        assert_eq!(proposal.suggestions.len(), 1);
-        assert_eq!(
-            proposal.suggestions[0].suggested_caption,
-            "The settings panel appears."
-        );
-    }
+    // ---- Authority tests ----
 
     #[test]
-    fn runner_prefers_tool_call_arguments() {
-        let provider = FakeProvider {
-            events: vec![Ok(ModelStreamEvent::ToolCallComplete {
-                id: "call-1".to_string(),
-                name: "submit_caption_suggestions".to_string(),
-                arguments: serde_json::json!({
-                    "suggestions": [{
-                        "source": 10,
-                        "title": "Open Settings",
-                        "caption": "The settings panel appears.",
-                        "confidence": 0.8,
-                        "rationale": null
-                    }]
-                }),
-            })],
-            delay: None,
+    fn caption_authority_grants_only_submit_and_forbids_images() {
+        let subject = rollshot_agent::authority::AuthoritySubject::ActionGuideProject {
+            project_root_sha256: [7u8; 32],
+            revision: 3,
+            projection_digest: "ab".repeat(32),
         };
+        let run_id = test_run_id();
 
-        let proposal = run(suggest_captions_with_timeout(
-            42,
-            "fake-model".to_string(),
-            Box::new(provider),
-            ephemeral_context(),
-            std::time::Duration::from_secs(1),
-        ))
-        .unwrap();
+        let authority = caption_authority(test_task_id(), run_id.clone(), subject.clone()).unwrap();
 
         assert_eq!(
-            proposal.suggestions[0].suggested_title.as_deref(),
-            Some("Open Settings")
+            authority.disclosure(),
+            rollshot_agent::authority::DisclosureCeiling::TextMetadataOnly
         );
+        assert!(authority
+            .authorize_tool(
+                &run_id,
+                &subject,
+                rollshot_agent::authority::RunOperation::SubmitReviewCandidate
+            )
+            .is_ok());
+        for forbidden in [
+            rollshot_agent::authority::RunOperation::InspectPreparedImage,
+            rollshot_agent::authority::RunOperation::ExecuteRestrictedAutomation,
+            rollshot_agent::authority::RunOperation::WriteDraft,
+            rollshot_agent::authority::RunOperation::ReadDraft,
+            rollshot_agent::authority::RunOperation::RequestUserInput,
+        ] {
+            assert!(
+                authority.authorize_tool(&run_id, &subject, forbidden).is_err(),
+                "caption runs must never hold {forbidden:?}"
+            );
+        }
+    }
+
+    // ---- Source binding tests ----
+
+    #[test]
+    fn source_binding_follows_the_prepared_context_origin() {
+        use rollshot_agent::product_task::SourceBinding;
+
+        // Ephemeral origin, with and without a root: always ephemeral.
+        let root = tempfile::tempdir().unwrap();
+        for project_root in [None, Some(root.path())] {
+            match caption_source_binding(&ephemeral_context(), project_root) {
+                SourceBinding::ActionGuideEphemeralGuide { guide_digest } => {
+                    assert_eq!(guide_digest, "0".repeat(64));
+                }
+                other => panic!("expected ephemeral, got {other:?}"),
+            }
+        }
+
+        // Durable origin with a root: project-bound, carrying the projection's
+        // own revision and digest, and the path digest — not a placeholder.
+        let (context, revision, digest) = durable_context(root.path());
+        match caption_source_binding(&context, Some(root.path())) {
+            SourceBinding::ActionGuideProject {
+                project_root_sha256,
+                revision: bound_revision,
+                projection_digest,
+            } => {
+                assert_eq!(project_root_sha256, project_root_digest(root.path()));
+                assert_eq!(bound_revision, revision);
+                assert_eq!(projection_digest, digest);
+            }
+            other => panic!("expected project binding, got {other:?}"),
+        }
+
+        // Durable origin with no root cannot be restored, so it degrades to
+        // ephemeral rather than inventing an identity.
+        assert!(matches!(
+            caption_source_binding(&context, None),
+            SourceBinding::ActionGuideEphemeralGuide { .. }
+        ));
     }
 
     #[test]
-    fn runner_returns_provider_errors() {
-        let provider = FakeProvider {
-            events: vec![Ok(ModelStreamEvent::Error(ModelError::ProviderFailure(
-                "rate limited".to_string(),
-            )))],
-            delay: None,
+    fn project_root_digest_is_path_scoped_and_domain_separated() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+
+        assert_eq!(project_root_digest(a.path()), project_root_digest(a.path()));
+        assert_ne!(project_root_digest(a.path()), project_root_digest(b.path()));
+    }
+
+    // ---- Terminal mapping tests ----
+
+    #[test]
+    fn text_completion_still_decodes_captions_without_a_tool_call() {
+        // Preserves the pre-migration fallback: a provider that cannot call
+        // tools may return the same JSON as assistant text.
+        let terminal = SingleSubmitTerminal::TextCompleted {
+            text: r#"{"suggestions":[{"source":10,"title":"Open Settings","caption":"The settings panel appears.","confidence":0.8,"rationale":null}]}"#
+                .to_string(),
         };
 
-        let err = run(suggest_captions_with_timeout(
-            42,
-            "fake-model".to_string(),
-            Box::new(provider),
-            ephemeral_context(),
-            std::time::Duration::from_secs(1),
-        ))
-        .unwrap_err();
+        let drafts = decode_caption_terminal(&terminal).expect("text fallback must decode");
 
-        assert!(err.contains("rate limited"), "err = {err}");
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].caption, "The settings panel appears.");
     }
 
     #[test]
-    fn runner_times_out_quickly_in_tests() {
-        let provider = FakeProvider {
-            events: Vec::new(),
-            delay: Some(std::time::Duration::from_millis(50)),
+    fn wall_time_exhaustion_reports_the_frozen_timeout_copy() {
+        let terminal = SingleSubmitTerminal::BudgetExhausted {
+            dimension: BudgetDimension::WallTime,
         };
 
-        let err = run(suggest_captions_with_timeout(
-            42,
-            "fake-model".to_string(),
-            Box::new(provider),
-            ephemeral_context(),
-            std::time::Duration::from_millis(1),
-        ))
-        .unwrap_err();
+        let err = decode_caption_terminal(&terminal).unwrap_err();
 
-        assert_eq!(err, "Caption suggestions timed out.");
+        assert_eq!(err, super::TIMEOUT_MESSAGE);
+    }
+
+    #[test]
+    fn cancellation_and_protocol_failures_keep_their_existing_copy() {
+        let pairs: Vec<(SingleSubmitTerminal, &str)> = vec![
+            (
+                SingleSubmitTerminal::Cancelled,
+                "Caption suggestions cancelled.",
+            ),
+            (
+                SingleSubmitTerminal::ProviderFailure,
+                "Caption suggestions failed: provider error",
+            ),
+            (
+                SingleSubmitTerminal::ProtocolFailure,
+                "Caption suggestions failed: agent protocol error",
+            ),
+            (
+                SingleSubmitTerminal::BudgetExhausted {
+                    dimension: BudgetDimension::ModelCalls,
+                },
+                "Caption suggestions exhausted budget: ModelCalls",
+            ),
+        ];
+
+        for (terminal, expected) in &pairs {
+            let err = decode_caption_terminal(terminal).unwrap_err();
+            assert_eq!(&err.as_str(), expected, "mismatch for {terminal:?}");
+        }
+    }
+
+    #[test]
+    fn authority_denied_reports_the_operation() {
+        let terminal = SingleSubmitTerminal::AuthorityDenied {
+            operation: rollshot_agent::authority::RunOperation::InspectPreparedImage,
+        };
+
+        let err = decode_caption_terminal(&terminal).unwrap_err();
+
+        assert!(
+            err.contains("InspectPreparedImage"),
+            "authority denial must name the operation, got: {err}"
+        );
     }
 }
