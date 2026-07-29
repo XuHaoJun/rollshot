@@ -173,6 +173,12 @@ pub enum Message {
     AcceptVisualAnnotation(rollshot_action::VisualAnnotationSuggestionId),
     /// Reject a single pending visual annotation by its suggestion id.
     RejectSingleVisualAnnotationSuggestion(rollshot_action::VisualAnnotationSuggestionId),
+    /// Background visual annotation review persistence completed.
+    #[allow(dead_code)]
+    VisualAnnotationReviewPersisted {
+        task_id: rollshot_agent::product_task::ProductTaskId,
+        result: Box<Result<rollshot_agent::product_task::ProductTaskSnapshot, String>>,
+    },
     SaveLater,
     SaveRequested,
     SaveAsRequested,
@@ -331,6 +337,152 @@ fn caption_review_persistence_task(state: &TimelineWorkspace) -> Task<Message> {
 fn schedule_caption_review_persistence(state: &mut TimelineWorkspace) -> Update {
     let task = caption_review_persistence_task(state);
     state.caption_review_persisting = task.units() > 0;
+    Update::task(task)
+}
+
+// ---------------------------------------------------------------------------
+// Visual annotation review persistence
+// ---------------------------------------------------------------------------
+
+/// Persist the current visual annotation decision batch.
+///
+/// Follows the same `begin_apply` → `complete_apply` / `reject_apply`
+/// lifecycle as caption persistence, but passes the resulting document
+/// state ID and annotation digest computed from the actual post-apply
+/// document annotations.
+#[cfg(feature = "action-guide")]
+async fn persist_visual_review_batch(
+    store: std::sync::Arc<crate::agent_store::TaskStore>,
+    snapshot: rollshot_agent::product_task::ProductTaskSnapshot,
+    proposal: rollshot_action::VisualAnnotationProposal,
+    resulting_document_state_id: u64,
+    resulting_annotation_digest: [u8; 32],
+    has_accepted: bool,
+) -> Result<rollshot_agent::product_task::ProductTaskSnapshot, String> {
+    tokio::task::spawn_blocking(move || {
+        use rollshot_agent::product_task::TaskStatus;
+
+        let mut persisted = snapshot;
+        if persisted.status() == TaskStatus::ReadyForReview {
+            let now = chrono::Utc::now().timestamp_millis();
+            let applying = persisted
+                .begin_apply(now)
+                .map_err(|e| format!("begin visual apply: {e}"))?;
+            store
+                .transition_audited(
+                    &persisted,
+                    &applying,
+                    rollshot_agent::audit::AuditEventId::new_v4(),
+                    now,
+                )
+                .map_err(|e| format!("persist begin visual apply: {e}"))?;
+            persisted = applying;
+        }
+
+        let has_pending = proposal
+            .suggestions
+            .iter()
+            .any(|s| s.status == rollshot_action::VisualAnnotationSuggestionStatus::Pending);
+        if has_pending {
+            return Ok(persisted);
+        }
+        if persisted.status() != TaskStatus::Applying {
+            return Err(format!(
+                "visual review cannot finalize from {:?}",
+                persisted.status()
+            ));
+        }
+
+        let metadata = persisted
+            .artifact_metadata()
+            .ok_or("visual review snapshot has no artifact metadata".to_string())?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let receipt = super::visual_annotation_agent::visual_review_receipt(
+            &proposal,
+            metadata,
+            resulting_document_state_id,
+            resulting_annotation_digest,
+            now,
+        )?;
+        let finalized = if has_accepted {
+            persisted
+                .complete_apply(receipt, now)
+                .map_err(|e| format!("complete visual apply: {e}"))?
+        } else {
+            persisted
+                .reject_apply(receipt, now)
+                .map_err(|e| format!("reject visual apply: {e}"))?
+        };
+        store
+            .transition_audited(
+                &persisted,
+                &finalized,
+                rollshot_agent::audit::AuditEventId::new_v4(),
+                now,
+            )
+            .map_err(|e| format!("persist visual decision: {e}"))?;
+        Ok(finalized)
+    })
+    .await
+    .map_err(|e| format!("visual review persistence task panicked: {e}"))?
+}
+
+/// Build the background task for visual annotation review persistence.
+#[cfg(feature = "action-guide")]
+fn visual_review_persistence_task(state: &TimelineWorkspace) -> Task<Message> {
+    let (Some(store), Some(snapshot), Some(proposal)) = (
+        state.task_store.clone(),
+        state.visual_annotation_review_snapshot.clone(),
+        match &state.visual_annotation_suggestion {
+            super::VisualAnnotationSuggestionState::PendingReview(p) => Some(p.clone()),
+            _ => None,
+        },
+    ) else {
+        return Task::none();
+    };
+    let task_id = snapshot.task_id().clone();
+    let has_accepted = proposal.suggestions.iter().any(
+        |s| s.status == rollshot_action::VisualAnnotationSuggestionStatus::Accepted,
+    );
+
+    // Compute the resulting document state and annotation digest from the
+    // actual post-apply document annotations. The selected step's document
+    // reflects every accept that has already been applied.
+    let step = state.selected_step();
+    let doc = step.and_then(|s| state.presentation.doc(s.source));
+    let (resulting_document_state_id, resulting_annotation_digest) = match doc {
+        Some(doc) => {
+            let state_id = doc.document.state_id();
+            let digest = super::visual_annotation_agent::visual_annotation_state_digest(
+                doc.document.annotations(),
+            )
+            .unwrap_or([0u8; 32]);
+            (state_id, digest)
+        }
+        None => (0u64, [0u8; 32]),
+    };
+
+    Task::perform(
+        persist_visual_review_batch(
+            store,
+            snapshot,
+            proposal,
+            resulting_document_state_id,
+            resulting_annotation_digest,
+            has_accepted,
+        ),
+        move |result| Message::VisualAnnotationReviewPersisted {
+            task_id,
+            result: Box::new(result),
+        },
+    )
+}
+
+/// Schedule visual annotation review persistence in a background task.
+#[cfg(feature = "action-guide")]
+fn schedule_visual_review_persistence(state: &mut TimelineWorkspace) -> Update {
+    let task = visual_review_persistence_task(state);
+    state.visual_annotation_review_persisting = task.units() > 0;
     Update::task(task)
 }
 
@@ -1934,6 +2086,9 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             if !state.can_mutate() {
                 return Update::none();
             }
+            if state.visual_annotation_review_persisting {
+                return Update::none();
+            }
             let step = state.selected_step().cloned();
             let doc = step
                 .as_ref()
@@ -1988,21 +2143,26 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                 ),
                 _ => format!("All {stale} visual annotation suggestions were stale."),
             });
-            Update::none()
+            schedule_visual_review_persistence(state)
         }
         Message::RejectVisualAnnotationSuggestion => {
-            if let super::VisualAnnotationSuggestionState::PendingReview(mut proposal) =
-                std::mem::replace(
-                    &mut state.visual_annotation_suggestion,
-                    super::VisualAnnotationSuggestionState::Idle,
-                )
+            if state.visual_annotation_review_persisting {
+                return Update::none();
+            }
+            if let super::VisualAnnotationSuggestionState::PendingReview(ref mut proposal) =
+                state.visual_annotation_suggestion
             {
                 proposal.reject_all();
+            } else {
+                return Update::none();
             }
             state.message = Some("Visual annotation suggestions rejected.".to_string());
-            Update::none()
+            schedule_visual_review_persistence(state)
         }
         Message::RejectSingleVisualAnnotationSuggestion(id) => {
+            if state.visual_annotation_review_persisting {
+                return Update::none();
+            }
             let super::VisualAnnotationSuggestionState::PendingReview(ref mut proposal) =
                 state.visual_annotation_suggestion
             else {
@@ -2014,14 +2174,53 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                 }
             }
             state.message = Some("Visual annotation rejected.".to_string());
-            Update::none()
+            schedule_visual_review_persistence(state)
         }
         Message::DismissVisualAnnotationReview => {
             state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
             Update::none()
         }
+        Message::VisualAnnotationReviewPersisted { task_id, result } => {
+            if state.visual_annotation_task_id.as_ref() != Some(&task_id) {
+                tracing::debug!(
+                    target: "rollshot::action::visual_annotation_review",
+                    task_id = task_id.as_str(),
+                    "stale visual annotation review persistence result ignored"
+                );
+                return Update::none();
+            }
+            state.visual_annotation_review_persisting = false;
+            match *result {
+                Ok(snapshot) => {
+                    let final_decision = matches!(
+                        snapshot.status(),
+                        rollshot_agent::product_task::TaskStatus::Completed
+                            | rollshot_agent::product_task::TaskStatus::Rejected
+                    );
+                    state.visual_annotation_review_snapshot = Some(snapshot);
+                    if final_decision {
+                        state.visual_annotation_suggestion =
+                            super::VisualAnnotationSuggestionState::Idle;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "rollshot::action::visual_annotation_review",
+                        %error,
+                        "visual annotation review persistence failed"
+                    );
+                    state.message = Some(format!(
+                        "Visual annotation review could not be saved: {error}"
+                    ));
+                }
+            }
+            Update::none()
+        }
         Message::AcceptVisualAnnotation(id) => {
             if !state.can_mutate() {
+                return Update::none();
+            }
+            if state.visual_annotation_review_persisting {
                 return Update::none();
             }
             let Some(step) = state.selected_step().cloned() else {
@@ -2095,7 +2294,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                         Some("Visual annotation suggestion is no longer pending.".to_string());
                 }
             }
-            Update::none()
+            schedule_visual_review_persistence(state)
         }
         Message::SaveLater => {
             state.first_save_prompt = super::FirstSavePrompt::Hidden;
@@ -6141,10 +6340,19 @@ mod tests {
 
         let _ = update(&mut state, Message::RejectVisualAnnotationSuggestion);
 
-        assert!(matches!(
-            state.visual_annotation_suggestion,
-            crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
-        ));
+        // With persistence scheduling, the proposal stays in PendingReview
+        // until the persistence task completes. All items are rejected.
+        match &state.visual_annotation_suggestion {
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(p) => {
+                for s in &p.suggestions {
+                    assert_eq!(
+                        s.status,
+                        rollshot_action::VisualAnnotationSuggestionStatus::Rejected
+                    );
+                }
+            }
+            other => panic!("expected PendingReview with all rejected, got {other:?}"),
+        }
     }
 
     #[test]
@@ -7811,5 +8019,155 @@ key_source = { Env = "OPENAI_API_KEY" }
                 "stale result should be ignored"
             );
         }
+    }
+
+    #[test]
+    fn visual_review_controls_do_not_emit_while_persisting() {
+        let mut state = ws(recording_from_frames());
+        state.visual_annotation_review_persisting = true;
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(
+                visual_proposal_for_first_step(&mut state, 1),
+            );
+
+        // All decision messages must be suppressed while persisting.
+        // The state should remain PendingReview after each.
+        let _ = update(&mut state, Message::AcceptAllVisualAnnotations);
+        assert!(
+            matches!(
+                &state.visual_annotation_suggestion,
+                crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(_)
+            ),
+            "AcceptAll must be suppressed while persisting"
+        );
+
+        let _ = update(&mut state, Message::RejectVisualAnnotationSuggestion);
+        assert!(
+            matches!(
+                &state.visual_annotation_suggestion,
+                crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(_)
+            ),
+            "RejectAll must be suppressed while persisting"
+        );
+
+        let _ = update(
+            &mut state,
+            Message::AcceptVisualAnnotation(rollshot_action::VisualAnnotationSuggestionId(1)),
+        );
+        assert!(
+            matches!(
+                &state.visual_annotation_suggestion,
+                crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(_)
+            ),
+            "Accept must be suppressed while persisting"
+        );
+
+        let _ = update(
+            &mut state,
+            Message::RejectSingleVisualAnnotationSuggestion(
+                rollshot_action::VisualAnnotationSuggestionId(1),
+            ),
+        );
+        assert!(
+            matches!(
+                &state.visual_annotation_suggestion,
+                crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(_)
+            ),
+            "RejectSingle must be suppressed while persisting"
+        );
+
+        // DismissVisualAnnotationReview is NOT suppressed — it clears memory UI only.
+        let _ = update(&mut state, Message::DismissVisualAnnotationReview);
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::Idle
+        ));
+    }
+
+    #[test]
+    fn visual_review_persistence_failure_keeps_proposal_visible() {
+        let mut state = ws(recording_from_frames());
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(
+                visual_proposal_for_first_step(&mut state, 1),
+            );
+        // Simulate a persistence failure by sending a failed result with a
+        // matching task id.
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        state.visual_annotation_task_id = Some(task_id.clone());
+        state.visual_annotation_review_persisting = true;
+
+        let _ = update(
+            &mut state,
+            Message::VisualAnnotationReviewPersisted {
+                task_id,
+                result: Box::new(Err("store failure".to_string())),
+            },
+        );
+
+        // Persisting flag cleared.
+        assert!(!state.visual_annotation_review_persisting);
+        // Proposal remains visible (PendingReview).
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(_)
+        ));
+        // Error message shown.
+        assert_eq!(
+            state.message.as_deref(),
+            Some("Visual annotation review could not be saved: store failure")
+        );
+    }
+
+    #[test]
+    fn stale_visual_review_persistence_result_is_ignored() {
+        let mut state = ws(recording_from_frames());
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(
+                visual_proposal_for_first_step(&mut state, 1),
+            );
+        // Set a different task id than the one in the message.
+        state.visual_annotation_task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000002",
+        )
+        .ok();
+        state.visual_annotation_review_persisting = true;
+
+        let stale_task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let _ = update(
+            &mut state,
+            Message::VisualAnnotationReviewPersisted {
+                task_id: stale_task_id,
+                result: Box::new(Ok(rollshot_agent::product_task::ProductTaskSnapshot::new_v3(
+                    rollshot_agent::product_task::ProductTaskId::parse(
+                        "task-00000000-0000-4000-8000-000000000001",
+                    )
+                    .unwrap(),
+                    rollshot_agent::product_task::TaskKind::ActionGuideVisualAnnotation,
+                    rollshot_agent::product_task::SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
+                        guide_digest: "aa".repeat(32),
+                        step_source: 10,
+                        keyframe: 7,
+                        keyframe_sha256: [1u8; 32],
+                        annotation_state_sha256: [2u8; 32],
+                    },
+                    1000,
+                ).unwrap())),
+            },
+        );
+
+        // Persisting flag stays true — stale result ignored.
+        assert!(state.visual_annotation_review_persisting);
+        // Proposal unchanged.
+        assert!(matches!(
+            state.visual_annotation_suggestion,
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(_)
+        ));
     }
 }

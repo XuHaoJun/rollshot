@@ -1139,14 +1139,19 @@ fn annotation_modal<'a>(
         if let super::VisualAnnotationSuggestionState::PendingReview(ref proposal) =
             state.visual_annotation_suggestion
         {
+            let review_enabled = !state.visual_annotation_review_persisting;
             let mut items = column![row![
                 text("Pending annotations").size(13),
                 Space::new().width(Length::Fill),
                 button(text("Accept all"))
-                    .on_press(Message::AcceptAllVisualAnnotations)
+                    .on_press_maybe(
+                        review_enabled.then_some(Message::AcceptAllVisualAnnotations)
+                    )
                     .style(button::primary),
                 button(text("Reject all"))
-                    .on_press(Message::RejectVisualAnnotationSuggestion)
+                    .on_press_maybe(
+                        review_enabled.then_some(Message::RejectVisualAnnotationSuggestion)
+                    )
                     .style(button::secondary),
                 button(text("Dismiss")).on_press(Message::DismissVisualAnnotationReview),
             ]
@@ -1184,10 +1189,15 @@ fn annotation_modal<'a>(
                     detail_col = detail_col.push(
                         row![
                             button(text("Accept"))
-                                .on_press(Message::AcceptVisualAnnotation(suggestion.id))
+                                .on_press_maybe(
+                                    review_enabled
+                                        .then_some(Message::AcceptVisualAnnotation(suggestion.id))
+                                )
                                 .style(button::primary),
-                            button(text("Reject")).on_press(
-                                Message::RejectSingleVisualAnnotationSuggestion(suggestion.id)
+                            button(text("Reject")).on_press_maybe(
+                                review_enabled.then_some(
+                                    Message::RejectSingleVisualAnnotationSuggestion(suggestion.id)
+                                )
                             ),
                         ]
                         .spacing(6),
@@ -1695,6 +1705,41 @@ mod tests {
         let _element = view(&state);
         // Review modal renders without panic. The button presence is verified
         // by the update-layer accept/reject/dismiss tests.
+    }
+
+    #[test]
+    fn visual_review_controls_do_not_emit_while_persisting_view() {
+        use iced::Size as IcedSize;
+        use iced_test::Simulator;
+
+        let mut state = ws(recording_from_frames(), InputCapability::SemanticEvents);
+        let _ =
+            crate::timeline_workspace::update::update(&mut state, Message::AnnotateStepRequested);
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(
+                crate::timeline_workspace::tests::visual_proposal_three_primitives_for_view(&state),
+            );
+        state.visual_annotation_review_persisting = true;
+        let mut ui = Simulator::with_size(
+            iced::Settings::default(),
+            IcedSize::new(1100.0, 760.0),
+            view(&state),
+        );
+
+        let _ = ui.click("Accept all");
+        let _ = ui.click("Accept");
+        let _ = ui.click("Reject");
+        let messages: Vec<_> = ui.into_messages().collect();
+        assert!(
+            messages.iter().all(|message| !matches!(
+                message,
+                Message::AcceptAllVisualAnnotations
+                    | Message::AcceptVisualAnnotation(_)
+                    | Message::RejectSingleVisualAnnotationSuggestion(_)
+                    | Message::RejectVisualAnnotationSuggestion
+            )),
+            "disabled review controls must not emit another decision"
+        );
     }
 
     // ---- Publish view tests ----

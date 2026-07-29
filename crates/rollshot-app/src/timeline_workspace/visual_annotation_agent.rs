@@ -1122,6 +1122,56 @@ async fn persist_visual_terminal(
     .map_err(|e| format!("spawn_blocking terminal: {e}"))?
 }
 
+/// Build a [`ReviewReceipt`] for the visual annotation proposal by partitioning
+/// each suggestion into applied/rejected by its current status.
+///
+/// `Stale` suggestions are recorded as rejected — they were valid at
+/// proposal time but no longer match the document.
+pub(crate) fn visual_review_receipt(
+    proposal: &VisualAnnotationProposal,
+    metadata: &rollshot_agent::product_task::ProductArtifactMetadata,
+    resulting_document_state_id: u64,
+    resulting_annotation_digest: [u8; 32],
+    now: i64,
+) -> Result<rollshot_agent::product_task::ReviewReceipt, String> {
+    use rollshot_action::VisualAnnotationSuggestionStatus;
+    use rollshot_agent::product_task::{LocalReviewDeltaV1, ReviewReceipt};
+
+    let narrow = |id: u64| -> Result<u32, String> {
+        u32::try_from(id).map_err(|_| format!("visual suggestion id {id} exceeds u32"))
+    };
+
+    let mut applied = Vec::new();
+    let mut rejected = Vec::new();
+    for suggestion in &proposal.suggestions {
+        match suggestion.status {
+            VisualAnnotationSuggestionStatus::Accepted => applied.push(narrow(suggestion.id.0)?),
+            VisualAnnotationSuggestionStatus::Rejected | VisualAnnotationSuggestionStatus::Stale => {
+                rejected.push(narrow(suggestion.id.0)?)
+            }
+            VisualAnnotationSuggestionStatus::Pending => {}
+        }
+    }
+
+    let state_id_narrow = u32::try_from(resulting_document_state_id)
+        .map_err(|_| format!("resulting document state id {resulting_document_state_id} exceeds u32"))?;
+
+    Ok(ReviewReceipt {
+        artifact_id: metadata.artifact_id().clone(),
+        artifact_revision: metadata.artifact_revision(),
+        proposal_id: metadata.proposal_id().to_owned(),
+        applied_candidates: applied,
+        rejected_candidates: rejected,
+        local_delta: LocalReviewDeltaV1 {
+            moved_candidates: Vec::new(),
+            manual_additions: Vec::new(),
+        },
+        resulting_document_state_id: Some(state_id_narrow),
+        resulting_document_digest: Some(resulting_annotation_digest),
+        decided_at_unix_ms: now,
+    })
+}
+
 #[cfg(test)]
 fn visual_authority_with_grants(
     task_id: rollshot_agent::product_task::ProductTaskId,
@@ -2350,5 +2400,109 @@ mod tests {
             let loaded = store.load(&success.task_id).unwrap();
             assert_eq!(loaded.status(), TaskStatus::ReadyForReview);
         }
+    }
+
+    #[test]
+    fn visual_review_receipt_binds_exact_artifact_revision() {
+        use rollshot_action::VisualAnnotationSuggestionStatus;
+        use rollshot_agent::product_task::{
+            ArtifactId, ArtifactKind, ArtifactRevision, ArtifactSummary, ProductArtifactMetadata,
+            SourceBinding,
+        };
+
+        // Build a proposal with one accepted, one rejected, and no pending items.
+        let step = step();
+        let mut proposal = VisualAnnotationProposal::from_agent_drafts(
+            VisualAnnotationProposalId(1),
+            1,
+            test_origin(),
+            &step,
+            0,
+            4, // image width
+            4, // image height
+            test_keyframe_sha(),
+            test_annotation_sha(),
+            vec![
+                VisualAnnotationSuggestionDraft {
+                    id: VisualAnnotationSuggestionId(1),
+                    payload: VisualAnnotationPayload::NumberCallout {
+                        tip: rollshot_image_document::ImagePoint::new(0.1, 0.1),
+                        bubble: rollshot_image_document::ImagePoint::new(0.5, 0.5),
+                    },
+                    confidence: 0.9,
+                    rationale: None,
+                },
+                VisualAnnotationSuggestionDraft {
+                    id: VisualAnnotationSuggestionId(2),
+                    payload: VisualAnnotationPayload::TextNote {
+                        position: rollshot_image_document::ImagePoint::new(0.2, 0.2),
+                        text: "test".into(),
+                    },
+                    confidence: 0.8,
+                    rationale: None,
+                },
+            ],
+        )
+        .unwrap();
+
+        // Accept first, reject second — no pending items remain.
+        proposal.suggestions[0].status = VisualAnnotationSuggestionStatus::Accepted;
+        proposal.suggestions[1].status = VisualAnnotationSuggestionStatus::Rejected;
+
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let metadata = ProductArtifactMetadata::new_v3(
+            ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000001").unwrap(),
+            ArtifactRevision::new(1),
+            ArtifactKind::ActionGuideVisualAnnotation,
+            1,
+            "abc123".to_owned(),
+            SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
+                guide_digest: "aa".repeat(32),
+                step_source: 10,
+                keyframe: 7,
+                keyframe_sha256: [1u8; 32],
+                annotation_state_sha256: [2u8; 32],
+            },
+            task_id.clone(),
+            rollshot_agent::product_task::TaskAttemptId::new(1),
+            rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap(),
+            "1".to_owned(),
+            "test-provider".to_owned(),
+            "test-model".to_owned(),
+            String::new(),
+            ArtifactSummary::ActionGuideVisualAnnotation { suggestion_count: 2 },
+            1000,
+        );
+
+        let receipt = visual_review_receipt(
+            &proposal,
+            &metadata,
+            42,
+            [3u8; 32],
+            5000,
+        )
+        .unwrap();
+
+        // Assert artifact/revision/proposal IDs.
+        assert_eq!(receipt.artifact_id, metadata.artifact_id().clone());
+        assert_eq!(receipt.artifact_revision, metadata.artifact_revision());
+        assert_eq!(receipt.proposal_id, metadata.proposal_id());
+
+        // Applied: suggestion id 1 (u32).
+        assert_eq!(receipt.applied_candidates, vec![1u32]);
+        // Rejected: suggestion id 2 (u32).
+        assert_eq!(receipt.rejected_candidates, vec![2u32]);
+
+        // Empty local delta — visual annotations have no move/manual-add editing.
+        assert!(receipt.local_delta.moved_candidates.is_empty());
+        assert!(receipt.local_delta.manual_additions.is_empty());
+
+        // Resulting state and digest.
+        assert_eq!(receipt.resulting_document_state_id, Some(42u32));
+        assert_eq!(receipt.resulting_document_digest, Some([3u8; 32]));
+        assert_eq!(receipt.decided_at_unix_ms, 5000);
     }
 }
