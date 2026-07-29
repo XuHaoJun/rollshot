@@ -383,7 +383,9 @@ pub(crate) fn decode_caption_terminal(
             if *dimension == BudgetDimension::WallTime {
                 Err(TIMEOUT_MESSAGE.to_string())
             } else {
-                Err(format!("Caption suggestions exhausted budget: {dimension:?}"))
+                Err(format!(
+                    "Caption suggestions exhausted budget: {dimension:?}"
+                ))
             }
         }
         rollshot_agent::driver::SingleSubmitTerminal::ProviderFailure => {
@@ -392,11 +394,9 @@ pub(crate) fn decode_caption_terminal(
         rollshot_agent::driver::SingleSubmitTerminal::ProtocolFailure => {
             Err("Caption suggestions failed: agent protocol error".to_string())
         }
-        rollshot_agent::driver::SingleSubmitTerminal::AuthorityDenied { operation } => {
-            Err(format!(
-                "Caption suggestions denied: operation {operation:?} not authorized"
-            ))
-        }
+        rollshot_agent::driver::SingleSubmitTerminal::AuthorityDenied { operation } => Err(
+            format!("Caption suggestions denied: operation {operation:?} not authorized"),
+        ),
     }
 }
 
@@ -406,9 +406,7 @@ pub(crate) fn decode_caption_terminal(
 
 /// Serialize the caption proposal's suggestions as a review artifact payload.
 /// Carries only the suggestions — the whole guide is not included.
-pub(crate) fn caption_artifact_payload(
-    proposal: &rollshot_action::CaptionProposal,
-) -> Vec<u8> {
+pub(crate) fn caption_artifact_payload(proposal: &rollshot_action::CaptionProposal) -> Vec<u8> {
     #[derive(serde::Serialize)]
     struct Suggestion<'a> {
         id: u64,
@@ -495,7 +493,15 @@ pub(crate) async fn suggest_captions_task(
     adapter: Box<dyn rollshot_agent::ProviderAdapter>,
     context: PreparedCaptionContext,
     project_root: Option<PathBuf>,
-) -> Result<(rollshot_agent::product_task::ProductTaskId, rollshot_action::CaptionProposal), String> {
+) -> Result<
+    (
+        rollshot_agent::product_task::ProductTaskId,
+        rollshot_action::CaptionProposal,
+        String,
+        String,
+    ),
+    String,
+> {
     suggest_captions_with_store(
         run_id,
         store,
@@ -518,14 +524,22 @@ async fn suggest_captions_with_store(
     adapter: Box<dyn rollshot_agent::ProviderAdapter>,
     context: PreparedCaptionContext,
     project_root: Option<std::path::PathBuf>,
-) -> Result<(rollshot_agent::product_task::ProductTaskId, rollshot_action::CaptionProposal), String> {
+) -> Result<
+    (
+        rollshot_agent::product_task::ProductTaskId,
+        rollshot_action::CaptionProposal,
+        String,
+        String,
+    ),
+    String,
+> {
+    use rollshot_agent::authority::AuthoritySubject;
     use rollshot_agent::captions::caption_run_budget;
     use rollshot_agent::driver::{AgentConfig, AgentRunner, SingleSubmitProfile};
     use rollshot_agent::product_task::{
         ProductTaskSnapshot, RunContractReceiptV1, TaskAttempt, TaskKind,
     };
     use rollshot_agent::skills::bundled_action_guide_captions_use;
-    use rollshot_agent::authority::AuthoritySubject;
 
     let guide = context.guide();
     let origin = context.origin();
@@ -544,9 +558,13 @@ async fn suggest_captions_with_store(
         .unwrap_or_default()
         .as_millis() as i64;
 
-    let created =
-        ProductTaskSnapshot::new_v3(task_id.clone(), TaskKind::ActionGuideCaptions, source_binding.clone(), now)
-            .map_err(|e| format!("create task: {e}"))?;
+    let created = ProductTaskSnapshot::new_v3(
+        task_id.clone(),
+        TaskKind::ActionGuideCaptions,
+        source_binding.clone(),
+        now,
+    )
+    .map_err(|e| format!("create task: {e}"))?;
     let store_clone = store.clone();
     let created_clone = created.clone();
     tokio::task::spawn_blocking(move || {
@@ -601,11 +619,11 @@ async fn suggest_captions_with_store(
             revision: *revision,
             projection_digest: projection_digest.clone(),
         },
-        rollshot_agent::product_task::SourceBinding::ActionGuideEphemeralGuide {
-            guide_digest,
-        } => AuthoritySubject::ActionGuideEphemeralGuide {
-            guide_digest: guide_digest.clone(),
-        },
+        rollshot_agent::product_task::SourceBinding::ActionGuideEphemeralGuide { guide_digest } => {
+            AuthoritySubject::ActionGuideEphemeralGuide {
+                guide_digest: guide_digest.clone(),
+            }
+        }
         _ => return Err("unexpected source binding domain for captions".to_string()),
     };
 
@@ -639,7 +657,7 @@ async fn suggest_captions_with_store(
     // 4. Build profile and authorized input.
     let prompt = format!(
         "{envelope}\n\n<rollshot-skill package=\"{pkg}\" digest=\"{digest}\">\n{body}\n</rollshot-skill>",
-        envelope = "You produce compact structured suggestions for Rollshot Action Guide captions.",
+        envelope = rollshot_agent::driver::CAPTION_SYSTEM_ENVELOPE,
         pkg = skill_use.package_id().as_str(),
         digest = skill_use.digest(),
         body = skill_use.body(),
@@ -655,8 +673,8 @@ async fn suggest_captions_with_store(
     .map_err(|e| format!("build caption profile: {e:?}"))?;
 
     let input = rollshot_agent::domain::AuthorizedModelInput::new(
-        provider,
-        model,
+        provider.clone(),
+        model.clone(),
         prompt,
         vec![],
         vec![],
@@ -690,7 +708,7 @@ async fn suggest_captions_with_store(
     if proposal.suggestions.is_empty() {
         return Err("Agent returned no usable caption suggestions.".to_string());
     }
-    Ok((task_id, proposal))
+    Ok((task_id, proposal, provider, model))
 }
 
 // ========================================================================
@@ -789,20 +807,23 @@ pub(crate) mod restore_test_helpers {
         binding: &rollshot_agent::product_task::SourceBinding,
         proposal: &rollshot_action::CaptionProposal,
     ) -> rollshot_agent::product_task::ProductTaskSnapshot {
-        use sha2::{Digest, Sha256};
         use rollshot_agent::product_task::{
-            ArtifactId, ArtifactKind, ArtifactRevision, ArtifactSummary,
-            ProductArtifactMetadata, ProductTaskSnapshot, RunContractReceiptV1,
-            TaskAttempt, TaskAttemptId, TaskKind,
+            ArtifactId, ArtifactKind, ArtifactRevision, ArtifactSummary, ProductArtifactMetadata,
+            ProductTaskSnapshot, RunContractReceiptV1, TaskAttempt, TaskAttemptId, TaskKind,
         };
+        use sha2::{Digest, Sha256};
 
         let task_id = test_task_id();
         let run_id = test_run_id();
         let now: i64 = 5_000;
 
-        let created =
-            ProductTaskSnapshot::new_v3(task_id.clone(), TaskKind::ActionGuideCaptions, binding.clone(), now)
-                .unwrap();
+        let created = ProductTaskSnapshot::new_v3(
+            task_id.clone(),
+            TaskKind::ActionGuideCaptions,
+            binding.clone(),
+            now,
+        )
+        .unwrap();
         let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), now);
         let running = created.start_attempt(attempt, now).unwrap();
 
@@ -848,7 +869,9 @@ pub(crate) mod restore_test_helpers {
             "test-provider".to_string(),
             "test-model".to_string(),
             "run-config-digest".to_string(),
-            ArtifactSummary::ActionGuideCaptions { suggestion_count: proposal.suggestions.len() as u32 },
+            ArtifactSummary::ActionGuideCaptions {
+                suggestion_count: proposal.suggestions.len() as u32,
+            },
             now,
         );
 
@@ -877,12 +900,11 @@ pub(crate) mod restore_test_helpers {
         binding: &rollshot_agent::product_task::SourceBinding,
         proposal_payload: Vec<u8>,
     ) -> rollshot_agent::product_task::ProductTaskId {
-        use sha2::{Digest, Sha256};
         use rollshot_agent::product_task::{
-            ArtifactId, ArtifactKind, ArtifactRevision, ArtifactSummary,
-            ProductArtifactMetadata, ProductTaskSnapshot, RunContractReceiptV1,
-            TaskAttempt, TaskAttemptId, TaskKind,
+            ArtifactId, ArtifactKind, ArtifactRevision, ArtifactSummary, ProductArtifactMetadata,
+            ProductTaskSnapshot, RunContractReceiptV1, TaskAttempt, TaskAttemptId, TaskKind,
         };
+        use sha2::{Digest, Sha256};
 
         let proposal = caption_proposal_fixture();
         let task_id = test_task_id();
@@ -999,10 +1021,23 @@ pub(crate) mod restore_test_helpers {
             _request: rollshot_agent::model::ModelRequest,
             _bounds: rollshot_agent::StreamBounds,
         ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<
-                std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<rollshot_agent::model::ModelStreamEvent, rollshot_agent::model::ModelError>> + Send>>,
-                rollshot_agent::model::ModelError,
-            >> + Send>,
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            std::pin::Pin<
+                                Box<
+                                    dyn futures_util::Stream<
+                                            Item = Result<
+                                                rollshot_agent::model::ModelStreamEvent,
+                                                rollshot_agent::model::ModelError,
+                                            >,
+                                        > + Send,
+                                >,
+                            >,
+                            rollshot_agent::model::ModelError,
+                        >,
+                    > + Send,
+            >,
         > {
             panic!("PanicProvider::stream must not be called during restore")
         }
@@ -1208,13 +1243,10 @@ mod provider_tests {
 
     /// Build a durable `PreparedCaptionContext` by writing a minimal project
     /// under `root` and loading it back.
-    pub(crate) fn durable_context(
-        root: &std::path::Path,
-    ) -> (PreparedCaptionContext, u64, String) {
+    pub(crate) fn durable_context(root: &std::path::Path) -> (PreparedCaptionContext, u64, String) {
         use rollshot_action::project::{
-            create_project, load_project, ActionGuideContextProjectionV1,
-            EnabledOutputs, ProjectSnapshot, ProjectStep,
-            ProjectStepId, SnapshotFrame, SnapshotFramePayload,
+            create_project, load_project, ActionGuideContextProjectionV1, EnabledOutputs,
+            ProjectSnapshot, ProjectStep, ProjectStepId, SnapshotFrame, SnapshotFramePayload,
         };
 
         let project_dir = root.join("guide.rollshot-guide");
@@ -1252,8 +1284,7 @@ mod provider_tests {
         };
         create_project(&snapshot, &project_dir).unwrap();
         let loaded = load_project(&project_dir).unwrap();
-        let projection =
-            ActionGuideContextProjectionV1::from_loaded_project(&loaded).unwrap();
+        let projection = ActionGuideContextProjectionV1::from_loaded_project(&loaded).unwrap();
         let revision = projection.revision();
         let digest = projection.digest().to_owned();
         let guide = projection.to_guide().unwrap();
@@ -1304,7 +1335,9 @@ mod provider_tests {
             rollshot_agent::authority::RunOperation::RequestUserInput,
         ] {
             assert!(
-                authority.authorize_tool(&run_id, &subject, forbidden).is_err(),
+                authority
+                    .authorize_tool(&run_id, &subject, forbidden)
+                    .is_err(),
                 "caption runs must never hold {forbidden:?}"
             );
         }
@@ -1459,8 +1492,8 @@ mod provider_tests {
     pub(crate) fn caption_artifact_metadata_fixture(
     ) -> rollshot_agent::product_task::ProductArtifactMetadata {
         use rollshot_agent::product_task::{
-            ArtifactId, ArtifactKind, ArtifactRevision, ArtifactSummary,
-            ProductArtifactMetadata, TaskAttemptId,
+            ArtifactId, ArtifactKind, ArtifactRevision, ArtifactSummary, ProductArtifactMetadata,
+            TaskAttemptId,
         };
         ProductArtifactMetadata::new_v3(
             ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000001").unwrap(),
@@ -1476,7 +1509,9 @@ mod provider_tests {
             "test-provider".to_string(),
             "test-model".to_string(),
             "run-config-digest".to_string(),
-            ArtifactSummary::ActionGuideCaptions { suggestion_count: 1 },
+            ArtifactSummary::ActionGuideCaptions {
+                suggestion_count: 1,
+            },
             5_000,
         )
     }
@@ -1487,20 +1522,23 @@ mod provider_tests {
         binding: &rollshot_agent::product_task::SourceBinding,
         proposal: &rollshot_action::CaptionProposal,
     ) -> rollshot_agent::product_task::ProductTaskSnapshot {
-        use sha2::{Digest, Sha256};
         use rollshot_agent::product_task::{
-            ArtifactId, ArtifactKind, ArtifactRevision, ArtifactSummary,
-            ProductArtifactMetadata, ProductTaskSnapshot, RunContractReceiptV1,
-            TaskAttempt, TaskAttemptId, TaskKind,
+            ArtifactId, ArtifactKind, ArtifactRevision, ArtifactSummary, ProductArtifactMetadata,
+            ProductTaskSnapshot, RunContractReceiptV1, TaskAttempt, TaskAttemptId, TaskKind,
         };
+        use sha2::{Digest, Sha256};
 
         let task_id = test_task_id();
         let run_id = test_run_id();
         let now: i64 = 5_000;
 
-        let created =
-            ProductTaskSnapshot::new_v3(task_id.clone(), TaskKind::ActionGuideCaptions, binding.clone(), now)
-                .unwrap();
+        let created = ProductTaskSnapshot::new_v3(
+            task_id.clone(),
+            TaskKind::ActionGuideCaptions,
+            binding.clone(),
+            now,
+        )
+        .unwrap();
         let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), now);
         let running = created.start_attempt(attempt, now).unwrap();
 
@@ -1595,7 +1633,10 @@ mod provider_tests {
         // entirely, so without this line the test would pass for the wrong
         // reason — `caption_review_receipt` would return Ok and `is_err()`
         // would fail.
-        assert!(proposal.reject(oversized), "reject must find the mutated id");
+        assert!(
+            proposal.reject(oversized),
+            "reject must find the mutated id"
+        );
         let metadata = caption_artifact_metadata_fixture();
 
         let err = caption_review_receipt(&proposal, &metadata, 5_000)
@@ -1642,14 +1683,20 @@ mod provider_tests {
                 "durable",
                 caption_source_binding(&durable_context(root.path()).0, Some(root.path())),
             ),
-            ("ephemeral", caption_source_binding(&ephemeral_context(), None)),
+            (
+                "ephemeral",
+                caption_source_binding(&ephemeral_context(), None),
+            ),
         ] {
             let proposal = caption_proposal_fixture();
             let bytes = caption_artifact_payload(&proposal);
             let ready = promote_caption_task_for_tests(&binding, &proposal);
             let meta = ready.artifact_metadata().expect(label);
 
-            assert_eq!(meta.kind(), rollshot_agent::product_task::ArtifactKind::ActionGuideCaptions);
+            assert_eq!(
+                meta.kind(),
+                rollshot_agent::product_task::ArtifactKind::ActionGuideCaptions
+            );
             assert_eq!(meta.source_binding(), &binding, "{label}");
             assert_eq!(
                 meta.summary(),
@@ -1663,7 +1710,11 @@ mod provider_tests {
                 format!("{:x}", Sha256::digest(&bytes)),
                 "{label}: digest must cover exactly the promoted bytes"
             );
-            assert_eq!(ready.pending_artifact_payload(), Some(bytes.as_slice()), "{label}");
+            assert_eq!(
+                ready.pending_artifact_payload(),
+                Some(bytes.as_slice()),
+                "{label}"
+            );
         }
     }
 }
@@ -1680,9 +1731,9 @@ mod audit_tests {
         AuthorityBinding, AuthoritySnapshot, AuthoritySubject, DisclosureCeiling,
     };
     use rollshot_agent::product_task::{
-        ArtifactId, ArtifactKind, ArtifactRevision, ArtifactSummary,
-        ProductArtifactMetadata, ProductTaskId, ProductTaskSnapshot, RunContractReceiptV1,
-        TaskAttempt, TaskAttemptId, TaskKind, TaskTerminal,
+        ArtifactId, ArtifactKind, ArtifactRevision, ArtifactSummary, ProductArtifactMetadata,
+        ProductTaskId, ProductTaskSnapshot, RunContractReceiptV1, TaskAttempt, TaskAttemptId,
+        TaskKind, TaskTerminal,
     };
     use sha2::{Digest, Sha256};
 
@@ -1774,9 +1825,7 @@ mod audit_tests {
 
     /// Drive a caption task through the full happy-path lifecycle using
     /// audited store methods. Returns the task id.
-    fn drive_full_caption_lifecycle(
-        store: &crate::agent_store::TaskStore,
-    ) -> ProductTaskId {
+    fn drive_full_caption_lifecycle(store: &crate::agent_store::TaskStore) -> ProductTaskId {
         let task_id = test_task_id();
         let run_id = test_run_id();
         let binding = ephemeral_binding();
@@ -1947,16 +1996,12 @@ mod audit_tests {
     }
 
     /// Read the raw audit journal file for a task.
-    fn read_journal_to_string(
-        config_dir: &std::path::Path,
-        task_id: &ProductTaskId,
-    ) -> String {
+    fn read_journal_to_string(config_dir: &std::path::Path, task_id: &ProductTaskId) -> String {
         let path = config_dir
             .join("agent-tasks/audit")
             .join(format!("{}.jsonl", task_id.as_str()));
-        std::fs::read_to_string(&path).unwrap_or_else(|e| {
-            panic!("journal file not found at {}: {e}", path.display())
-        })
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("journal file not found at {}: {e}", path.display()))
     }
 
     // ------------------------------------------------------------------
@@ -1984,13 +2029,18 @@ mod audit_tests {
             AuditEventKindV1::ReviewApplyStarted,
             AuditEventKindV1::ReviewDecisionCommitted,
         ] {
-            assert!(kinds.contains(&expected), "missing {expected:?} in {kinds:?}");
+            assert!(
+                kinds.contains(&expected),
+                "missing {expected:?} in {kinds:?}"
+            );
         }
 
         // Order is part of the contract: a promotion cannot precede its
         // contract bind, and a review decision cannot precede its apply.
         let position = |k: AuditEventKindV1| kinds.iter().position(|got| *got == k).unwrap();
-        assert!(position(AuditEventKindV1::TaskCreated) < position(AuditEventKindV1::AttemptStarted));
+        assert!(
+            position(AuditEventKindV1::TaskCreated) < position(AuditEventKindV1::AttemptStarted)
+        );
         assert!(
             position(AuditEventKindV1::RunContractBound)
                 < position(AuditEventKindV1::ArtifactPromoted)
@@ -2019,7 +2069,10 @@ mod audit_tests {
             .map(|e| e.event().kind())
             .collect();
 
-        assert!(kinds.contains(&AuditEventKindV1::TaskTerminated), "{kinds:?}");
+        assert!(
+            kinds.contains(&AuditEventKindV1::TaskTerminated),
+            "{kinds:?}"
+        );
         assert!(
             !kinds.contains(&AuditEventKindV1::ArtifactPromoted),
             "a budget-exhausted run must never promote an artifact: {kinds:?}"
@@ -2039,8 +2092,14 @@ mod audit_tests {
             .map(|e| e.event().kind())
             .collect();
 
-        assert!(kinds.contains(&AuditEventKindV1::AuthorityDenied), "{kinds:?}");
-        assert!(!kinds.contains(&AuditEventKindV1::ArtifactPromoted), "{kinds:?}");
+        assert!(
+            kinds.contains(&AuditEventKindV1::AuthorityDenied),
+            "{kinds:?}"
+        );
+        assert!(
+            !kinds.contains(&AuditEventKindV1::ArtifactPromoted),
+            "{kinds:?}"
+        );
         assert_eq!(
             store.load(&task_id).unwrap().artifact_metadata(),
             None,
@@ -2089,12 +2148,18 @@ mod audit_tests {
         )
         .unwrap();
 
-        assert!(!raw.contains("Suggest concise Action Guide titles"),
-            "the skill body must not be persisted; only its digest");
-        assert!(!raw.contains("base_image_sha256"),
-            "a caption binding must not carry image fields");
-        assert!(!raw.contains("iVBORw0KGgo"),
-            "no PNG payload may reach the task store");
+        assert!(
+            !raw.contains("Suggest concise Action Guide titles"),
+            "the skill body must not be persisted; only its digest"
+        );
+        assert!(
+            !raw.contains("base_image_sha256"),
+            "a caption binding must not carry image fields"
+        );
+        assert!(
+            !raw.contains("iVBORw0KGgo"),
+            "no PNG payload may reach the task store"
+        );
 
         // Positive counterpart, so the three negatives above cannot all pass
         // simply because nothing was written: the digest IS present, and it is

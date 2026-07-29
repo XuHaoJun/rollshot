@@ -201,7 +201,7 @@ pub(crate) fn compose_caption_prompt(
 
 /// System envelope for a caption run. Replaces the inline literal that lived in
 /// `caption_agent::suggest_captions_with_timeout` before the skill move.
-pub(crate) const CAPTION_SYSTEM_ENVELOPE: &str =
+pub const CAPTION_SYSTEM_ENVELOPE: &str =
     "You produce compact structured suggestions for Rollshot Action Guide captions.";
 
 pub(crate) enum AgentTaskProfile {
@@ -459,6 +459,11 @@ pub enum SingleSubmitTerminal {
     /// The model completed with text and no tool call. In a single-submit
     /// profile this is unusual but not impossible — the caller decides
     /// whether to surface the text.
+    ///
+    /// NOTE: Currently unreachable from `run_single_submit_with_provider`,
+    /// which returns `ProtocolFailure` for text-only completions. Retained
+    /// for future multi-turn caption profiles that may surface raw text.
+    #[allow(dead_code)]
     TextCompleted { text: String },
     /// The run was cancelled before or during execution.
     Cancelled,
@@ -470,7 +475,9 @@ pub enum SingleSubmitTerminal {
     /// arguments, missing tool call, etc.).
     ProtocolFailure,
     /// The authority snapshot does not grant the required operation.
-    AuthorityDenied { operation: crate::authority::RunOperation },
+    AuthorityDenied {
+        operation: crate::authority::RunOperation,
+    },
 }
 
 /// Bounded profile for a single-submit tool interaction.
@@ -2267,9 +2274,7 @@ impl AgentRunner {
                     tracker.apply_turn();
                 }
                 rig_core::agent::run::AgentRunStep::CallTools { calls } => {
-                    if calls.len() != 1
-                        || calls[0].tool_call.function.name != terminal_tool_name
-                    {
+                    if calls.len() != 1 || calls[0].tool_call.function.name != terminal_tool_name {
                         tracing::debug!(
                             target = profile.tracing_target,
                             call_count = calls.len(),
@@ -2290,9 +2295,11 @@ impl AgentRunner {
                     }
 
                     // Authority check: the tool call must be authorized.
-                    if let Err(_err) =
-                        authority.authorize_tool(authority.run_id(), subject, profile.required_operation)
-                    {
+                    if let Err(_err) = authority.authorize_tool(
+                        authority.run_id(),
+                        subject,
+                        profile.required_operation,
+                    ) {
                         tracing::debug!(
                             target = profile.tracing_target,
                             operation = ?profile.required_operation,
@@ -2359,9 +2366,7 @@ impl AgentRunner {
                     tracker.apply_turn();
 
                     // Return the raw arguments.
-                    return SingleSubmitTerminal::Submitted {
-                        arguments,
-                    };
+                    return SingleSubmitTerminal::Submitted { arguments };
                 }
                 rig_core::agent::run::AgentRunStep::Done(_) => {
                     tracing::debug!(
@@ -2393,13 +2398,9 @@ fn map_budget_error_to_visual_annotation(
     }
 }
 
-fn map_budget_error_to_single_submit(
-    err: BudgetError,
-) -> SingleSubmitTerminal {
+fn map_budget_error_to_single_submit(err: BudgetError) -> SingleSubmitTerminal {
     match err {
-        BudgetError::Exceeded(dim) => SingleSubmitTerminal::BudgetExhausted {
-            dimension: dim,
-        },
+        BudgetError::Exceeded(dim) => SingleSubmitTerminal::BudgetExhausted { dimension: dim },
         BudgetError::Overflow => SingleSubmitTerminal::ProtocolFailure,
     }
 }
@@ -7127,14 +7128,14 @@ main = "SKILL.md"
 
     // ---- Single-submit bounded profile tests ----
 
-    use crate::visual_annotation::tests::lifecycle::{
-        tool_call_turn, text_turn, va_runner, ScriptedProvider,
-    };
-    use crate::model::ModelStreamEvent;
     use crate::authority::{
         AuthorityBinding, AuthoritySnapshot, AuthoritySubject, DisclosureCeiling, RunOperation,
     };
+    use crate::model::ModelStreamEvent;
     use crate::product_task::{ProductTaskId, TaskAttemptId};
+    use crate::visual_annotation::tests::lifecycle::{
+        text_turn, tool_call_turn, va_runner, ScriptedProvider,
+    };
 
     /// Permissive terminal stub for caption tests — accepts any arguments
     /// and returns success. Mirrors `submit_visual_annotation_suggestions_tool_arc()`

@@ -2353,8 +2353,10 @@ mod tests {
             let mut ws = ws_project_backed();
             ws.save_state = ProjectSaveState::Clean;
             let proposal = caption_proposal_for_ws(&ws);
-            let _ =
-                super::super::update::update(&mut ws, Message::CaptionProposalLoaded(Ok((caption_test_task_id(), proposal))));
+            let _ = super::super::update::update(
+                &mut ws,
+                Message::CaptionProposalLoaded(Ok((caption_test_task_id(), proposal, "test-provider".to_string(), "test-model".to_string()))),
+            );
 
             let _ = super::super::update::update(
                 &mut ws,
@@ -2369,8 +2371,10 @@ mod tests {
             let mut ws = ws_project_backed();
             ws.save_state = ProjectSaveState::Clean;
             let proposal = caption_proposal_for_ws(&ws);
-            let _ =
-                super::super::update::update(&mut ws, Message::CaptionProposalLoaded(Ok((caption_test_task_id(), proposal))));
+            let _ = super::super::update::update(
+                &mut ws,
+                Message::CaptionProposalLoaded(Ok((caption_test_task_id(), proposal, "test-provider".to_string(), "test-model".to_string()))),
+            );
 
             let _ = super::super::update::update(&mut ws, Message::AcceptAllCaptionSuggestions);
 
