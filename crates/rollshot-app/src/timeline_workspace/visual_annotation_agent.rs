@@ -562,6 +562,111 @@ fn map_terminal_to_result(
     }
 }
 
+// ========================================================================
+// Visual source binding and authority
+// ========================================================================
+
+/// Build a [`SourceBinding`] for a visual annotation run.
+///
+/// Durable contexts bind to `ActionGuideVisualAnnotationProject` when a
+/// project root is available, otherwise fall back to the ephemeral variant.
+/// Ephemeral contexts always bind to
+/// `ActionGuideVisualAnnotationEphemeralGuide`.
+pub(crate) fn visual_source_binding(
+    context: &PreparedVisualAnnotationContext,
+    project_root: Option<&std::path::Path>,
+    step_source: u64,
+    keyframe: u64,
+    keyframe_sha256: [u8; 32],
+    annotation_state_sha256: [u8; 32],
+) -> rollshot_agent::product_task::SourceBinding {
+    use rollshot_agent::product_task::SourceBinding;
+    match (context, project_root) {
+        (PreparedVisualAnnotationContext::Durable { projection, .. }, Some(root)) => {
+            SourceBinding::ActionGuideVisualAnnotationProject {
+                project_root_sha256: crate::timeline_workspace::caption_agent::project_root_digest(
+                    root,
+                ),
+                revision: projection.revision(),
+                projection_digest: projection.digest().to_owned(),
+                step_source,
+                keyframe,
+                keyframe_sha256,
+                annotation_state_sha256,
+            }
+        }
+        (PreparedVisualAnnotationContext::Durable { projection, .. }, None) => {
+            SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
+                guide_digest: projection.digest().to_owned(),
+                step_source,
+                keyframe,
+                keyframe_sha256,
+                annotation_state_sha256,
+            }
+        }
+        (PreparedVisualAnnotationContext::Ephemeral { origin, .. }, _) => {
+            let guide_digest = match origin {
+                VisualAnnotationProposalOrigin::EphemeralGuide { guide_digest } => {
+                    guide_digest.clone()
+                }
+                _ => unreachable!("ephemeral context always has EphemeralGuide origin"),
+            };
+            SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
+                guide_digest,
+                step_source,
+                keyframe,
+                keyframe_sha256,
+                annotation_state_sha256,
+            }
+        }
+    }
+}
+
+/// Build an [`AuthoritySnapshot`] for a visual annotation run.
+///
+/// Always grants [`RunOperation::DiscloseScreenshotAttachment`] and
+/// [`RunOperation::SubmitReviewCandidate`] with
+/// [`DisclosureCeiling::FullScreenshot`]. The caller supplies the
+/// [`AuthoritySubject`].
+pub(crate) fn visual_authority(
+    task_id: rollshot_agent::product_task::ProductTaskId,
+    run_id: rollshot_agent::domain::RunId,
+    subject: rollshot_agent::authority::AuthoritySubject,
+) -> Result<rollshot_agent::authority::AuthoritySnapshot, String> {
+    visual_authority_with_grants(task_id, run_id, subject, true, true)
+}
+
+fn visual_authority_with_grants(
+    task_id: rollshot_agent::product_task::ProductTaskId,
+    run_id: rollshot_agent::domain::RunId,
+    subject: rollshot_agent::authority::AuthoritySubject,
+    grant_disclose: bool,
+    grant_submit: bool,
+) -> Result<rollshot_agent::authority::AuthoritySnapshot, String> {
+    use rollshot_agent::authority::{
+        AuthorityBinding, AuthoritySnapshot, DisclosureCeiling, RunOperation,
+    };
+    use rollshot_agent::product_task::TaskAttemptId;
+
+    let mut grants = std::collections::BTreeSet::new();
+    if grant_disclose {
+        grants.insert(RunOperation::DiscloseScreenshotAttachment);
+    }
+    if grant_submit {
+        grants.insert(RunOperation::SubmitReviewCandidate);
+    }
+    let binding = AuthorityBinding::new(task_id, TaskAttemptId::new(1), run_id, subject);
+    AuthoritySnapshot::new(
+        binding,
+        "rollshot-v1".to_owned(),
+        DisclosureCeiling::FullScreenshot,
+        true,
+        std::collections::BTreeSet::new(),
+        grants,
+    )
+    .map_err(|e| format!("build visual authority: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1078,5 +1183,299 @@ mod tests {
             result,
             VisualAnnotationTaskResult::NoSuggestion { reason: Some(_) }
         ));
+    }
+
+    // ------------------------------------------------------------------
+    // Visual source binding tests
+    // ------------------------------------------------------------------
+
+    fn task_id() -> rollshot_agent::product_task::ProductTaskId {
+        rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000099",
+        )
+        .unwrap()
+    }
+
+    fn run_id() -> rollshot_agent::domain::RunId {
+        rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000099").unwrap()
+    }
+
+    fn document_binding() -> rollshot_agent::product_task::DocumentContentBinding {
+        let state = rollshot_agent::product_task::AnnotationStateV1 {
+            width: 100,
+            height: 80,
+            state_id: 5,
+            annotations: vec![],
+        };
+        rollshot_agent::product_task::DocumentContentBinding::new(
+            test_keyframe_sha(),
+            &state,
+            5,
+        )
+        .unwrap()
+    }
+
+    /// Create a durable prepared context for binding tests.
+    fn durable_context() -> PreparedVisualAnnotationContext {
+        use rollshot_action::project::{
+            create_project, load_project, EnabledOutputs, ProjectSnapshot, ProjectStep,
+            ProjectStepId, SnapshotFrame, SnapshotFramePayload,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path().join("guide.rollshot-guide");
+        let steps = vec![ProjectStep {
+            id: ProjectStepId(1),
+            order: 1,
+            title: "Step 1".into(),
+            caption: Some("Caption 1".into()),
+            kind: CandidateKind::Click,
+            reason: DetectReason::ClickConfirmed,
+            at_ms: 100,
+            keyframe: 1,
+            nearby: vec![1],
+            annotations: None,
+        }];
+        let snapshot = ProjectSnapshot {
+            base_revision: None,
+            title: "Test Guide".into(),
+            capture_region: rollshot_action::CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            input_source: rollshot_action::InputSourceKind::VisualOnly,
+            input_capability: rollshot_action::InputCapability::SemanticEvents,
+            enabled_outputs: EnabledOutputs::default(),
+            frames: vec![SnapshotFrame {
+                id: 1,
+                at_ms: 100,
+                payload: SnapshotFramePayload::Pixels(Arc::new(image::RgbaImage::new(8, 8))),
+            }],
+            steps,
+            import_warnings: Vec::new(),
+        };
+        create_project(&snapshot, &project_dir).unwrap();
+
+        let ctx = run(prepare_visual_annotation_context_task(
+            42,
+            VisualAnnotationContextRequest::Durable {
+                root: project_dir,
+                expected_revision: 1,
+                step_source: 3,
+                keyframe: 1,
+            },
+        ))
+        .unwrap();
+        // Leak the tempdir so the project root stays valid for the test.
+        std::mem::forget(dir);
+        ctx
+    }
+
+    /// Create an ephemeral prepared context for binding tests.
+    fn ephemeral_context() -> PreparedVisualAnnotationContext {
+        let step = rollshot_action::GuideStep {
+            index: 1,
+            title: "Open".into(),
+            caption: "Done".into(),
+            kind: CandidateKind::Click,
+            reason: DetectReason::ClickConfirmed,
+            at_ms: 100,
+            keyframe: 5,
+            nearby: vec![],
+            source: 3,
+        };
+        let guide =
+            rollshot_action::Guide::from_reviewed_steps("Test".into(), vec![step]).unwrap();
+        run(prepare_visual_annotation_context_task(
+            99,
+            VisualAnnotationContextRequest::Ephemeral {
+                guide,
+                step_source: 3,
+                keyframe: 5,
+            },
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn visual_durable_binding_has_all_fields() {
+        use rollshot_agent::product_task::SourceBinding;
+
+        let ctx = durable_context();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        // The root won't exist, so project_root_digest falls back to the raw path.
+        let binding = visual_source_binding(
+            &ctx,
+            Some(&root),
+            3,
+            1,
+            test_keyframe_sha(),
+            test_annotation_sha(),
+        );
+        match binding {
+            SourceBinding::ActionGuideVisualAnnotationProject {
+                project_root_sha256,
+                revision,
+                projection_digest,
+                step_source,
+                keyframe,
+                keyframe_sha256,
+                annotation_state_sha256,
+            } => {
+                assert_eq!(
+                    project_root_sha256,
+                    crate::timeline_workspace::caption_agent::project_root_digest(&root),
+                );
+                assert_eq!(revision, 1);
+                assert!(!projection_digest.is_empty());
+                assert_eq!(step_source, 3);
+                assert_eq!(keyframe, 1);
+                assert_eq!(keyframe_sha256, test_keyframe_sha());
+                assert_eq!(annotation_state_sha256, test_annotation_sha());
+            }
+            other => panic!(
+                "expected ActionGuideVisualAnnotationProject, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn visual_ephemeral_binding_has_all_fields() {
+        use rollshot_agent::product_task::SourceBinding;
+
+        let ctx = ephemeral_context();
+        let binding = visual_source_binding(
+            &ctx,
+            None,
+            3,
+            5,
+            test_keyframe_sha(),
+            test_annotation_sha(),
+        );
+        match binding {
+            SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
+                guide_digest,
+                step_source,
+                keyframe,
+                keyframe_sha256,
+                annotation_state_sha256,
+            } => {
+                assert!(!guide_digest.is_empty());
+                assert_eq!(step_source, 3);
+                assert_eq!(keyframe, 5);
+                assert_eq!(keyframe_sha256, test_keyframe_sha());
+                assert_eq!(annotation_state_sha256, test_annotation_sha());
+            }
+            other => panic!(
+                "expected ActionGuideVisualAnnotationEphemeralGuide, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn visual_and_caption_bindings_never_identity_match() {
+        use rollshot_agent::product_task::SourceBinding;
+
+        // Same project root used for both a caption and a visual binding.
+        let root = std::path::Path::new("/tmp/test-project");
+        let caption = SourceBinding::ActionGuideProject {
+            project_root_sha256: crate::timeline_workspace::caption_agent::project_root_digest(root),
+            revision: 1,
+            projection_digest: "ab".repeat(32),
+        };
+        let visual = SourceBinding::ActionGuideVisualAnnotationProject {
+            project_root_sha256: crate::timeline_workspace::caption_agent::project_root_digest(root),
+            revision: 1,
+            projection_digest: "ab".repeat(32),
+            step_source: 3,
+            keyframe: 1,
+            keyframe_sha256: test_keyframe_sha(),
+            annotation_state_sha256: test_annotation_sha(),
+        };
+        assert!(
+            !caption.identity_matches(&visual),
+            "caption and visual bindings with the same root must never identity-match"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Visual authority tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn visual_authority_grants_only_attachment_and_submit() {
+        use rollshot_agent::authority::AuthoritySubject;
+
+        let authority = visual_authority(
+            task_id(),
+            run_id(),
+            AuthoritySubject::Document(document_binding()),
+        )
+        .unwrap();
+        assert_eq!(
+            authority.disclosure(),
+            rollshot_agent::authority::DisclosureCeiling::FullScreenshot,
+        );
+        assert!(authority
+            .authorize_tool(
+                authority.run_id(),
+                &AuthoritySubject::Document(document_binding()),
+                RunOperation::DiscloseScreenshotAttachment,
+            )
+            .is_ok());
+        assert!(authority
+            .authorize_tool(
+                authority.run_id(),
+                &AuthoritySubject::Document(document_binding()),
+                RunOperation::SubmitReviewCandidate,
+            )
+            .is_ok());
+        assert!(authority
+            .authorize_tool(
+                authority.run_id(),
+                &AuthoritySubject::Document(document_binding()),
+                RunOperation::InspectPreparedImage,
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn caption_authority_grants_only_submit_and_forbids_images() {
+        use rollshot_agent::authority::AuthoritySubject;
+
+        let authority = crate::timeline_workspace::caption_agent::caption_authority(
+            task_id(),
+            run_id(),
+            AuthoritySubject::Document(document_binding()),
+        )
+        .unwrap();
+        assert_eq!(
+            authority.disclosure(),
+            rollshot_agent::authority::DisclosureCeiling::TextMetadataOnly,
+        );
+        assert!(authority
+            .authorize_tool(
+                authority.run_id(),
+                &AuthoritySubject::Document(document_binding()),
+                RunOperation::SubmitReviewCandidate,
+            )
+            .is_ok());
+        assert!(authority
+            .authorize_tool(
+                authority.run_id(),
+                &AuthoritySubject::Document(document_binding()),
+                RunOperation::DiscloseScreenshotAttachment,
+            )
+            .is_err());
+        assert!(authority
+            .authorize_tool(
+                authority.run_id(),
+                &AuthoritySubject::Document(document_binding()),
+                RunOperation::InspectPreparedImage,
+            )
+            .is_err());
     }
 }
