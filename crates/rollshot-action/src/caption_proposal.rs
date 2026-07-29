@@ -1,20 +1,20 @@
 use crate::guide::Guide;
 use crate::models::{CandidateId, FrameId, GuideStep};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct CaptionProposalId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct CaptionSuggestionId(pub u64);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CaptionProposalProvenance {
     Agent { run_id: u64 },
 }
 
 /// The origin of a caption proposal: either from a durable project revision
 /// (revision-bound) or from an ephemeral in-memory guide.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CaptionProposalOrigin {
     DurableProject {
         revision: u64,
@@ -46,7 +46,7 @@ pub struct CaptionSuggestionDraft {
     pub rationale: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CaptionSuggestionBase {
     pub source: CandidateId,
     pub index: usize,
@@ -74,7 +74,7 @@ impl CaptionSuggestionBase {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CaptionSuggestionStatus {
     Pending,
     Accepted,
@@ -82,7 +82,7 @@ pub enum CaptionSuggestionStatus {
     Stale,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CaptionSuggestion {
     pub id: CaptionSuggestionId,
     pub base: CaptionSuggestionBase,
@@ -94,7 +94,7 @@ pub struct CaptionSuggestion {
     pub status: CaptionSuggestionStatus,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CaptionProposal {
     pub id: CaptionProposalId,
     pub origin: CaptionProposalOrigin,

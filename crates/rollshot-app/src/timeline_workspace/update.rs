@@ -315,6 +315,44 @@ fn persist_caption_review_transition(
     }
 }
 
+/// Try to restore a pending caption proposal from the task store after a
+/// project is opened or first-saved. Uses the loaded project to compute the
+/// projection digest needed to build a matching `SourceBinding`.
+#[cfg(feature = "action-guide")]
+fn restore_caption_proposal_on_project_open(
+    state: &mut TimelineWorkspace,
+    loaded: &rollshot_action::project::LoadedProject,
+) {
+    use super::caption_agent::caption_source_binding;
+    use super::caption_agent::restore_caption_proposal;
+    use rollshot_action::project::ActionGuideContextProjectionV1;
+
+    let Some(ref store) = state.task_store else { return; };
+    let Ok(projection) = ActionGuideContextProjectionV1::from_loaded_project(loaded) else {
+        return;
+    };
+    let guide = match projection.to_guide() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    let context = super::caption_agent::PreparedCaptionContext::Durable {
+        guide,
+        projection,
+    };
+    let binding = caption_source_binding(&context, Some(&loaded.root));
+    let now = chrono::Utc::now().timestamp_millis();
+    if let Some((task_id, proposal)) = restore_caption_proposal(store, &binding, now) {
+        tracing::info!(
+            target: "rollshot::action::caption_agent",
+            task_id = task_id.as_str(),
+            suggestion_count = proposal.suggestions.len(),
+            "restored pending caption proposal from prior session"
+        );
+        state.caption_task_id = Some(task_id);
+        state.caption_proposal = Some(proposal);
+    }
+}
+
 pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
     match message {
         Message::SelectStep(index) => {
@@ -3773,12 +3811,14 @@ fn handle_save_worker_finished(
             );
             state.frame_source = Some(rollshot_action::StepFrameSource::Project(source));
             state.project_session = Some(ProjectSession::Saved {
-                root,
+                root: root.clone(),
                 base_revision: revision,
                 access,
             });
             // Release scratch after source switch.
             state.imported_scratch.take();
+            // Restore any pending caption proposal from a prior session.
+            restore_caption_proposal_on_project_open(state, &loaded);
             state.message = Some("Project saved.".to_string());
             tracing::info!(
                 target: "rollshot::project",
@@ -3805,12 +3845,14 @@ fn handle_save_worker_finished(
             );
             state.frame_source = Some(rollshot_action::StepFrameSource::Project(source));
             state.project_session = Some(ProjectSession::Saved {
-                root,
+                root: root.clone(),
                 base_revision: revision,
                 access: ProjectAccess::ReadOnly,
             });
             // Release scratch after source switch.
             state.imported_scratch.take();
+            // Restore any pending caption proposal from a prior session.
+            restore_caption_proposal_on_project_open(state, &loaded);
             state.message = Some(
                 "Project saved, but another process holds the write lock. Editing is disabled."
                     .to_string(),
@@ -5184,6 +5226,114 @@ mod tests {
             first_step.caption.as_deref(),
             Some("The preferences window is opened for configuration.")
         );
+    }
+
+    // ---- Task 18: Restore caption proposal ----
+
+    #[test]
+    fn restore_repopulates_the_review_surface_without_a_provider() {
+        use crate::timeline_workspace::caption_agent::restore_test_helpers::{
+            action_guide_binding_fixture, seed_ready_for_review_caption_task,
+            restore_caption_proposal_with_provider, PanicProvider,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+        // Durable ActionGuideProject binding — an ephemeral one would be swept
+        // to Stale by Task 19's open-time sweep and could never restore.
+        let binding = action_guide_binding_fixture();
+        seed_ready_for_review_caption_task(&store, &binding);
+
+        // Spec §8 item 6: prove no provider call, do not merely omit one.
+        // `PanicProvider::stream` panics if it is ever invoked.
+        let provider = PanicProvider;
+        let restored = restore_caption_proposal_with_provider(&store, &binding, 9_000, &provider);
+
+        let (_task_id, proposal) = restored.expect("a matching task must restore");
+        assert_eq!(proposal.suggestions.len(), 1);
+        assert!(proposal.has_pending());
+        assert!(matches!(
+            proposal.origin(),
+            rollshot_action::CaptionProposalOrigin::DurableProject { .. }
+        ));
+    }
+
+    #[test]
+    fn restore_declines_and_marks_stale_when_the_revision_moved() {
+        use crate::timeline_workspace::caption_agent::restore_test_helpers::{
+            action_guide_binding_fixture, seed_ready_for_review_caption_task,
+            bump_revision,
+        };
+        use crate::timeline_workspace::caption_agent::restore_caption_proposal;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let binding = action_guide_binding_fixture();
+        let task_id = seed_ready_for_review_caption_task(&store, &binding);
+        let moved_on = bump_revision(&binding);
+
+        assert!(restore_caption_proposal(&store, &moved_on, 9_000).is_none());
+        assert_eq!(
+            store.load(&task_id).unwrap().status(),
+            rollshot_agent::product_task::TaskStatus::Stale
+        );
+    }
+
+    #[test]
+    fn restore_declines_and_leaves_other_projects_untouched() {
+        use crate::timeline_workspace::caption_agent::restore_test_helpers::{
+            action_guide_binding_fixture, seed_ready_for_review_caption_task,
+            with_different_project_root,
+        };
+        use crate::timeline_workspace::caption_agent::restore_caption_proposal;
+        // Identity mismatch is skipped, not marked stale (spec §5.3). Without
+        // this, `identity_matches` and `freshness_matches` could be swapped and
+        // the revision test above would still pass.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let binding = action_guide_binding_fixture();
+        let task_id = seed_ready_for_review_caption_task(&store, &binding);
+        let other_project = with_different_project_root(&binding);
+
+        assert!(restore_caption_proposal(&store, &other_project, 9_000).is_none());
+        assert_eq!(
+            store.load(&task_id).unwrap().status(),
+            rollshot_agent::product_task::TaskStatus::ReadyForReview,
+            "a different project must not stale another project's pending task"
+        );
+    }
+
+    #[test]
+    fn restore_is_deterministic_across_repeated_calls() {
+        use crate::timeline_workspace::caption_agent::restore_test_helpers::{
+            action_guide_binding_fixture, seed_ready_for_review_caption_task,
+        };
+        use crate::timeline_workspace::caption_agent::restore_caption_proposal;
+        // Gate A1 item 4 / spec §8: "the same input twice yields the same
+        // outcome". The first call must not consume or mutate the task.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let binding = action_guide_binding_fixture();
+        seed_ready_for_review_caption_task(&store, &binding);
+
+        let first = restore_caption_proposal(&store, &binding, 9_000);
+        let second = restore_caption_proposal(&store, &binding, 9_001);
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn an_undecodable_stored_proposal_does_not_restore() {
+        use crate::timeline_workspace::caption_agent::restore_test_helpers::{
+            action_guide_binding_fixture, seed_ready_for_review_caption_task_with_payload,
+        };
+        use crate::timeline_workspace::caption_agent::restore_caption_proposal;
+        // The `Err` arm of the payload decode (Step 3) is otherwise untested,
+        // and it is the one path that must not panic on a corrupt file.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let binding = action_guide_binding_fixture();
+        seed_ready_for_review_caption_task_with_payload(&store, &binding, b"not json".to_vec());
+
+        assert!(restore_caption_proposal(&store, &binding, 9_000).is_none());
     }
 
     // ---- Storyboard copy state machine ----

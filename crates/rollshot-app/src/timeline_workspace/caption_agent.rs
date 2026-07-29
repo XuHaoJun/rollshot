@@ -693,6 +693,337 @@ async fn suggest_captions_with_store(
     Ok((task_id, proposal))
 }
 
+// ========================================================================
+// Caption proposal restore (Task 18)
+// ========================================================================
+
+/// Look for a durable caption task ready for review against this binding.
+///
+/// Identity and freshness are both checked by `reconcile_for_source`, which also
+/// marks a same-identity stale task through its audited path. No provider call
+/// is made: the proposal comes from the stored payload.
+pub(crate) fn restore_caption_proposal(
+    store: &crate::agent_store::TaskStore,
+    binding: &rollshot_agent::product_task::SourceBinding,
+    now: i64,
+) -> Option<(
+    rollshot_agent::product_task::ProductTaskId,
+    rollshot_action::CaptionProposal,
+)> {
+    let snapshot = store.reconcile_for_source(binding, now).ok().flatten()?;
+    if snapshot.kind() != rollshot_agent::product_task::TaskKind::ActionGuideCaptions {
+        return None;
+    }
+    let payload = snapshot.pending_proposal_payload()?;
+    match serde_json::from_slice::<rollshot_action::CaptionProposal>(payload) {
+        Ok(proposal) => Some((snapshot.task_id().clone(), proposal)),
+        Err(error) => {
+            tracing::warn!(
+                target: "rollshot::action::caption_agent",
+                error = %error,
+                task_id = snapshot.task_id().as_str(),
+                "stored caption proposal failed to decode; not restoring"
+            );
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod restore_test_helpers {
+    use super::*;
+
+    fn test_task_id() -> rollshot_agent::product_task::ProductTaskId {
+        rollshot_agent::product_task::ProductTaskId::parse(
+            "task-00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap()
+    }
+
+    fn test_run_id() -> rollshot_agent::domain::RunId {
+        rollshot_agent::domain::RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap()
+    }
+
+    fn guide() -> rollshot_action::Guide {
+        rollshot_action::Guide::from_candidates(vec![rollshot_action::CandidateStep {
+            id: 10,
+            kind: rollshot_action::CandidateKind::Click,
+            reason: rollshot_action::DetectReason::ClickConfirmed,
+            at_ms: 120,
+            keyframe: 1,
+            nearby: vec![1],
+        }])
+    }
+
+    fn caption_proposal_fixture() -> rollshot_action::CaptionProposal {
+        let g = guide();
+        let drafts = vec![rollshot_action::CaptionSuggestionDraft {
+            step_source: 10,
+            title: Some("Open Settings".into()),
+            caption: "The user opens the settings panel.".into(),
+            confidence: 0.85,
+            rationale: Some("Click begins the flow.".into()),
+        }];
+        rollshot_action::CaptionProposal::from_agent_drafts(
+            rollshot_action::CaptionProposalId(42),
+            42,
+            rollshot_action::CaptionProposalOrigin::DurableProject {
+                revision: 3,
+                projection_digest: "ab".repeat(32),
+            },
+            &g,
+            drafts,
+        )
+    }
+
+    /// Durable `ActionGuideProject` binding fixture for restore tests.
+    pub fn action_guide_binding_fixture() -> rollshot_agent::product_task::SourceBinding {
+        rollshot_agent::product_task::SourceBinding::ActionGuideProject {
+            project_root_sha256: [0xAA; 32],
+            revision: 3,
+            projection_digest: "ab".repeat(32),
+        }
+    }
+
+    fn promote_caption_task_for_tests(
+        binding: &rollshot_agent::product_task::SourceBinding,
+        proposal: &rollshot_action::CaptionProposal,
+    ) -> rollshot_agent::product_task::ProductTaskSnapshot {
+        use sha2::{Digest, Sha256};
+        use rollshot_agent::product_task::{
+            ArtifactId, ArtifactKind, ArtifactRevision, ArtifactSummary,
+            ProductArtifactMetadata, ProductTaskSnapshot, RunContractReceiptV1,
+            TaskAttempt, TaskAttemptId, TaskKind,
+        };
+
+        let task_id = test_task_id();
+        let run_id = test_run_id();
+        let now: i64 = 5_000;
+
+        let created =
+            ProductTaskSnapshot::new_v3(task_id.clone(), TaskKind::ActionGuideCaptions, binding.clone(), now)
+                .unwrap();
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), now);
+        let running = created.start_attempt(attempt, now).unwrap();
+
+        let subject = match binding {
+            rollshot_agent::product_task::SourceBinding::ActionGuideProject {
+                project_root_sha256,
+                revision,
+                projection_digest,
+            } => rollshot_agent::authority::AuthoritySubject::ActionGuideProject {
+                project_root_sha256: *project_root_sha256,
+                revision: *revision,
+                projection_digest: projection_digest.clone(),
+            },
+            rollshot_agent::product_task::SourceBinding::ActionGuideEphemeralGuide {
+                guide_digest,
+            } => rollshot_agent::authority::AuthoritySubject::ActionGuideEphemeralGuide {
+                guide_digest: guide_digest.clone(),
+            },
+            _ => panic!("unexpected binding domain"),
+        };
+        let authority = caption_authority(task_id.clone(), run_id.clone(), subject).unwrap();
+        let run_contract = RunContractReceiptV1 {
+            authority: authority.receipt(now),
+            skill_use: rollshot_agent::skills::bundled_action_guide_captions_use()
+                .unwrap()
+                .receipt(),
+            bound_at_unix_ms: now,
+        };
+        let bound = running.bind_run_contract(run_contract, now).unwrap();
+
+        let payload_bytes = caption_artifact_payload(proposal);
+        let meta = ProductArtifactMetadata::new_v3(
+            ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000001").unwrap(),
+            ArtifactRevision::new(1),
+            ArtifactKind::ActionGuideCaptions,
+            1,
+            format!("{:x}", Sha256::digest(&payload_bytes)),
+            binding.clone(),
+            task_id,
+            TaskAttemptId::new(1),
+            run_id,
+            proposal.id.0.to_string(),
+            "test-provider".to_string(),
+            "test-model".to_string(),
+            "run-config-digest".to_string(),
+            ArtifactSummary::ActionGuideCaptions { suggestion_count: proposal.suggestions.len() as u32 },
+            now,
+        );
+
+        bound
+            .record_ready_for_review(meta, payload_bytes, None, now)
+            .unwrap()
+    }
+
+    /// Seed a ready-for-review caption task in the store with the given binding.
+    /// Returns the task id.
+    pub fn seed_ready_for_review_caption_task(
+        store: &crate::agent_store::TaskStore,
+        binding: &rollshot_agent::product_task::SourceBinding,
+    ) -> rollshot_agent::product_task::ProductTaskId {
+        let proposal = caption_proposal_fixture();
+        seed_ready_for_review_caption_task_with_payload(
+            store,
+            binding,
+            serde_json::to_vec(&proposal).unwrap(),
+        )
+    }
+
+    /// Seed a ready-for-review caption task with a custom proposal payload.
+    pub fn seed_ready_for_review_caption_task_with_payload(
+        store: &crate::agent_store::TaskStore,
+        binding: &rollshot_agent::product_task::SourceBinding,
+        proposal_payload: Vec<u8>,
+    ) -> rollshot_agent::product_task::ProductTaskId {
+        use sha2::{Digest, Sha256};
+        use rollshot_agent::product_task::{
+            ArtifactId, ArtifactKind, ArtifactRevision, ArtifactSummary,
+            ProductArtifactMetadata, ProductTaskSnapshot, RunContractReceiptV1,
+            TaskAttempt, TaskAttemptId, TaskKind,
+        };
+
+        let proposal = caption_proposal_fixture();
+        let task_id = test_task_id();
+        let run_id = test_run_id();
+        let now: i64 = 5_000;
+        let created = ProductTaskSnapshot::new_v3(
+            task_id.clone(),
+            TaskKind::ActionGuideCaptions,
+            binding.clone(),
+            now,
+        )
+        .unwrap();
+        let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id.clone(), now);
+        let running = created.start_attempt(attempt, now).unwrap();
+
+        let subject = match binding {
+            rollshot_agent::product_task::SourceBinding::ActionGuideProject {
+                project_root_sha256,
+                revision,
+                projection_digest,
+            } => rollshot_agent::authority::AuthoritySubject::ActionGuideProject {
+                project_root_sha256: *project_root_sha256,
+                revision: *revision,
+                projection_digest: projection_digest.clone(),
+            },
+            rollshot_agent::product_task::SourceBinding::ActionGuideEphemeralGuide {
+                guide_digest,
+            } => rollshot_agent::authority::AuthoritySubject::ActionGuideEphemeralGuide {
+                guide_digest: guide_digest.clone(),
+            },
+            _ => panic!("unexpected binding domain"),
+        };
+        let authority = caption_authority(task_id.clone(), run_id.clone(), subject).unwrap();
+        let run_contract = RunContractReceiptV1 {
+            authority: authority.receipt(now),
+            skill_use: rollshot_agent::skills::bundled_action_guide_captions_use()
+                .unwrap()
+                .receipt(),
+            bound_at_unix_ms: now,
+        };
+        let bound = running.bind_run_contract(run_contract, now).unwrap();
+
+        let payload_bytes = caption_artifact_payload(&proposal);
+        let meta = ProductArtifactMetadata::new_v3(
+            ArtifactId::parse("artifact-00000000-0000-4000-8000-000000000001").unwrap(),
+            ArtifactRevision::new(1),
+            ArtifactKind::ActionGuideCaptions,
+            1,
+            format!("{:x}", Sha256::digest(&payload_bytes)),
+            binding.clone(),
+            task_id.clone(),
+            TaskAttemptId::new(1),
+            run_id,
+            proposal.id.0.to_string(),
+            "test-provider".to_string(),
+            "test-model".to_string(),
+            "run-config-digest".to_string(),
+            ArtifactSummary::ActionGuideCaptions {
+                suggestion_count: proposal.suggestions.len() as u32,
+            },
+            now,
+        );
+
+        let ready_with_payload = bound
+            .record_ready_for_review(meta, payload_bytes, Some(proposal_payload), now)
+            .unwrap();
+        store.create(&ready_with_payload).unwrap();
+        ready_with_payload.task_id().clone()
+    }
+
+    /// Return the same binding with a bumped revision (freshness mismatch).
+    pub fn bump_revision(
+        binding: &rollshot_agent::product_task::SourceBinding,
+    ) -> rollshot_agent::product_task::SourceBinding {
+        match binding {
+            rollshot_agent::product_task::SourceBinding::ActionGuideProject {
+                project_root_sha256,
+                revision,
+                projection_digest,
+            } => rollshot_agent::product_task::SourceBinding::ActionGuideProject {
+                project_root_sha256: *project_root_sha256,
+                revision: revision + 1,
+                projection_digest: projection_digest.clone(),
+            },
+            _ => panic!("bump_revision only supports ActionGuideProject"),
+        }
+    }
+
+    /// Return the same kind of binding but with a different project root (identity mismatch).
+    pub fn with_different_project_root(
+        binding: &rollshot_agent::product_task::SourceBinding,
+    ) -> rollshot_agent::product_task::SourceBinding {
+        match binding {
+            rollshot_agent::product_task::SourceBinding::ActionGuideProject {
+                revision,
+                projection_digest,
+                ..
+            } => rollshot_agent::product_task::SourceBinding::ActionGuideProject {
+                project_root_sha256: [0xBB; 32],
+                revision: *revision,
+                projection_digest: projection_digest.clone(),
+            },
+            _ => panic!("with_different_project_root only supports ActionGuideProject"),
+        }
+    }
+
+    /// Provider adapter that panics if `stream` is ever called. Used to prove
+    /// that `restore_caption_proposal` makes no provider calls.
+    pub struct PanicProvider;
+
+    impl rollshot_agent::ProviderAdapter for PanicProvider {
+        fn stream(
+            &self,
+            _request: rollshot_agent::model::ModelRequest,
+            _bounds: rollshot_agent::StreamBounds,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<
+                std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<rollshot_agent::model::ModelStreamEvent, rollshot_agent::model::ModelError>> + Send>>,
+                rollshot_agent::model::ModelError,
+            >> + Send>,
+        > {
+            panic!("PanicProvider::stream must not be called during restore")
+        }
+    }
+
+    /// `restore_caption_proposal` with an explicit provider argument (used to
+    /// prove no provider call is made). The provider is unused except to hold
+    /// the panicking mock.
+    pub fn restore_caption_proposal_with_provider(
+        store: &crate::agent_store::TaskStore,
+        binding: &rollshot_agent::product_task::SourceBinding,
+        now: i64,
+        _provider: &dyn rollshot_agent::ProviderAdapter,
+    ) -> Option<(
+        rollshot_agent::product_task::ProductTaskId,
+        rollshot_action::CaptionProposal,
+    )> {
+        restore_caption_proposal(store, binding, now)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
