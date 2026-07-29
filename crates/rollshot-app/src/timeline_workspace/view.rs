@@ -1693,8 +1693,9 @@ mod tests {
         // in the view and verified by the consent modal structure test.
     }
 
-    #[test]
-    fn visual_annotation_review_has_per_item_buttons() {
+    /// Build a workspace in PendingReview state with a restored visual
+    /// annotation proposal (three primitives). No provider call required.
+    fn ws_with_restored_visual_review() -> TimelineWorkspace {
         let mut state = ws(recording_from_frames(), InputCapability::SemanticEvents);
         let _ =
             crate::timeline_workspace::update::update(&mut state, Message::AnnotateStepRequested);
@@ -1702,9 +1703,180 @@ mod tests {
             crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(
                 crate::timeline_workspace::tests::visual_proposal_three_primitives_for_view(&state),
             );
-        let _element = view(&state);
-        // Review modal renders without panic. The button presence is verified
-        // by the update-layer accept/reject/dismiss tests.
+        state
+    }
+
+    /// Build a VisualAnnotationProposal with `n` suggestions for long-content
+    /// and minimum-window scenarios.
+    fn visual_proposal_n_suggestions(
+        state: &TimelineWorkspace,
+        n: usize,
+    ) -> rollshot_action::VisualAnnotationProposal {
+        use rollshot_action::{
+            VisualAnnotationPayload, VisualAnnotationProposalId, VisualAnnotationProposalOrigin,
+            VisualAnnotationSuggestionDraft, VisualAnnotationSuggestionId,
+        };
+        use rollshot_image_document::{ImagePoint, ImageRect};
+
+        let step = &state.guide.steps()[0];
+        let doc = state
+            .presentation
+            .doc(step.source)
+            .expect("presentation doc");
+        let image = doc.document.source();
+        let drafts: Vec<VisualAnnotationSuggestionDraft> = (0..n)
+            .map(|i| {
+                let id = VisualAnnotationSuggestionId((i + 1) as u64);
+                match i % 3 {
+                    0 => VisualAnnotationSuggestionDraft {
+                        id,
+                        payload: VisualAnnotationPayload::NumberCallout {
+                            tip: ImagePoint::new(2.0, 2.0),
+                            bubble: ImagePoint::new(16.0, 16.0),
+                        },
+                        confidence: 0.9,
+                        rationale: Some(format!("callout {i}")),
+                    },
+                    1 => VisualAnnotationSuggestionDraft {
+                        id,
+                        payload: VisualAnnotationPayload::TextNote {
+                            position: ImagePoint::new(8.0, 8.0),
+                            text: format!("Note {i}"),
+                        },
+                        confidence: 0.7,
+                        rationale: None,
+                    },
+                    _ => VisualAnnotationSuggestionDraft {
+                        id,
+                        payload: VisualAnnotationPayload::OpaqueRedaction {
+                            bounds: ImageRect {
+                                x: 2.0,
+                                y: 2.0,
+                                width: 10.0,
+                                height: 8.0,
+                            },
+                        },
+                        confidence: 0.6,
+                        rationale: Some(format!("redaction {i}")),
+                    },
+                }
+            })
+            .collect();
+        rollshot_action::VisualAnnotationProposal::from_agent_drafts(
+            VisualAnnotationProposalId(1),
+            1,
+            VisualAnnotationProposalOrigin::EphemeralGuide {
+                guide_digest: "aa".repeat(32),
+            },
+            step,
+            doc.document.state_id(),
+            image.width(),
+            image.height(),
+            [1u8; 32],
+            [2u8; 32],
+            drafts,
+        )
+        .expect("valid proposal")
+    }
+
+    #[test]
+    fn visual_annotation_review_has_per_item_buttons() {
+        use iced::Size as IcedSize;
+        use iced_test::Simulator;
+
+        let state = ws_with_restored_visual_review();
+        let mut ui = Simulator::with_size(
+            iced::Settings::default(),
+            IcedSize::new(1100.0, 760.0),
+            view(&state),
+        );
+
+        // Structural assertions: the visual annotation review panel elements
+        // must be findable by text — proves restore populated the surface.
+        let header = ui
+            .find("Pending annotations")
+            .expect("review header must be present after restore");
+        assert!(
+            header.visible_bounds().is_some(),
+            "review header must be visible"
+        );
+
+        let accept_all = ui
+            .find("Accept all")
+            .expect("Accept all button must be present after restore");
+        assert!(
+            accept_all.visible_bounds().is_some(),
+            "Accept all button must be visible"
+        );
+
+        let reject_all = ui
+            .find("Reject all")
+            .expect("Reject all button must be present");
+        assert!(
+            reject_all.visible_bounds().is_some(),
+            "Reject all button must be visible"
+        );
+
+        let dismiss = ui
+            .find("Dismiss")
+            .expect("Dismiss button must be present after restore");
+        assert!(
+            dismiss.visible_bounds().is_some(),
+            "Dismiss button must be visible"
+        );
+
+        // Per-item: at least one "Accept" and "Reject" button.
+        // `find("Accept")` uses exact text match, so it does not match
+        // the header's "Accept all" button — verify they are distinct.
+        let accept_btn = ui
+            .find("Accept")
+            .expect("per-item Accept button must be present");
+        assert!(
+            accept_btn.visible_bounds().is_some(),
+            "per-item Accept button must be visible"
+        );
+        assert_ne!(
+            accept_btn.visible_bounds(),
+            accept_all.visible_bounds(),
+            "per-item Accept must be distinct from Accept all"
+        );
+
+        let reject_btn = ui
+            .find("Reject")
+            .expect("per-item Reject button must be present");
+        assert!(
+            reject_btn.visible_bounds().is_some(),
+            "per-item Reject button must be visible"
+        );
+    }
+
+    #[test]
+    fn visual_annotation_review_controls_do_not_emit_while_persisting() {
+        use iced::Size as IcedSize;
+        use iced_test::Simulator;
+
+        let mut state = ws_with_restored_visual_review();
+        state.visual_annotation_review_persisting = true;
+        let mut ui = Simulator::with_size(
+            iced::Settings::default(),
+            IcedSize::new(1100.0, 760.0),
+            view(&state),
+        );
+
+        let _ = ui.click("Accept all");
+        let _ = ui.click("Accept");
+        let _ = ui.click("Reject");
+        let messages: Vec<_> = ui.into_messages().collect();
+        assert!(
+            messages.iter().all(|message| !matches!(
+                message,
+                Message::AcceptAllVisualAnnotations
+                    | Message::AcceptVisualAnnotation(_)
+                    | Message::RejectSingleVisualAnnotationSuggestion(_)
+                    | Message::RejectVisualAnnotationSuggestion
+            )),
+            "disabled review controls must not emit another decision"
+        );
     }
 
     #[test]
@@ -2022,6 +2194,196 @@ mod tests {
         assert!(
             snapshot.matches_image(base).expect("write restore PNG"),
             "restore scenario baseline mismatch"
+        );
+    }
+
+    #[test]
+    fn visual_annotation_review_minimum_window() {
+        use iced::Size as IcedSize;
+        use iced_test::Simulator;
+
+        let state = ws_with_restored_visual_review();
+        let mut ui = Simulator::with_size(
+            iced::Settings::default(),
+            IcedSize::new(640.0, 420.0),
+            view(&state),
+        );
+
+        // At minimum window size the review panel must still render
+        // its controls. The scrollable region keeps the review reachable.
+        let header = ui
+            .find("Pending annotations")
+            .expect("review header must be present at minimum window");
+        assert!(
+            header.visible_bounds().is_some(),
+            "review header must be visible at minimum window"
+        );
+
+        let accept_all = ui
+            .find("Accept all")
+            .expect("Accept all must be present at minimum window");
+        assert!(
+            accept_all.visible_bounds().is_some(),
+            "Accept all must be visible at minimum window"
+        );
+
+        let dismiss = ui
+            .find("Dismiss")
+            .expect("Dismiss must be present at minimum window");
+        assert!(
+            dismiss.visible_bounds().is_some(),
+            "Dismiss must be visible at minimum window"
+        );
+    }
+
+    #[test]
+    fn visual_annotation_review_long_content() {
+        use iced::Size as IcedSize;
+        use iced_test::Simulator;
+
+        let mut state = ws(recording_from_frames(), InputCapability::SemanticEvents);
+        let _ =
+            crate::timeline_workspace::update::update(&mut state, Message::AnnotateStepRequested);
+        let proposal = visual_proposal_n_suggestions(&state, 20);
+        state.visual_annotation_suggestion =
+            crate::timeline_workspace::VisualAnnotationSuggestionState::PendingReview(proposal);
+        let mut ui = Simulator::with_size(
+            iced::Settings::default(),
+            IcedSize::new(1100.0, 760.0),
+            view(&state),
+        );
+
+        // With 20 suggestions, the header controls must still be reachable.
+        let accept_all = ui
+            .find("Accept all")
+            .expect("Accept all must be present with 20 suggestions");
+        assert!(
+            accept_all.visible_bounds().is_some(),
+            "Accept all must be visible with long content"
+        );
+
+        let dismiss = ui
+            .find("Dismiss")
+            .expect("Dismiss must be present with 20 suggestions");
+        assert!(
+            dismiss.visible_bounds().is_some(),
+            "Dismiss must be visible with long content"
+        );
+
+        // The scrollable region contains per-item buttons; at least
+        // the first "Accept" and "Reject" must be findable.
+        let accept_btn = ui
+            .find("Accept")
+            .expect("per-item Accept must be present with 20 suggestions");
+        assert!(
+            accept_btn.visible_bounds().is_some(),
+            "per-item Accept must be visible"
+        );
+        assert_ne!(
+            accept_btn.visible_bounds(),
+            accept_all.visible_bounds(),
+            "per-item Accept must be distinct from Accept all with long content"
+        );
+
+        // Verify no new copy appears — header text is still "Pending annotations".
+        let header = ui
+            .find("Pending annotations")
+            .expect("header must say Pending annotations, not new copy");
+        assert!(
+            header.visible_bounds().is_some(),
+            "header text must remain Pending annotations"
+        );
+    }
+
+    #[test]
+    #[ignore = "writes visual debugging artifacts"]
+    fn render_restore_visual_annotation_review_visual_scenario() {
+        use iced::Size as IcedSize;
+        use iced_test::Simulator;
+
+        let state = ws_with_restored_visual_review();
+        let size = IcedSize::new(1100.0, 760.0);
+
+        let mut ui = Simulator::with_size(
+            iced::Settings {
+                fonts: vec![
+                    rollshot_image_document::style::FONT_REGULAR_BYTES.into(),
+                    rollshot_image_document::style::FONT_BOLD_BYTES.into(),
+                ],
+                ..iced::Settings::default()
+            },
+            size,
+            view(&state),
+        );
+
+        // Structural assertions: the visual annotation review panel elements
+        // must be findable by text — proves restore populated the surface.
+        let header = ui
+            .find("Pending annotations")
+            .expect("review header must be present after restore");
+        assert!(
+            header.visible_bounds().is_some(),
+            "review header must be visible"
+        );
+
+        let accept_all = ui
+            .find("Accept all")
+            .expect("Accept all button must be present after restore");
+        assert!(
+            accept_all.visible_bounds().is_some(),
+            "Accept all button must be visible"
+        );
+
+        let reject_all = ui
+            .find("Reject all")
+            .expect("Reject all button must be present");
+        assert!(
+            reject_all.visible_bounds().is_some(),
+            "Reject all button must be visible"
+        );
+
+        let dismiss = ui
+            .find("Dismiss")
+            .expect("Dismiss button must be present after restore");
+        assert!(
+            dismiss.visible_bounds().is_some(),
+            "Dismiss button must be visible"
+        );
+
+        // Per-item: at least one "Accept" and "Reject" button.
+        let accept_btn = ui
+            .find("Accept")
+            .expect("per-item Accept button must be present");
+        assert!(
+            accept_btn.visible_bounds().is_some(),
+            "per-item Accept button must be visible"
+        );
+        assert_ne!(
+            accept_btn.visible_bounds(),
+            accept_all.visible_bounds(),
+            "per-item Accept must be distinct from Accept all"
+        );
+
+        let reject_btn = ui
+            .find("Reject")
+            .expect("per-item Reject button must be present");
+        assert!(
+            reject_btn.visible_bounds().is_some(),
+            "per-item Reject button must be visible"
+        );
+
+        // Capture snapshot for visual evidence.
+        let artifact_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/ui-artifacts/timeline-workspace");
+        std::fs::create_dir_all(&artifact_dir).ok();
+
+        let snapshot = ui
+            .snapshot(&iced::Theme::Dark)
+            .expect("render visual annotation review scenario");
+        let base = artifact_dir.join("restore-visual-annotation-review");
+        assert!(
+            snapshot.matches_image(base).expect("write visual annotation review PNG"),
+            "visual annotation review scenario baseline mismatch"
         );
     }
 
