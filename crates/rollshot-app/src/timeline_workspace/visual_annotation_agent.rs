@@ -94,6 +94,7 @@ pub(crate) enum PreparedVisualAnnotationContext {
         guide: rollshot_action::Guide,
         projection: rollshot_action::project::ActionGuideContextProjectionV1,
         origin: VisualAnnotationProposalOrigin,
+        project_root: std::path::PathBuf,
         step_source: u64,
         keyframe: u64,
     },
@@ -122,8 +123,9 @@ pub(crate) async fn prepare_visual_annotation_context_task(
             step_source,
             keyframe,
         } => {
+            let root_for_load = root.clone();
             let loaded = tokio::task::spawn_blocking(move || {
-                rollshot_action::project::load_project(&root)
+                rollshot_action::project::load_project(&root_for_load)
             })
             .await
             .map_err(|_| "Project load task panicked.".to_string())?
@@ -161,6 +163,7 @@ pub(crate) async fn prepare_visual_annotation_context_task(
                 guide,
                 projection,
                 origin,
+                project_root: root,
                 step_source,
                 keyframe,
             })
@@ -574,37 +577,29 @@ fn map_terminal_to_result(
 /// `ActionGuideVisualAnnotationEphemeralGuide`.
 pub(crate) fn visual_source_binding(
     context: &PreparedVisualAnnotationContext,
-    project_root: Option<&std::path::Path>,
     step_source: u64,
     keyframe: u64,
     keyframe_sha256: [u8; 32],
     annotation_state_sha256: [u8; 32],
 ) -> rollshot_agent::product_task::SourceBinding {
     use rollshot_agent::product_task::SourceBinding;
-    match (context, project_root) {
-        (PreparedVisualAnnotationContext::Durable { projection, .. }, Some(root)) => {
-            SourceBinding::ActionGuideVisualAnnotationProject {
-                project_root_sha256: crate::timeline_workspace::caption_agent::project_root_digest(
-                    root,
-                ),
-                revision: projection.revision(),
-                projection_digest: projection.digest().to_owned(),
-                step_source,
-                keyframe,
-                keyframe_sha256,
-                annotation_state_sha256,
-            }
-        }
-        (PreparedVisualAnnotationContext::Durable { projection, .. }, None) => {
-            SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
-                guide_digest: projection.digest().to_owned(),
-                step_source,
-                keyframe,
-                keyframe_sha256,
-                annotation_state_sha256,
-            }
-        }
-        (PreparedVisualAnnotationContext::Ephemeral { origin, .. }, _) => {
+    match context {
+        PreparedVisualAnnotationContext::Durable {
+            projection,
+            project_root,
+            ..
+        } => SourceBinding::ActionGuideVisualAnnotationProject {
+            project_root_sha256: crate::timeline_workspace::caption_agent::project_root_digest(
+                project_root,
+            ),
+            revision: projection.revision(),
+            projection_digest: projection.digest().to_owned(),
+            step_source,
+            keyframe,
+            keyframe_sha256,
+            annotation_state_sha256,
+        },
+        PreparedVisualAnnotationContext::Ephemeral { origin, .. } => {
             let guide_digest = match origin {
                 VisualAnnotationProposalOrigin::EphemeralGuide { guide_digest } => {
                     guide_digest.clone()
@@ -633,9 +628,27 @@ pub(crate) fn visual_authority(
     run_id: rollshot_agent::domain::RunId,
     subject: rollshot_agent::authority::AuthoritySubject,
 ) -> Result<rollshot_agent::authority::AuthoritySnapshot, String> {
-    visual_authority_with_grants(task_id, run_id, subject, true, true)
+    use rollshot_agent::authority::{
+        AuthorityBinding, AuthoritySnapshot, DisclosureCeiling, RunOperation,
+    };
+    use rollshot_agent::product_task::TaskAttemptId;
+
+    let mut grants = std::collections::BTreeSet::new();
+    grants.insert(RunOperation::DiscloseScreenshotAttachment);
+    grants.insert(RunOperation::SubmitReviewCandidate);
+    let binding = AuthorityBinding::new(task_id, TaskAttemptId::new(1), run_id, subject);
+    AuthoritySnapshot::new(
+        binding,
+        "rollshot-v1".to_owned(),
+        DisclosureCeiling::FullScreenshot,
+        true,
+        std::collections::BTreeSet::new(),
+        grants,
+    )
+    .map_err(|e| format!("build visual authority: {e}"))
 }
 
+#[cfg(test)]
 fn visual_authority_with_grants(
     task_id: rollshot_agent::product_task::ProductTaskId,
     run_id: rollshot_agent::domain::RunId,
@@ -1218,7 +1231,7 @@ mod tests {
     /// Create a durable prepared context for binding tests.
     fn durable_context() -> PreparedVisualAnnotationContext {
         use rollshot_action::project::{
-            create_project, load_project, EnabledOutputs, ProjectSnapshot, ProjectStep,
+            create_project, EnabledOutputs, ProjectSnapshot, ProjectStep,
             ProjectStepId, SnapshotFrame, SnapshotFramePayload,
         };
 
@@ -1304,12 +1317,15 @@ mod tests {
         use rollshot_agent::product_task::SourceBinding;
 
         let ctx = durable_context();
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("guide.rollshot-guide");
-        // The root won't exist, so project_root_digest falls back to the raw path.
+        // Extract the project root stored in the durable context.
+        let root = match &ctx {
+            PreparedVisualAnnotationContext::Durable { project_root, .. } => {
+                project_root.clone()
+            }
+            _ => panic!("expected Durable context"),
+        };
         let binding = visual_source_binding(
             &ctx,
-            Some(&root),
             3,
             1,
             test_keyframe_sha(),
@@ -1328,6 +1344,7 @@ mod tests {
                 assert_eq!(
                     project_root_sha256,
                     crate::timeline_workspace::caption_agent::project_root_digest(&root),
+                    "project_root_sha256 must match the digest of the project root stored in the context",
                 );
                 assert_eq!(revision, 1);
                 assert!(!projection_digest.is_empty());
@@ -1349,7 +1366,6 @@ mod tests {
         let ctx = ephemeral_context();
         let binding = visual_source_binding(
             &ctx,
-            None,
             3,
             5,
             test_keyframe_sha(),
