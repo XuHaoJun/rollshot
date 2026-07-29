@@ -445,6 +445,77 @@ fn finalize_ready_for_review(
     }
 }
 
+// ---------- Single-submit bounded profile ----------
+
+/// All possible terminal outcomes of one bounded single-submit run.
+///
+/// Terminal values carry no provider payload, no prompt text, and no
+/// attachment bytes — they are the Rollshot-owned handoff to the app layer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SingleSubmitTerminal {
+    /// The model called the expected terminal tool; the raw arguments are
+    /// returned for the caller to validate and consume.
+    Submitted { arguments: serde_json::Value },
+    /// The model completed with text and no tool call. In a single-submit
+    /// profile this is unusual but not impossible — the caller decides
+    /// whether to surface the text.
+    TextCompleted { text: String },
+    /// The run was cancelled before or during execution.
+    Cancelled,
+    /// A budget dimension was exhausted.
+    BudgetExhausted { dimension: BudgetDimension },
+    /// The provider stream failed or returned an error.
+    ProviderFailure,
+    /// The model violated the expected protocol (wrong tool, malformed
+    /// arguments, missing tool call, etc.).
+    ProtocolFailure,
+    /// The authority snapshot does not grant the required operation.
+    AuthorityDenied { operation: crate::authority::RunOperation },
+}
+
+/// Bounded profile for a single-submit tool interaction.
+///
+/// Created via `from_skill`, which rejects a system prompt that does not
+/// carry the skill digest — the invariant that keeps the
+/// compose-from-skill contract checkable after the composition moved to
+/// the caller.
+pub struct SingleSubmitProfile<'a> {
+    pub tool_definition: crate::model::ToolDefinition,
+    pub tool: std::sync::Arc<dyn crate::tools::Tool>,
+    pub skill_use: &'a crate::skills::SkillUse,
+    pub system_prompt: String,
+    pub required_operation: crate::authority::RunOperation,
+    pub tracing_target: &'static str,
+}
+
+impl<'a> SingleSubmitProfile<'a> {
+    /// The only constructor. Rejects a `system_prompt` that does not contain
+    /// `skill_use.digest()`, so a caller cannot pass an arbitrary prompt
+    /// with no skill behind it.
+    pub fn from_skill(
+        skill_use: &'a crate::skills::SkillUse,
+        system_prompt: String,
+        tool_definition: crate::model::ToolDefinition,
+        tool: std::sync::Arc<dyn crate::tools::Tool>,
+        required_operation: crate::authority::RunOperation,
+        tracing_target: &'static str,
+    ) -> Result<Self, DriverError> {
+        if !system_prompt.contains(skill_use.digest()) {
+            return Err(DriverError::AgentProtocolFailure(
+                "system prompt does not contain the skill digest".to_string(),
+            ));
+        }
+        Ok(Self {
+            tool_definition,
+            tool,
+            skill_use,
+            system_prompt,
+            required_operation,
+            tracing_target,
+        })
+    }
+}
+
 // ---------- Runner ----------
 
 pub struct AgentRunner {
@@ -2008,6 +2079,303 @@ impl AgentRunner {
             }
         }
     }
+
+    /// Bounded single-submit runner. Returns a `SingleSubmitTerminal` that
+    /// never carries provider payload, prompt text, or attachment bytes.
+    /// Reuses `drive_streamed_turn` and the rig state machine for
+    /// streamed-turn assembly, budget charging, cancellation, and
+    /// tool-result threading.
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    pub async fn run_single_submit_with_provider(
+        &self,
+        profile: SingleSubmitProfile<'_>,
+        mut input: crate::domain::AuthorizedModelInput,
+        provider: &dyn ProviderAdapter,
+        budget: RunBudget,
+        cancellation: &RunCancellation,
+        authority: &crate::authority::AuthoritySnapshot,
+        subject: &crate::authority::AuthoritySubject,
+        _audit_sink: Option<&dyn crate::audit::AuditAppendSink>,
+    ) -> SingleSubmitTerminal {
+        use crate::tools::ToolRegistryLimits;
+
+        // ---- Pre-flight ----
+
+        if cancellation.is_cancelled() {
+            return SingleSubmitTerminal::Cancelled;
+        }
+
+        // Validate disclosure ceiling against attachments.
+        if let Err(_err) = authority.validate_model_input(&input) {
+            tracing::debug!(
+                target = profile.tracing_target,
+                "single-submit attachment disclosure exceeded"
+            );
+            return SingleSubmitTerminal::ProtocolFailure;
+        }
+
+        let attachments = input.take_model_attachments();
+        let attachment_count = attachments.len() as u32;
+
+        let start = tokio::time::Instant::now();
+        let mut tracker = BudgetTracker::new(budget, start);
+
+        if let Err(err) = tracker.charge(UsageSnapshot {
+            attachments: attachment_count,
+            ..UsageSnapshot::default()
+        }) {
+            return map_budget_error_to_single_submit(err);
+        }
+
+        let tool_definitions = vec![profile.tool_definition.clone()];
+        let tool_names: BTreeSet<String> =
+            tool_definitions.iter().map(|t| t.name.clone()).collect();
+        let terminal_tool_name = profile.tool_definition.name.clone();
+
+        let mut registry = ToolRegistry::new(ToolRegistryLimits::permissive());
+        if let Err(e) = registry.register(profile.tool.clone()) {
+            tracing::error!(
+                target = profile.tracing_target,
+                error = %e,
+                "failed to register single-submit stub tool"
+            );
+            return SingleSubmitTerminal::ProtocolFailure;
+        }
+
+        let mut rig_run = rig_core::agent::run::AgentRun::new(rig_core::message::Message::user(
+            &input.user_message,
+        ))
+        .max_turns(self.config.max_turns);
+
+        let mut total_assistant_bytes: usize = 0;
+        let max_assistant_bytes = self.config.max_assistant_bytes;
+        let mut last_assistant_text = String::new();
+        let mut first_model_call = true;
+
+        // ---- Loop ----
+
+        loop {
+            if cancellation.is_cancelled() {
+                return SingleSubmitTerminal::Cancelled;
+            }
+
+            if let Err(err) = tracker.check_wall_time(tokio::time::Instant::now()) {
+                return map_budget_error_to_single_submit(err);
+            }
+
+            let step = match rig_run.next_step() {
+                Ok(s) => s,
+                Err(e) => {
+                    if matches!(e, rig_core::completion::PromptError::MaxTurnsError { .. }) {
+                        tracing::debug!(
+                            target = profile.tracing_target,
+                            max_turns = self.config.max_turns,
+                            "single-submit run exceeded model-call budget"
+                        );
+                        return SingleSubmitTerminal::BudgetExhausted {
+                            dimension: BudgetDimension::ModelCalls,
+                        };
+                    }
+                    tracing::debug!(
+                        target = profile.tracing_target,
+                        error = %e,
+                        "single-submit rig agent run returned a protocol error"
+                    );
+                    return SingleSubmitTerminal::ProtocolFailure;
+                }
+            };
+
+            match step {
+                rig_core::agent::run::AgentRunStep::CallModel {
+                    prompt, history, ..
+                } => {
+                    let turn_attachments = if first_model_call {
+                        first_model_call = false;
+                        attachments.clone()
+                    } else {
+                        Vec::new()
+                    };
+
+                    let mut history_msgs: Vec<crate::model::ModelMessage> = Vec::new();
+                    for m in &history {
+                        crate::model::push_model_messages(m, &mut history_msgs);
+                    }
+                    crate::model::push_model_messages(&prompt, &mut history_msgs);
+
+                    let request = crate::model::ModelRequest {
+                        model: input.manifest.model.clone(),
+                        prompt: String::new(),
+                        history: history_msgs,
+                        turn: rig_run.turn(),
+                        tool_definitions: tool_definitions.clone(),
+                        system_prompt: Some(profile.system_prompt.clone()),
+                        max_tokens: None,
+                        attachments: turn_attachments,
+                    };
+
+                    let turn_result = self
+                        .drive_streamed_turn(
+                            &mut rig_run,
+                            &tool_names,
+                            provider,
+                            &NullEventSink,
+                            &mut tracker,
+                            &mut total_assistant_bytes,
+                            max_assistant_bytes,
+                            cancellation,
+                            request,
+                            &mut last_assistant_text,
+                        )
+                        .await;
+
+                    match turn_result {
+                        Ok(()) => {}
+                        Err(DriverError::BudgetExhausted(dim)) => {
+                            return SingleSubmitTerminal::BudgetExhausted { dimension: dim };
+                        }
+                        Err(DriverError::Cancelled) => {
+                            return SingleSubmitTerminal::Cancelled;
+                        }
+                        Err(DriverError::ProviderFailure(msg)) => {
+                            tracing::debug!(
+                                target = profile.tracing_target,
+                                error = %msg,
+                                "single-submit provider stream failed"
+                            );
+                            return SingleSubmitTerminal::ProviderFailure;
+                        }
+                        Err(DriverError::AgentProtocolFailure(msg)) => {
+                            tracing::debug!(
+                                target = profile.tracing_target,
+                                error = %msg,
+                                "single-submit model turn produced a protocol error"
+                            );
+                            return SingleSubmitTerminal::ProtocolFailure;
+                        }
+                        Err(DriverError::ContextOverflow) => {
+                            tracing::debug!(
+                                target = profile.tracing_target,
+                                "single-submit context overflow"
+                            );
+                            return SingleSubmitTerminal::ProviderFailure;
+                        }
+                        Err(DriverError::AuditFailure(_)) => {
+                            return SingleSubmitTerminal::ProtocolFailure;
+                        }
+                    }
+
+                    tracker.apply_turn();
+                }
+                rig_core::agent::run::AgentRunStep::CallTools { calls } => {
+                    if calls.len() != 1
+                        || calls[0].tool_call.function.name != terminal_tool_name
+                    {
+                        tracing::debug!(
+                            target = profile.tracing_target,
+                            call_count = calls.len(),
+                            tool_name = %calls.first().map(|c| c.tool_call.function.name.as_str()).unwrap_or(""),
+                            "single-submit runner rejecting tool call batch"
+                        );
+                        return SingleSubmitTerminal::ProtocolFailure;
+                    }
+
+                    let pending = &calls[0];
+                    let arguments = pending.tool_call.function.arguments.clone();
+
+                    if let Err(err) = tracker.charge(UsageSnapshot {
+                        tool_calls: 1,
+                        ..UsageSnapshot::default()
+                    }) {
+                        return map_budget_error_to_single_submit(err);
+                    }
+
+                    // Authority check: the tool call must be authorized.
+                    if let Err(_err) =
+                        authority.authorize_tool(authority.run_id(), subject, profile.required_operation)
+                    {
+                        tracing::debug!(
+                            target = profile.tracing_target,
+                            operation = ?profile.required_operation,
+                            "single-submit authority denied"
+                        );
+                        return SingleSubmitTerminal::AuthorityDenied {
+                            operation: profile.required_operation,
+                        };
+                    }
+
+                    // Execute the tool stub to satisfy the rig protocol.
+                    let tool_call = ToolCall {
+                        name: pending.tool_call.function.name.clone(),
+                        arguments_json: arguments.clone(),
+                    };
+                    let terminal_tools: BTreeSet<String> =
+                        [terminal_tool_name.clone()].into_iter().collect();
+                    let results = registry
+                        .execute_calls(&[tool_call], cancellation, &terminal_tools)
+                        .await;
+
+                    let mut rig_results: Vec<rig_core::message::UserContent> = Vec::new();
+                    for (i, result) in results.into_iter().enumerate() {
+                        let call_id = calls[i].tool_call.id.clone();
+                        match result {
+                            Ok(ToolOutcome::Success { result_json }) => {
+                                let result_str =
+                                    serde_json::to_string(&result_json).unwrap_or_default();
+                                rig_results.push(rig_core::message::UserContent::tool_result(
+                                    call_id,
+                                    rig_core::message::ToolResultContent::from_tool_output(
+                                        result_str,
+                                    ),
+                                ));
+                            }
+                            Ok(ToolOutcome::Recoverable { error }) => {
+                                tracing::debug!(
+                                    target = profile.tracing_target,
+                                    error = %error,
+                                    "single-submit stub tool rejected payload"
+                                );
+                                return SingleSubmitTerminal::ProtocolFailure;
+                            }
+                            Err(err) => {
+                                tracing::debug!(
+                                    target = profile.tracing_target,
+                                    error = %err,
+                                    "single-submit stub tool returned an error"
+                                );
+                                return SingleSubmitTerminal::ProtocolFailure;
+                            }
+                        }
+                    }
+
+                    if let Err(e) = rig_run.tool_results(rig_results) {
+                        tracing::debug!(
+                            target = profile.tracing_target,
+                            error = %e,
+                            "rig agent run tool_results failed"
+                        );
+                        return SingleSubmitTerminal::ProtocolFailure;
+                    }
+
+                    tracker.apply_turn();
+
+                    // Return the raw arguments.
+                    return SingleSubmitTerminal::Submitted {
+                        arguments,
+                    };
+                }
+                rig_core::agent::run::AgentRunStep::Done(_) => {
+                    tracing::debug!(
+                        target = profile.tracing_target,
+                        "single-submit model completed without a terminal tool call"
+                    );
+                    // The single-submit profile has no text path: a
+                    // completion with no terminal tool call is a protocol
+                    // failure regardless of whether text was emitted.
+                    return SingleSubmitTerminal::ProtocolFailure;
+                }
+            }
+        }
+    }
 }
 
 fn map_budget_error_to_visual_annotation(
@@ -2022,6 +2390,17 @@ fn map_budget_error_to_visual_annotation(
         BudgetError::Overflow => {
             crate::visual_annotation::VisualAnnotationRunTerminal::ProtocolFailure
         }
+    }
+}
+
+fn map_budget_error_to_single_submit(
+    err: BudgetError,
+) -> SingleSubmitTerminal {
+    match err {
+        BudgetError::Exceeded(dim) => SingleSubmitTerminal::BudgetExhausted {
+            dimension: dim,
+        },
+        BudgetError::Overflow => SingleSubmitTerminal::ProtocolFailure,
     }
 }
 
@@ -6745,4 +7124,331 @@ main = "SKILL.md"
     // the denial envelope. Repair of visible state from authoritative task
     // snapshots is proved in `rollshot-app`
     // (`result_workspace::workbench::run::dropped_display_events`).
+
+    // ---- Single-submit bounded profile tests ----
+
+    use crate::visual_annotation::tests::lifecycle::{
+        tool_call_turn, text_turn, va_runner, ScriptedProvider,
+    };
+    use crate::model::ModelStreamEvent;
+    use crate::authority::{
+        AuthorityBinding, AuthoritySnapshot, AuthoritySubject, DisclosureCeiling, RunOperation,
+    };
+    use crate::product_task::{ProductTaskId, TaskAttemptId};
+
+    /// Permissive terminal stub for caption tests — accepts any arguments
+    /// and returns success. Mirrors `submit_visual_annotation_suggestions_tool_arc()`
+    /// but for the caption tool name.
+    fn caption_tool_stub() -> Arc<dyn crate::tools::Tool> {
+        struct CaptionToolStub;
+        impl crate::tools::Tool for CaptionToolStub {
+            fn name(&self) -> &str {
+                "submit_caption_suggestions"
+            }
+            fn json_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            fn call<'a>(
+                &'a self,
+                _arguments: &'a serde_json::Value,
+            ) -> crate::tools::ToolFuture<'a> {
+                Box::pin(async move {
+                    Ok(crate::tools::ToolOutcome::Success {
+                        result_json: serde_json::json!({"submitted": true}),
+                    })
+                })
+            }
+        }
+        Arc::new(CaptionToolStub)
+    }
+
+    fn caption_tool_definition_fixture() -> crate::model::ToolDefinition {
+        crate::model::ToolDefinition {
+            name: "submit_caption_suggestions".to_string(),
+            description: "test".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    fn caption_profile(skill_use: &crate::skills::SkillUse) -> SingleSubmitProfile<'_> {
+        SingleSubmitProfile::from_skill(
+            skill_use,
+            compose_caption_prompt(skill_use).unwrap(),
+            caption_tool_definition_fixture(),
+            caption_tool_stub(),
+            RunOperation::SubmitReviewCandidate,
+            "rollshot::agent::captions",
+        )
+        .expect("composed prompt carries the skill digest")
+    }
+
+    fn caption_run_budget_for_tests() -> RunBudget {
+        RunBudget {
+            wall_time: std::time::Duration::from_secs(30),
+            model_calls: 2,
+            attachments: 1,
+            tool_calls: 1,
+            ..RunBudget::unlimited()
+        }
+    }
+
+    fn caption_authority_for_tests(
+        run_id: &RunId,
+        subject: &AuthoritySubject,
+        disclosure: DisclosureCeiling,
+        grants: std::collections::BTreeSet<RunOperation>,
+    ) -> AuthoritySnapshot {
+        AuthoritySnapshot::new(
+            AuthorityBinding::new(
+                ProductTaskId::parse("task-00000000-0000-4000-8000-000000000001").unwrap(),
+                TaskAttemptId::new(1),
+                run_id.clone(),
+                subject.clone(),
+            ),
+            "rollshot-v1".to_owned(),
+            disclosure,
+            false,
+            std::collections::BTreeSet::new(),
+            grants,
+        )
+        .unwrap()
+    }
+
+    /// Run the caption profile against a scripted provider and return the terminal.
+    async fn run_caption_profile(
+        provider: &ScriptedProvider,
+        budget: RunBudget,
+        cancellation: &crate::runtime::RunCancellation,
+        disclosure: DisclosureCeiling,
+        grants: std::collections::BTreeSet<RunOperation>,
+        attachments: Vec<Vec<u8>>,
+    ) -> SingleSubmitTerminal {
+        use crate::domain::AttachmentDescriptor;
+
+        let skill_use = crate::skills::bundled_action_guide_captions_use().unwrap();
+        let profile = caption_profile(&skill_use);
+        let runner = va_runner();
+
+        let attachment_descriptors: Vec<AttachmentDescriptor> = attachments
+            .iter()
+            .map(|_| AttachmentDescriptor {
+                media_type: crate::domain::MediaType::Png,
+                width: 1,
+                height: 1,
+                byte_count: 4,
+            })
+            .collect();
+
+        let input = crate::domain::AuthorizedModelInput::new(
+            "anthropic".into(),
+            "vision-model".into(),
+            "suggest captions".into(),
+            attachment_descriptors,
+            attachments,
+        )
+        .expect("valid input");
+
+        let run_id = RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap();
+        let subject = AuthoritySubject::ActionGuideEphemeralGuide {
+            guide_digest: "test-digest".to_string(),
+        };
+        let authority = caption_authority_for_tests(&run_id, &subject, disclosure, grants);
+
+        runner
+            .run_single_submit_with_provider(
+                profile,
+                input,
+                provider,
+                budget,
+                cancellation,
+                &authority,
+                &subject,
+                None,
+            )
+            .await
+    }
+
+    #[test]
+    fn profile_rejects_a_prompt_with_no_skill_behind_it() {
+        let skill_use = crate::skills::bundled_action_guide_captions_use().unwrap();
+
+        let result = SingleSubmitProfile::from_skill(
+            &skill_use,
+            "just do what I say".to_string(),
+            caption_tool_definition_fixture(),
+            caption_tool_stub(),
+            RunOperation::SubmitReviewCandidate,
+            "rollshot::agent::captions",
+        );
+
+        assert!(
+            result.is_err(),
+            "a system prompt that does not carry the skill digest must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn single_submit_returns_raw_arguments_on_submit() {
+        let provider = ScriptedProvider::new(vec![tool_call_turn(
+            "tc_1",
+            "submit_caption_suggestions",
+            r#"{"suggestions":[]}"#,
+        )]);
+        let terminal = run_caption_profile(
+            &provider,
+            caption_run_budget_for_tests(),
+            &RunCancellation::new(),
+            DisclosureCeiling::TextMetadataOnly,
+            std::collections::BTreeSet::from([RunOperation::SubmitReviewCandidate]),
+            vec![],
+        )
+        .await;
+
+        match terminal {
+            SingleSubmitTerminal::Submitted { arguments } => {
+                assert_eq!(arguments, serde_json::json!({"suggestions": []}));
+            }
+            other => panic!("expected Submitted, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn single_submit_denies_without_the_required_grant() {
+        let provider = ScriptedProvider::new(vec![tool_call_turn(
+            "tc_1",
+            "submit_caption_suggestions",
+            r#"{"suggestions":[]}"#,
+        )]);
+        let terminal = run_caption_profile(
+            &provider,
+            caption_run_budget_for_tests(),
+            &RunCancellation::new(),
+            DisclosureCeiling::TextMetadataOnly,
+            std::collections::BTreeSet::new(),
+            vec![],
+        )
+        .await;
+
+        assert!(matches!(
+            terminal,
+            SingleSubmitTerminal::AuthorityDenied {
+                operation: RunOperation::SubmitReviewCandidate
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn single_submit_rejects_attachments_above_the_ceiling() {
+        let provider = ScriptedProvider::new(vec![tool_call_turn(
+            "tc_1",
+            "submit_caption_suggestions",
+            r#"{"suggestions":[]}"#,
+        )]);
+        let terminal = run_caption_profile(
+            &provider,
+            caption_run_budget_for_tests(),
+            &RunCancellation::new(),
+            DisclosureCeiling::TextMetadataOnly,
+            std::collections::BTreeSet::from([RunOperation::SubmitReviewCandidate]),
+            vec![vec![0x89, 0x50, 0x4E, 0x47]],
+        )
+        .await;
+
+        assert!(matches!(terminal, SingleSubmitTerminal::ProtocolFailure));
+        assert_eq!(
+            provider.request_count(),
+            0,
+            "the provider must never be called once the ceiling is exceeded"
+        );
+    }
+
+    #[tokio::test]
+    async fn single_submit_reports_cancellation_before_the_first_turn() {
+        let cancellation = RunCancellation::new();
+        cancellation.cancel();
+        let provider = ScriptedProvider::new(vec![tool_call_turn(
+            "tc_1",
+            "submit_caption_suggestions",
+            r#"{"suggestions":[]}"#,
+        )]);
+
+        let terminal = run_caption_profile(
+            &provider,
+            caption_run_budget_for_tests(),
+            &cancellation,
+            DisclosureCeiling::TextMetadataOnly,
+            std::collections::BTreeSet::from([RunOperation::SubmitReviewCandidate]),
+            vec![],
+        )
+        .await;
+
+        assert!(matches!(terminal, SingleSubmitTerminal::Cancelled));
+        assert_eq!(provider.request_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn single_submit_reports_wall_time_exhaustion() {
+        let provider = ScriptedProvider::new(vec![tool_call_turn(
+            "tc_1",
+            "submit_caption_suggestions",
+            r#"{"suggestions":[]}"#,
+        )]);
+        let budget = RunBudget {
+            wall_time: std::time::Duration::ZERO,
+            ..caption_run_budget_for_tests()
+        };
+
+        let terminal = run_caption_profile(
+            &provider,
+            budget,
+            &RunCancellation::new(),
+            DisclosureCeiling::TextMetadataOnly,
+            std::collections::BTreeSet::from([RunOperation::SubmitReviewCandidate]),
+            vec![],
+        )
+        .await;
+
+        assert!(matches!(
+            terminal,
+            SingleSubmitTerminal::BudgetExhausted {
+                dimension: BudgetDimension::WallTime
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn single_submit_reports_provider_failure() {
+        let provider = ScriptedProvider::new(vec![vec![ModelStreamEvent::Error(
+            crate::model::ModelError::ProviderFailure("rate limited".to_string()),
+        )]]);
+
+        let terminal = run_caption_profile(
+            &provider,
+            caption_run_budget_for_tests(),
+            &RunCancellation::new(),
+            DisclosureCeiling::TextMetadataOnly,
+            std::collections::BTreeSet::from([RunOperation::SubmitReviewCandidate]),
+            vec![],
+        )
+        .await;
+
+        assert!(matches!(terminal, SingleSubmitTerminal::ProviderFailure));
+    }
+
+    #[tokio::test]
+    async fn single_submit_reports_protocol_failure_when_the_model_only_talks() {
+        let provider = ScriptedProvider::new(vec![text_turn("I don't know how to call tools")]);
+
+        let terminal = run_caption_profile(
+            &provider,
+            caption_run_budget_for_tests(),
+            &RunCancellation::new(),
+            DisclosureCeiling::TextMetadataOnly,
+            std::collections::BTreeSet::from([RunOperation::SubmitReviewCandidate]),
+            vec![],
+        )
+        .await;
+
+        assert!(matches!(terminal, SingleSubmitTerminal::ProtocolFailure));
+    }
 }
