@@ -1242,6 +1242,7 @@ async fn open_project_task(
     Message::ProjectOpened(result)
 }
 
+#[cfg(feature = "action-guide")]
 async fn open_project_inner(
     path: std::path::PathBuf,
     writable: bool,
