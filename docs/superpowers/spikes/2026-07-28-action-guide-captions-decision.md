@@ -27,16 +27,18 @@ promotion, review receipts, restore, and durable audit.
   kind-agnostic (caller-serialized bytes, `canonical_payload_sha256` for
   integrity).
 - **`TaskStore`** moves from `result_workspace::workbench::task_store` to
-  `agent_store::task_store` — one process-wide instance, shared by both
-  workspaces.
+  `agent_store::task_store` — the active product shell owns one process-wide
+  instance and injects it into every workspace it creates or opens.
 - **Caption run profile** is a single-submit bounded run extracted from the
   visual annotation shape, extended with authority snapshot, skill use, and audit
   sink threading.
-- **Caption proposal restore** repopulates the review surface from a persisted
-  `CaptionProposal` without a provider call.
-- **Reconciliation** sweeps ephemeral `ReadyForReview` tasks to `Stale` and
-  running tasks to `Interrupted` on open, using a shared helper for both
-  domains.
+- **Caption proposal restore** repopulates the review surface and its durable
+  `ProductTaskSnapshot` from a persisted `CaptionProposal` without a provider
+  call.
+- **Reconciliation** serializes through the store lock and consults per-task
+  process-liveness ownership before interrupting running work or staling an
+  ephemeral review. A second live process therefore leaves active tasks alone;
+  abandoned tasks still reconcile after their owner exits.
 - **Durable audit** writes per-task JSONL journals with hash-chain integrity and
   write-ahead transition records, covering all material caption lifecycle events.
 
@@ -45,15 +47,15 @@ promotion, review receipts, restore, and durable audit.
 | Gate A1 item | Evidence |
 |---|---|
 | 1. Durable task, new kind, run contract bound | `caption_task_file_holds_no_image_bytes_and_no_skill_body` (run-contract assertions: no image bytes, no skill body in task file), `caption_task_lifecycle_appends_every_material_event` (audit journal covers every caption lifecycle transition) |
-| 2. Typed artifact bound to origin | `promotion_binds_the_kind_the_origin_and_the_payload_digest` (caption artifact carries `Caption` kind, `DurableProject` origin, and `canonical_payload_sha256`) |
-| 3. Review receipt bound to artifact revision | `review_receipt_partitions_decisions_and_binds_the_artifact_revision` (receipt partitions Applied/Rejected and binds artifact revision), `accepted_suggestions_land_in_applied_not_rejected` (accept path exercises the Applied arm) |
+| 2. Typed artifact bound to origin | `promotion_binds_the_kind_the_origin_and_the_payload_digest` (caption artifact carries `ActionGuideCaptions`, the durable-project origin, and `canonical_payload_sha256`), `real_worker_promotes_both_caption_payloads_before_success` (the production worker durably promotes artifact and serialized proposal payloads before returning success) |
+| 3. Review receipt bound to artifact revision | `review_receipt_partitions_decisions_and_binds_the_artifact_revision` (receipt partitions Applied/Rejected and binds artifact revision), `ordered_caption_review_stays_applying_until_every_candidate_is_decided`, `ordered_caption_review_accept_all_finishes_in_one_batch`, and `ordered_caption_review_persists_rejected_batch` exercise the legal ordered transitions and both terminal receipt partitions |
 | 4. Deterministic stale rejection | `identity_ignores_freshness_and_rejects_other_domains` (source-binding identity rejects mismatched domains), `restore_declines_and_marks_stale_when_the_revision_moved` (revision mismatch → Stale), `restore_is_deterministic_across_repeated_calls` (same inputs → same outcome) |
-| 5. Reconciliation after restart | `open_marks_ephemeral_ready_for_review_stale` (ephemeral → Stale on open), `open_marks_running_tasks_interrupted_for_both_domains` (running → Interrupted for both Smart Redaction and caption tasks), `open_is_idempotent_across_two_restarts` (second restart is a no-op) |
-| 6. Restore without a provider call | `restore_repopulates_the_review_surface_without_a_provider` (panicking adapter proves no provider call is made) |
-| 7. Budget and cancellation honored | `single_submit_reports_wall_time_exhaustion` (wall-time budget exhaustion → terminal), `single_submit_reports_cancellation_before_the_first_turn` (pre-turn cancel → terminal), `single_submit_reports_cancellation_mid_stream` (mid-stream cancel → terminal), `wall_time_exhaustion_reports_the_frozen_timeout_copy` (timeout maps to exact user-visible copy) |
-| 8. Audit coverage, privacy-safe | `caption_task_lifecycle_appends_every_material_event` (all material caption events audited), `a_failed_caption_run_appends_task_terminated` (failure → `TaskTerminated` event), `an_authority_denied_submit_appends_authority_denied_and_does_not_promote` (denial → `AuthorityDenied` event, no promotion) |
-| 9. Smart Redaction unregressed, V1 fixtures load | `loads_pre_migration_schema_fixtures` (V1/V2 schema fixtures deserialise), `legacy_flat_dry_run_counters_become_a_smart_redaction_summary` (V1 counters migrate to smart redaction summary), plus the full workbench suite (77 passed) |
-| 10. Restore path UI evidence | Task 21 `restored_caption_proposal_renders_review_surface` (structural iced test: "Suggested captions" header, "Accept all" / "Dismiss" / per-suggestion "Accept" buttons visible), `render_restore_caption_proposal_visual_scenario` (visual baseline captured at `target/ui-artifacts/timeline-workspace/restore-caption-proposal-wgpu.png`, reviewed by independent reviewer — verdict: ACCEPT) |
+| 5. Reconciliation after restart | `second_live_store_does_not_interrupt_running_task` drives both open-time and source-scoped reconciliation while another owner is live; `second_live_store_does_not_stale_ephemeral_review` covers live review ownership; `open_marks_running_tasks_interrupted_for_both_domains` proves abandoned Smart Redaction and caption tasks still reconcile |
+| 6. Restore without a provider call | `opening_project_with_process_store_restores_task_snapshot_and_proposal` verifies the product project-open adapter restores both UI payload and durable snapshot; the provider-free restore tests use a panicking adapter to prove no model call occurs |
+| 7. Budget and cancellation honored | `single_submit_enforces_the_caption_argument_budget`, `single_submit_enforces_the_caption_result_budget`, `single_submit_reports_wall_time_exhaustion`, and the cancellation tests cover transport bounds; `real_worker_persists_cancellation_terminal`, `real_worker_persists_provider_and_decode_failures`, `real_worker_persists_wall_time_and_authority_failures`, and `real_worker_terminalizes_attempt_audit_commit_failure` prove production worker terminal persistence, including a post-CAS audit failure |
+| 8. Audit coverage, privacy-safe | `single_submit_preserves_authority_audit_failure_category` verifies typed audit failure propagation; `real_worker_persists_wall_time_and_authority_failures` exercises production authority denial through the real audit sink; lifecycle tests verify `AuthorityDenied` / `TaskTerminated` events and no artifact promotion |
+| 9. Smart Redaction unregressed, V1 fixtures load | `loads_pre_migration_schema_fixtures` (V1/V2 schema fixtures deserialise), `legacy_flat_dry_run_counters_become_a_smart_redaction_summary` (V1 counters migrate to smart redaction summary), plus the full workbench suite |
+| 10. Restore and review UI evidence | `scripted_caption_review_survives_close_and_reopen_without_review_card` drives the real scripted provider, durable promotion, writable product-open path, accepted review persistence, close, and reopen; `caption_review_controls_do_not_emit_decisions_while_persisting`, `caption_review_persistence_blocks_a_new_caption_run`, and `stale_caption_review_persistence_cannot_mutate_a_new_proposal` cover transient interaction suppression and task-correlated completion; the unchanged restore visual baseline received an independent scoped ACCEPT with no baseline update |
 
 ## 3. Task 7 authority-digest audit
 
@@ -90,10 +92,11 @@ versions (`task-schema-v1.json`, `task-schema-v2.json`,
 
 ### Two-domain concurrency
 
-`open_marks_running_tasks_interrupted_for_both_domains` seeds one Smart
-Redaction task and one caption task, opens the store, and verifies both
-transition to `Interrupted`. This is a regression test that the lock and the
-audited-write path behave for two task kinds sharing one tree.
+`open_marks_running_tasks_interrupted_for_both_domains` verifies abandoned Smart
+Redaction and caption tasks transition to `Interrupted`. The paired
+`second_live_store_*` tests hold a live owner while a second process-store
+instance opens the same tree and verify that neither a running task nor an
+ephemeral review is disturbed.
 
 ### Prompt text assertion
 
@@ -121,30 +124,22 @@ See Section 3. Clean. The separator formula was adopted.
 
 ## 6. Residual risks
 
-1. **The text-JSON caption fallback is gone.** `SKILL.md` still instructs the
-   model to return bare JSON when tool calling is unavailable (preserved verbatim
-   by design), but `run_single_submit_with_provider` treats a completion with no
-   terminal tool call as `ProtocolFailure`. Providers without tool calling now
-   fail where they previously succeeded. Task 16 Step 5a records the behavior;
-   correcting the instruction text is deliberately out of scope (spec §9: "no
-   caption prompt improvement").
-
-2. **Project identity is a canonicalized path digest.** Accepted in spec §10;
+1. **Project identity is a canonicalized path digest.** Accepted in spec §10;
    moving a project orphans pending tasks to `Stale`.
 
-3. **`ProductArtifactMetadata` gained a hand-written `Deserialize`.** Adding a
-   field to that struct now requires editing two places. Task 5 Step 3a explains
-   why; a future slice that drops V1/V2 on-disk support should delete the shim.
+2. **`ProductArtifactMetadata` has a hand-written `Deserialize`.** Adding a
+   field to that struct requires editing both the type and compatibility shim.
+   A future slice that drops V1/V2 on-disk support should delete the shim.
 
-4. **The open-time sweep and `reconcile_for_source` both own the
-   non-terminal-to-`Interrupted` rule.** Task 19 factors the decision into one
-   helper; if a later slice changes one, it must change the helper.
+3. **The open-time sweep and `reconcile_for_source` share the same
+   non-terminal reconciliation policy.** A later policy change must continue
+   to update the shared merge decision used by both entry points.
 
-5. **The two workspaces are separate processes.** The umbrella and child spec
-   describe "one store shared into both workspaces"; in code, `main.rs` dispatches
-   into mutually exclusive iced applications, so the invariant is enforced per
-   workspace root. Slice B should not plan against a shared owner that does not
-   exist.
+4. **Process liveness is local-host ownership, not distributed coordination.**
+   Store locking serializes filesystem mutation and task-liveness records keep
+   a second live Rollshot process from interrupting the first process's work.
+   This does not make the task store safe to share over a filesystem whose
+   locking or process identity semantics differ from the local host.
 
 ## 7. Verification command results
 
@@ -152,10 +147,10 @@ See Section 3. Clean. The separator formula was adopted.
 
 | Suite | Passed | Failed | Ignored |
 |---|---|---|---|
-| `rollshot-agent` | 546 | 0 | 0 |
+| `rollshot-agent` | 552 | 0 | 0 |
 | `rollshot-action` | 414 | 0 | 0 |
-| `rollshot-app` (no features) | 893 | 0 | 6 |
-| `rollshot-app --features action-guide` | 1384 | 0 | 7 |
+| `rollshot-app` (no features) | 895 | 0 | 6 |
+| `rollshot-app --features action-guide` | 1401 | 0 | 7 |
 
 ### Formatting and lint
 
@@ -195,8 +190,7 @@ Per spec §9 and the umbrella:
 | Deferred | Why |
 |---|---|
 | Any change to `run_visual_annotation_with_provider` | Slice B owns the migration; touching it here removes Gate B1's falsification value |
-| Caption prompt improvement, caption eval harness | Spec §9. Task 13 moves the text verbatim for a clean baseline |
-| Fixing `SKILL.md`'s "return only JSON" sentence now that the text fallback is gone | Would be a prompt change, which §9 forbids. Recorded as residual risk 1 |
+| Caption prompt improvement, caption eval harness | Spec §9. The original text instruction remains byte-stable, and the pre-migration text-JSON fallback is preserved |
 | New UI surface, affordance, or copy | Umbrella constraint. Restore reuses the existing review surface |
 | Unifying `ActionGuideContextProjectionV1` with `rollshot-agent::continuity` | Spec §9 |
 | Project manifest schema change (stable project UUID) | Spec §3.1 rejected it; path digest accepted with `Stale` as the consequence of a move |
@@ -209,6 +203,7 @@ Per spec §9 and the umbrella:
 All ten gate items are evidenced by named tests. Full regression passes across
 all four suite configurations. fmt and clippy are clean. Task 7's
 authority-digest audit came back clean, and the separator-extended formula was
-adopted. Slice A extras (schema fixtures, two-domain concurrency, prompt text
-assertion, authority-digest audit) are recorded above. Five residual risks are
-identified and accepted. Eight migrations are recorded with rollback paths.
+adopted. Slice A extras (schema fixtures, liveness-aware two-domain
+reconciliation, prompt text assertion, authority-digest audit) are recorded
+above. Four residual risks are identified and accepted. Eight migrations are
+recorded with rollback paths.

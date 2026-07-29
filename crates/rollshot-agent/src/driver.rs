@@ -471,6 +471,10 @@ pub enum SingleSubmitTerminal {
     BudgetExhausted { dimension: BudgetDimension },
     /// The provider stream failed or returned an error.
     ProviderFailure,
+    /// Required audit evidence could not be durably appended.
+    AuditFailure {
+        category: crate::audit::AuditFailureCategory,
+    },
     /// The model violated the expected protocol (wrong tool, malformed
     /// arguments, missing tool call, etc.).
     ProtocolFailure,
@@ -2102,7 +2106,7 @@ impl AgentRunner {
         cancellation: &RunCancellation,
         authority: &crate::authority::AuthoritySnapshot,
         subject: &crate::authority::AuthoritySubject,
-        _audit_sink: Option<&dyn crate::audit::AuditAppendSink>,
+        audit_sink: Option<&dyn crate::audit::AuditAppendSink>,
     ) -> SingleSubmitTerminal {
         use crate::tools::ToolRegistryLimits;
 
@@ -2266,8 +2270,8 @@ impl AgentRunner {
                             );
                             return SingleSubmitTerminal::ProviderFailure;
                         }
-                        Err(DriverError::AuditFailure(_)) => {
-                            return SingleSubmitTerminal::ProtocolFailure;
+                        Err(DriverError::AuditFailure(category)) => {
+                            return SingleSubmitTerminal::AuditFailure { category };
                         }
                     }
 
@@ -2286,9 +2290,21 @@ impl AgentRunner {
 
                     let pending = &calls[0];
                     let arguments = pending.tool_call.function.arguments.clone();
+                    let argument_bytes = match serde_json::to_vec(&arguments) {
+                        Ok(bytes) => u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                        Err(error) => {
+                            tracing::debug!(
+                                target = profile.tracing_target,
+                                error = %error,
+                                "single-submit arguments could not be serialized"
+                            );
+                            return SingleSubmitTerminal::ProtocolFailure;
+                        }
+                    };
 
                     if let Err(err) = tracker.charge(UsageSnapshot {
                         tool_calls: 1,
+                        argument_bytes,
                         ..UsageSnapshot::default()
                     }) {
                         return map_budget_error_to_single_submit(err);
@@ -2305,6 +2321,45 @@ impl AgentRunner {
                             operation = ?profile.required_operation,
                             "single-submit authority denied"
                         );
+                        let Some(sink) = audit_sink else {
+                            tracing::error!(
+                                target = profile.tracing_target,
+                                operation = ?profile.required_operation,
+                                "single-submit authority denial has no audit sink"
+                            );
+                            return SingleSubmitTerminal::ProtocolFailure;
+                        };
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as i64;
+                        let envelope = match crate::audit::authority_denied_envelope(
+                            authority,
+                            terminal_tool_name.clone(),
+                            format!("{:?}", profile.required_operation),
+                            crate::audit::AuditEventId::new_v4(),
+                            now,
+                        ) {
+                            Ok(envelope) => envelope,
+                            Err(error) => {
+                                tracing::error!(
+                                    target = profile.tracing_target,
+                                    error = %error,
+                                    "single-submit authority denial evidence could not be built"
+                                );
+                                return SingleSubmitTerminal::ProtocolFailure;
+                            }
+                        };
+                        if let Err(crate::audit::AuditAppendError::AppendFailed { category }) =
+                            sink.append(envelope).await
+                        {
+                            tracing::error!(
+                                target = profile.tracing_target,
+                                category = ?category,
+                                "single-submit authority denial evidence could not be acknowledged"
+                            );
+                            return SingleSubmitTerminal::AuditFailure { category };
+                        }
                         return SingleSubmitTerminal::AuthorityDenied {
                             operation: profile.required_operation,
                         };
@@ -2328,6 +2383,13 @@ impl AgentRunner {
                             Ok(ToolOutcome::Success { result_json }) => {
                                 let result_str =
                                     serde_json::to_string(&result_json).unwrap_or_default();
+                                if let Err(err) = tracker.charge(UsageSnapshot {
+                                    result_bytes: u64::try_from(result_str.len())
+                                        .unwrap_or(u64::MAX),
+                                    ..UsageSnapshot::default()
+                                }) {
+                                    return map_budget_error_to_single_submit(err);
+                                }
                                 rig_results.push(rig_core::message::UserContent::tool_result(
                                     call_id,
                                     rig_core::message::ToolResultContent::from_tool_output(
@@ -2369,14 +2431,16 @@ impl AgentRunner {
                     return SingleSubmitTerminal::Submitted { arguments };
                 }
                 rig_core::agent::run::AgentRunStep::Done(_) => {
-                    tracing::debug!(
-                        target = profile.tracing_target,
-                        "single-submit model completed without a terminal tool call"
-                    );
-                    // The single-submit profile has no text path: a
-                    // completion with no terminal tool call is a protocol
-                    // failure regardless of whether text was emitted.
-                    return SingleSubmitTerminal::ProtocolFailure;
+                    if last_assistant_text.is_empty() {
+                        tracing::debug!(
+                            target = profile.tracing_target,
+                            "single-submit model completed without a terminal tool call or text"
+                        );
+                        return SingleSubmitTerminal::ProtocolFailure;
+                    }
+                    return SingleSubmitTerminal::TextCompleted {
+                        text: last_assistant_text,
+                    };
                 }
             }
         }
@@ -7128,6 +7192,9 @@ main = "SKILL.md"
 
     // ---- Single-submit bounded profile tests ----
 
+    use std::future::Future;
+    use std::pin::Pin;
+
     use crate::authority::{
         AuthorityBinding, AuthoritySnapshot, AuthoritySubject, DisclosureCeiling, RunOperation,
     };
@@ -7215,7 +7282,74 @@ main = "SKILL.md"
         .unwrap()
     }
 
-    /// Run the caption profile against a scripted provider and return the terminal.
+    struct NoopAuditSink;
+
+    impl crate::audit::AuditAppendSink for NoopAuditSink {
+        fn append(
+            &self,
+            envelope: crate::audit::AuditEnvelopeV1,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            crate::audit::AuditAppendReceiptV1,
+                            crate::audit::AuditAppendError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async move {
+                Ok(crate::audit::AuditAppendReceiptV1 {
+                    event_id: envelope.event_id().as_str().to_owned(),
+                    sequence: 1,
+                    record_hash: "test-record".to_owned(),
+                })
+            })
+        }
+    }
+
+    struct RecordingAuditSink {
+        sender: std::sync::mpsc::Sender<crate::audit::AuditEnvelopeV1>,
+    }
+
+    impl RecordingAuditSink {
+        fn channel() -> (
+            Self,
+            std::sync::mpsc::Receiver<crate::audit::AuditEnvelopeV1>,
+        ) {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            (Self { sender }, receiver)
+        }
+    }
+
+    impl crate::audit::AuditAppendSink for RecordingAuditSink {
+        fn append(
+            &self,
+            envelope: crate::audit::AuditEnvelopeV1,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            crate::audit::AuditAppendReceiptV1,
+                            crate::audit::AuditAppendError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async move {
+                let event_id = envelope.event_id().as_str().to_owned();
+                self.sender.send(envelope).unwrap();
+                Ok(crate::audit::AuditAppendReceiptV1 {
+                    event_id,
+                    sequence: 1,
+                    record_hash: "test-record".to_owned(),
+                })
+            })
+        }
+    }
+
     async fn run_caption_profile(
         provider: &ScriptedProvider,
         budget: RunBudget,
@@ -7223,6 +7357,28 @@ main = "SKILL.md"
         disclosure: DisclosureCeiling,
         grants: std::collections::BTreeSet<RunOperation>,
         attachments: Vec<Vec<u8>>,
+    ) -> SingleSubmitTerminal {
+        run_caption_profile_with_sink(
+            provider,
+            budget,
+            cancellation,
+            disclosure,
+            grants,
+            attachments,
+            &NoopAuditSink,
+        )
+        .await
+    }
+
+    /// Run the caption profile against a scripted provider and return the terminal.
+    async fn run_caption_profile_with_sink(
+        provider: &ScriptedProvider,
+        budget: RunBudget,
+        cancellation: &crate::runtime::RunCancellation,
+        disclosure: DisclosureCeiling,
+        grants: std::collections::BTreeSet<RunOperation>,
+        attachments: Vec<Vec<u8>>,
+        audit_sink: &dyn crate::audit::AuditAppendSink,
     ) -> SingleSubmitTerminal {
         use crate::domain::AttachmentDescriptor;
 
@@ -7264,7 +7420,7 @@ main = "SKILL.md"
                 cancellation,
                 &authority,
                 &subject,
-                None,
+                Some(audit_sink),
             )
             .await
     }
@@ -7320,13 +7476,15 @@ main = "SKILL.md"
             "submit_caption_suggestions",
             r#"{"suggestions":[]}"#,
         )]);
-        let terminal = run_caption_profile(
+        let (audit_sink, audit_events) = RecordingAuditSink::channel();
+        let terminal = run_caption_profile_with_sink(
             &provider,
             caption_run_budget_for_tests(),
             &RunCancellation::new(),
             DisclosureCeiling::TextMetadataOnly,
             std::collections::BTreeSet::new(),
             vec![],
+            &audit_sink,
         )
         .await;
 
@@ -7334,6 +7492,68 @@ main = "SKILL.md"
             terminal,
             SingleSubmitTerminal::AuthorityDenied {
                 operation: RunOperation::SubmitReviewCandidate
+            }
+        ));
+        let event = audit_events
+            .try_recv()
+            .expect("authority denial was audited");
+        assert_eq!(
+            event.event().kind(),
+            crate::audit::AuditEventKindV1::AuthorityDenied
+        );
+        assert!(
+            audit_events.try_recv().is_err(),
+            "exactly one authority denial event is expected"
+        );
+    }
+
+    #[tokio::test]
+    async fn single_submit_preserves_authority_audit_failure_category() {
+        struct FailingSink;
+        impl crate::audit::AuditAppendSink for FailingSink {
+            fn append(
+                &self,
+                _envelope: crate::audit::AuditEnvelopeV1,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<
+                                crate::audit::AuditAppendReceiptV1,
+                                crate::audit::AuditAppendError,
+                            >,
+                        > + Send
+                        + '_,
+                >,
+            > {
+                Box::pin(async {
+                    Err(crate::audit::AuditAppendError::from_category(
+                        crate::audit::AuditFailureCategory::CorruptJournal,
+                    ))
+                })
+            }
+        }
+
+        let provider = ScriptedProvider::new(vec![tool_call_turn(
+            "tc_1",
+            "submit_caption_suggestions",
+            r#"{"suggestions":[]}"#,
+        )]);
+        let audit_sink = FailingSink;
+        let terminal = run_caption_profile_with_sink(
+            &provider,
+            caption_run_budget_for_tests(),
+            &RunCancellation::new(),
+            DisclosureCeiling::TextMetadataOnly,
+            std::collections::BTreeSet::new(),
+            vec![],
+            &audit_sink,
+        )
+        .await;
+
+        assert!(matches!(
+            terminal,
+            SingleSubmitTerminal::AuditFailure {
+                category: crate::audit::AuditFailureCategory::CorruptJournal
             }
         ));
     }
@@ -7437,8 +7657,91 @@ main = "SKILL.md"
     }
 
     #[tokio::test]
-    async fn single_submit_reports_protocol_failure_when_the_model_only_talks() {
-        let provider = ScriptedProvider::new(vec![text_turn("I don't know how to call tools")]);
+    async fn single_submit_enforces_the_caption_argument_budget() {
+        let arguments = serde_json::json!({"payload": "x".repeat(4_096)}).to_string();
+        let provider = ScriptedProvider::new(vec![tool_call_turn(
+            "tc_1",
+            "submit_caption_suggestions",
+            &arguments,
+        )]);
+
+        let budget = RunBudget {
+            argument_bytes: 4,
+            ..caption_run_budget_for_tests()
+        };
+        let terminal = run_caption_profile(
+            &provider,
+            budget,
+            &RunCancellation::new(),
+            DisclosureCeiling::TextMetadataOnly,
+            std::collections::BTreeSet::from([RunOperation::SubmitReviewCandidate]),
+            vec![],
+        )
+        .await;
+
+        assert!(matches!(
+            terminal,
+            SingleSubmitTerminal::BudgetExhausted {
+                dimension: BudgetDimension::ArgumentBytes
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn single_submit_enforces_the_caption_result_budget() {
+        let provider = ScriptedProvider::new(vec![tool_call_turn(
+            "tc_1",
+            "submit_caption_suggestions",
+            r#"{"suggestions":[]}"#,
+        )]);
+        let budget = RunBudget {
+            result_bytes: 4,
+            ..caption_run_budget_for_tests()
+        };
+
+        let terminal = run_caption_profile(
+            &provider,
+            budget,
+            &RunCancellation::new(),
+            DisclosureCeiling::TextMetadataOnly,
+            std::collections::BTreeSet::from([RunOperation::SubmitReviewCandidate]),
+            vec![],
+        )
+        .await;
+
+        assert!(matches!(
+            terminal,
+            SingleSubmitTerminal::BudgetExhausted {
+                dimension: BudgetDimension::ResultBytes
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn single_submit_preserves_text_json_fallback() {
+        let provider = ScriptedProvider::new(vec![text_turn(r#"{"suggestions":[]}"#)]);
+
+        let terminal = run_caption_profile(
+            &provider,
+            caption_run_budget_for_tests(),
+            &RunCancellation::new(),
+            DisclosureCeiling::TextMetadataOnly,
+            std::collections::BTreeSet::from([RunOperation::SubmitReviewCandidate]),
+            vec![],
+        )
+        .await;
+
+        assert_eq!(
+            terminal,
+            SingleSubmitTerminal::TextCompleted {
+                text: r#"{"suggestions":[]}"#.to_owned()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn single_submit_reports_protocol_failure_when_the_model_returns_no_text() {
+        let provider = ScriptedProvider::new(vec![text_turn("")]);
 
         let terminal = run_caption_profile(
             &provider,

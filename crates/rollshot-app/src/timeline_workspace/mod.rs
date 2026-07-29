@@ -339,6 +339,8 @@ pub struct TimelineWorkspace {
     /// Cached `ReadyForReview` snapshot for the current caption proposal.
     /// `None` until `CaptionProposalLoaded` promotes the task.
     pub(crate) caption_review_snapshot: Option<rollshot_agent::product_task::ProductTaskSnapshot>,
+    /// A review decision is being durably committed; serializes subsequent decisions.
+    pub(crate) caption_review_persisting: bool,
     /// Current visual annotation suggestion state. See [`VisualAnnotationSuggestionState`].
     #[allow(dead_code)] // Read by Task 8's view; only the update path uses it here.
     pub(crate) visual_annotation_suggestion: VisualAnnotationSuggestionState,
@@ -439,6 +441,7 @@ impl TimelineWorkspace {
             caption_cancellation: None,
             caption_task_id: None,
             caption_review_snapshot: None,
+            caption_review_persisting: false,
             visual_annotation_suggestion: VisualAnnotationSuggestionState::Idle,
             visual_annotation_agent_run_id: 0,
             storyboard_copy_operation_id: 0,
@@ -530,6 +533,7 @@ impl TimelineWorkspace {
             caption_cancellation: None,
             caption_task_id: None,
             caption_review_snapshot: None,
+            caption_review_persisting: false,
             visual_annotation_suggestion: VisualAnnotationSuggestionState::Idle,
             visual_annotation_agent_run_id: 0,
             storyboard_copy_operation_id: 0,
@@ -2355,12 +2359,7 @@ mod tests {
             let proposal = caption_proposal_for_ws(&ws);
             let _ = super::super::update::update(
                 &mut ws,
-                Message::CaptionProposalLoaded(Ok((
-                    caption_test_task_id(),
-                    proposal,
-                    "test-provider".to_string(),
-                    "test-model".to_string(),
-                ))),
+                Message::CaptionProposalLoaded(Ok(caption_run_success(proposal))),
             );
 
             let _ = super::super::update::update(
@@ -2378,12 +2377,7 @@ mod tests {
             let proposal = caption_proposal_for_ws(&ws);
             let _ = super::super::update::update(
                 &mut ws,
-                Message::CaptionProposalLoaded(Ok((
-                    caption_test_task_id(),
-                    proposal,
-                    "test-provider".to_string(),
-                    "test-model".to_string(),
-                ))),
+                Message::CaptionProposalLoaded(Ok(caption_run_success(proposal))),
             );
 
             let _ = super::super::update::update(&mut ws, Message::AcceptAllCaptionSuggestions);
@@ -2470,6 +2464,25 @@ mod tests {
                 "task-00000000-0000-4000-8000-000000000001",
             )
             .unwrap()
+        }
+
+        fn caption_run_success(
+            proposal: rollshot_action::CaptionProposal,
+        ) -> Box<super::caption_agent::CaptionRunSuccess> {
+            let binding = super::caption_agent::caption_source_binding(
+                &super::caption_agent::provider_tests::ephemeral_context(),
+                None,
+            );
+            let snapshot = super::caption_agent::provider_tests::promote_caption_task_for_tests(
+                &binding, &proposal,
+            );
+            Box::new(super::caption_agent::CaptionRunSuccess {
+                task_id: caption_test_task_id(),
+                proposal,
+                snapshot,
+                provider_id: "test-provider".to_owned(),
+                model_id: "test-model".to_owned(),
+            })
         }
 
         fn caption_proposal_for_ws(state: &TimelineWorkspace) -> rollshot_action::CaptionProposal {

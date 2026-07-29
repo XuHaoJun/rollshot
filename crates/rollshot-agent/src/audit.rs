@@ -1152,8 +1152,8 @@ fn derive_event(
             })
         }
 
-        // ReviewDecisionCommitted::Rejected: ReadyForReview → Rejected
-        (Some(TaskStatus::ReadyForReview), TaskStatus::Rejected) => {
+        // ReviewDecisionCommitted::Rejected: review declined before or after apply began
+        (Some(TaskStatus::ReadyForReview | TaskStatus::Applying), TaskStatus::Rejected) => {
             let receipt =
                 new.review_receipt()
                     .ok_or(AuditContractError::MissingTransitionField {
@@ -1935,6 +1935,30 @@ mod tests {
                 }
                 _ => panic!("expected ReviewDecisionCommitted"),
             }
+        }
+
+        #[test]
+        fn derives_review_decision_committed_after_apply_started() {
+            let running = created_task_fixture()
+                .start_attempt(TaskAttempt::new(TaskAttemptId::new(1), run_id(), 20), 20)
+                .unwrap();
+            let meta = metadata_fixture(run_id_fixture(), TaskAttemptId::new(1));
+            let ready = running
+                .record_ready_for_review(meta, payload_bytes_fixture(), None, 30)
+                .unwrap();
+            let applying = ready.begin_apply(35).unwrap();
+            let rejected = applying.reject_apply(apply_receipt_fixture(), 40).unwrap();
+
+            let envelope =
+                derive_material_transition(Some(&applying), &rejected, audit_id(8), 40).unwrap();
+            assert!(matches!(
+                envelope.event(),
+                AuditEventV1::ReviewDecisionCommitted {
+                    applied: false,
+                    document_state: None,
+                    ..
+                }
+            ));
         }
 
         // ---- TaskTerminated (Stale) ----

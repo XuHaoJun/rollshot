@@ -4019,8 +4019,10 @@ mod reducer_tests {
         );
         let running = snapshot.start_attempt(attempt, 20).unwrap();
         store.create(&running).unwrap();
+        drop(store);
+        let store = TaskStore::open(tmp.path()).unwrap();
 
-        // Reconcile — running task becomes interrupted.
+        // Reopen and reconcile — the abandoned running task becomes interrupted.
         let result = store.reconcile_for_source(&binding, 2000).unwrap();
         assert!(
             result.is_none(),

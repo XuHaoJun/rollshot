@@ -470,7 +470,9 @@ fn detail_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
                     "Suggest Captions"
                 }))
                 .on_press_maybe(
-                    (mutation_allowed && !state.caption_suggestions_running)
+                    (mutation_allowed
+                        && !state.caption_suggestions_running
+                        && !state.caption_review_persisting)
                         .then_some(Message::SuggestCaptionsRequested),
                 )
                 .style(button::secondary),
@@ -528,14 +530,14 @@ fn caption_proposal_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
     let Some(proposal) = &state.caption_proposal else {
         return container(column![]).into();
     };
+    let review_enabled = !state.caption_review_persisting;
 
     let mut items = column![row![
         text("Suggested captions").size(13),
         Space::new().width(Length::Fill),
         button(text("Accept all"))
             .on_press_maybe(
-                proposal
-                    .has_pending()
+                (review_enabled && proposal.has_pending())
                     .then_some(Message::AcceptAllCaptionSuggestions)
             )
             .style(button::secondary),
@@ -556,7 +558,8 @@ fn caption_proposal_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
             .suggested_title
             .as_deref()
             .unwrap_or(&suggestion.base.title);
-        let pending = suggestion.status == rollshot_action::CaptionSuggestionStatus::Pending;
+        let pending = review_enabled
+            && suggestion.status == rollshot_action::CaptionSuggestionStatus::Pending;
         items = items.push(
             container(
                 column![
@@ -1854,6 +1857,35 @@ mod tests {
         // proposal panel renders "Suggested captions" and per-suggestion
         // items when caption_proposal is Some.
         let _ = element;
+    }
+    #[test]
+    fn caption_review_controls_do_not_emit_decisions_while_persisting() {
+        use iced::Size as IcedSize;
+        use iced_test::Simulator;
+
+        let mut state = ws_with_restored_caption_proposal();
+        state.caption_review_persisting = true;
+        let mut ui = Simulator::with_size(
+            iced::Settings::default(),
+            IcedSize::new(1100.0, 760.0),
+            view(&state),
+        );
+
+        let _ = ui.click("Accept all");
+        let _ = ui.click("Accept");
+        let _ = ui.click("Reject");
+        let _ = ui.click("Suggest Captions");
+        let messages: Vec<_> = ui.into_messages().collect();
+        assert!(
+            messages.iter().all(|message| !matches!(
+                message,
+                Message::AcceptAllCaptionSuggestions
+                    | Message::AcceptCaptionSuggestion(_)
+                    | Message::RejectCaptionSuggestion(_)
+                    | Message::SuggestCaptionsRequested
+            )),
+            "disabled review controls must not emit another decision"
+        );
     }
 
     #[test]

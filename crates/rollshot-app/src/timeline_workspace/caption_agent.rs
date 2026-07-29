@@ -339,16 +339,31 @@ pub(crate) fn caption_source_binding(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn caption_authority(
     task_id: rollshot_agent::product_task::ProductTaskId,
     run_id: rollshot_agent::domain::RunId,
     subject: rollshot_agent::authority::AuthoritySubject,
+) -> Result<rollshot_agent::authority::AuthoritySnapshot, String> {
+    caption_authority_with_submit_grant(task_id, run_id, subject, true)
+}
+
+fn caption_authority_with_submit_grant(
+    task_id: rollshot_agent::product_task::ProductTaskId,
+    run_id: rollshot_agent::domain::RunId,
+    subject: rollshot_agent::authority::AuthoritySubject,
+    grant_submit: bool,
 ) -> Result<rollshot_agent::authority::AuthoritySnapshot, String> {
     use rollshot_agent::authority::{
         AuthorityBinding, AuthoritySnapshot, DisclosureCeiling, RunOperation,
     };
     use rollshot_agent::product_task::TaskAttemptId;
 
+    let grants = if grant_submit {
+        std::collections::BTreeSet::from([RunOperation::SubmitReviewCandidate])
+    } else {
+        std::collections::BTreeSet::new()
+    };
     let binding = AuthorityBinding::new(task_id, TaskAttemptId::new(1), run_id, subject);
     AuthoritySnapshot::new(
         binding,
@@ -356,7 +371,7 @@ pub(crate) fn caption_authority(
         DisclosureCeiling::TextMetadataOnly,
         false,
         std::collections::BTreeSet::new(),
-        std::collections::BTreeSet::from([RunOperation::SubmitReviewCandidate]),
+        grants,
     )
     .map_err(|e| format!("build caption authority: {e}"))
 }
@@ -390,6 +405,9 @@ pub(crate) fn decode_caption_terminal(
         }
         rollshot_agent::driver::SingleSubmitTerminal::ProviderFailure => {
             Err("Caption suggestions failed: provider error".to_string())
+        }
+        rollshot_agent::driver::SingleSubmitTerminal::AuditFailure { category } => {
+            Err(format!("Caption suggestions failed: audit {category:?}"))
         }
         rollshot_agent::driver::SingleSubmitTerminal::ProtocolFailure => {
             Err("Caption suggestions failed: agent protocol error".to_string())
@@ -484,6 +502,166 @@ pub(crate) fn caption_review_receipt(
     })
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct CaptionRunSuccess {
+    pub task_id: rollshot_agent::product_task::ProductTaskId,
+    pub proposal: rollshot_action::CaptionProposal,
+    pub snapshot: rollshot_agent::product_task::ProductTaskSnapshot,
+    pub provider_id: String,
+    pub model_id: String,
+}
+
+fn promote_caption_ready_for_review(
+    store: &crate::agent_store::TaskStore,
+    task_id: &rollshot_agent::product_task::ProductTaskId,
+    proposal: &rollshot_action::CaptionProposal,
+    provider_id: &str,
+    model_id: &str,
+) -> Result<rollshot_agent::product_task::ProductTaskSnapshot, String> {
+    use rollshot_agent::product_task::{
+        ArtifactId, ArtifactKind, ArtifactRevision, ArtifactSummary, ProductArtifactMetadata,
+    };
+    use sha2::{Digest, Sha256};
+
+    let snapshot = store
+        .load(task_id)
+        .map_err(|e| format!("load caption task: {e}"))?;
+    let last_attempt = snapshot
+        .attempts()
+        .last()
+        .ok_or("caption task has no attempt".to_string())?;
+    let artifact_payload = caption_artifact_payload(proposal);
+    let proposal_payload =
+        serde_json::to_vec(proposal).map_err(|e| format!("serialize caption proposal: {e}"))?;
+    let meta = ProductArtifactMetadata::new_v3(
+        ArtifactId::parse(format!(
+            "artifact-{}",
+            task_id
+                .as_str()
+                .strip_prefix("task-")
+                .unwrap_or(task_id.as_str())
+        ))
+        .map_err(|e| format!("build caption artifact id: {e}"))?,
+        ArtifactRevision::new(snapshot.snapshot_revision() + 1),
+        ArtifactKind::ActionGuideCaptions,
+        1,
+        format!("{:x}", Sha256::digest(&artifact_payload)),
+        snapshot.source_binding().clone(),
+        task_id.clone(),
+        last_attempt.attempt_id(),
+        last_attempt.run_id().clone(),
+        proposal.id.0.to_string(),
+        provider_id.to_owned(),
+        model_id.to_owned(),
+        String::new(),
+        ArtifactSummary::ActionGuideCaptions {
+            suggestion_count: proposal.suggestions.len() as u32,
+        },
+        chrono::Utc::now().timestamp_millis(),
+    );
+    let now = chrono::Utc::now().timestamp_millis();
+    let promoted = snapshot
+        .record_ready_for_review(meta, artifact_payload, Some(proposal_payload), now)
+        .map_err(|e| format!("record ready: {e}"))?;
+    store
+        .transition_audited(
+            &snapshot,
+            &promoted,
+            rollshot_agent::audit::AuditEventId::new_v4(),
+            now,
+        )
+        .map_err(|e| format!("persist promotion: {e}"))?;
+    Ok(promoted)
+}
+
+async fn persist_caption_terminal(
+    store: std::sync::Arc<crate::agent_store::TaskStore>,
+    task_id: rollshot_agent::product_task::ProductTaskId,
+    terminal: rollshot_agent::product_task::TaskTerminal,
+    now: i64,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let snapshot = store
+            .load(&task_id)
+            .map_err(|e| format!("load caption task for terminal: {e}"))?;
+        let terminal_snapshot = snapshot
+            .record_terminal(terminal, now)
+            .map_err(|e| format!("record caption terminal: {e}"))?;
+        store
+            .transition_audited(
+                &snapshot,
+                &terminal_snapshot,
+                rollshot_agent::audit::AuditEventId::new_v4(),
+                now,
+            )
+            .map_err(|e| format!("persist caption terminal: {e}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking caption terminal: {e}"))?
+}
+
+async fn fail_caption_run(
+    store: std::sync::Arc<crate::agent_store::TaskStore>,
+    task_id: rollshot_agent::product_task::ProductTaskId,
+    terminal: rollshot_agent::product_task::TaskTerminal,
+    message: String,
+) -> Result<CaptionRunSuccess, String> {
+    let now = chrono::Utc::now().timestamp_millis();
+    persist_caption_terminal(store, task_id, terminal, now)
+        .await
+        .map_err(|persist_error| format!("{message}; {persist_error}"))?;
+    Err(message)
+}
+
+async fn fail_attempt_start_if_running(
+    store: std::sync::Arc<crate::agent_store::TaskStore>,
+    task_id: rollshot_agent::product_task::ProductTaskId,
+    terminal: rollshot_agent::product_task::TaskTerminal,
+    message: String,
+) -> Result<CaptionRunSuccess, String> {
+    let store_for_load = store.clone();
+    let task_id_for_load = task_id.clone();
+    let status = tokio::task::spawn_blocking(move || {
+        store_for_load
+            .load(&task_id_for_load)
+            .map(|snapshot| snapshot.status().clone())
+    })
+    .await;
+    match status {
+        Ok(Ok(rollshot_agent::product_task::TaskStatus::Running)) => {
+            fail_caption_run(store, task_id, terminal, message).await
+        }
+        Ok(Ok(_)) => Err(message),
+        Ok(Err(error)) => Err(format!("{message}; inspect caption attempt: {error}")),
+        Err(error) => Err(format!(
+            "{message}; spawn_blocking inspect caption attempt: {error}"
+        )),
+    }
+}
+
+fn caption_task_terminal(
+    terminal: &rollshot_agent::driver::SingleSubmitTerminal,
+) -> rollshot_agent::product_task::TaskTerminal {
+    use rollshot_agent::driver::SingleSubmitTerminal;
+    use rollshot_agent::product_task::TaskTerminal;
+
+    match terminal {
+        SingleSubmitTerminal::Cancelled => TaskTerminal::Cancelled,
+        SingleSubmitTerminal::BudgetExhausted { dimension } => TaskTerminal::BudgetExhausted {
+            dimension: format!("{dimension:?}"),
+        },
+        SingleSubmitTerminal::ProviderFailure => TaskTerminal::ProviderFailure,
+        SingleSubmitTerminal::AuditFailure { category } => TaskTerminal::AuditFailure {
+            category: format!("{category:?}"),
+        },
+        SingleSubmitTerminal::AuthorityDenied { .. }
+        | SingleSubmitTerminal::ProtocolFailure
+        | SingleSubmitTerminal::Submitted { .. }
+        | SingleSubmitTerminal::TextCompleted { .. } => TaskTerminal::AgentProtocolFailure,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn suggest_captions_task(
     run_id: u64,
@@ -494,15 +672,7 @@ pub(crate) async fn suggest_captions_task(
     adapter: Box<dyn rollshot_agent::ProviderAdapter>,
     context: PreparedCaptionContext,
     project_root: Option<PathBuf>,
-) -> Result<
-    (
-        rollshot_agent::product_task::ProductTaskId,
-        rollshot_action::CaptionProposal,
-        String,
-        String,
-    ),
-    String,
-> {
+) -> Result<CaptionRunSuccess, String> {
     suggest_captions_with_store(
         run_id,
         store,
@@ -512,6 +682,8 @@ pub(crate) async fn suggest_captions_task(
         adapter,
         context,
         project_root,
+        rollshot_agent::captions::caption_run_budget(),
+        true,
     )
     .await
 }
@@ -526,17 +698,10 @@ async fn suggest_captions_with_store(
     adapter: Box<dyn rollshot_agent::ProviderAdapter>,
     context: PreparedCaptionContext,
     project_root: Option<std::path::PathBuf>,
-) -> Result<
-    (
-        rollshot_agent::product_task::ProductTaskId,
-        rollshot_action::CaptionProposal,
-        String,
-        String,
-    ),
-    String,
-> {
+    budget: rollshot_agent::runtime::RunBudget,
+    grant_submit: bool,
+) -> Result<CaptionRunSuccess, String> {
     use rollshot_agent::authority::AuthoritySubject;
-    use rollshot_agent::captions::caption_run_budget;
     use rollshot_agent::driver::{AgentConfig, AgentRunner, SingleSubmitProfile};
     use rollshot_agent::product_task::{
         ProductTaskSnapshot, RunContractReceiptV1, TaskAttempt, TaskKind,
@@ -595,7 +760,7 @@ async fn suggest_captions_with_store(
     let store_clone = store.clone();
     let created_for_attempt = created.clone();
     let running_clone = running.clone();
-    tokio::task::spawn_blocking(move || {
+    let attempt_result = tokio::task::spawn_blocking(move || {
         store_clone.transition_audited(
             &created_for_attempt,
             &running_clone,
@@ -603,13 +768,41 @@ async fn suggest_captions_with_store(
             now,
         )
     })
-    .await
-    .map_err(|e| format!("spawn_blocking start attempt: {e}"))?
-    .map_err(|e| format!("audit start attempt: {e}"))?;
+    .await;
+    match attempt_result {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            return fail_attempt_start_if_running(
+                store,
+                task_id,
+                rollshot_agent::product_task::TaskTerminal::AuditFailure {
+                    category: format!("{:?}", error.audit_failure_category()),
+                },
+                format!("audit start attempt: {error}"),
+            )
+            .await;
+        }
+        Err(error) => {
+            return fail_attempt_start_if_running(
+                store,
+                task_id,
+                rollshot_agent::product_task::TaskTerminal::RuntimeFailure,
+                format!("spawn_blocking start attempt: {error}"),
+            )
+            .await;
+        }
+    }
 
     // 3. Resolve bundled skill; build authority; bind run contract.
-    let skill_use = bundled_action_guide_captions_use()
-        .ok_or_else(|| "Caption skill not found.".to_string())?;
+    let Some(skill_use) = bundled_action_guide_captions_use() else {
+        return fail_caption_run(
+            store,
+            task_id,
+            rollshot_agent::product_task::TaskTerminal::RuntimeFailure,
+            "Caption skill not found.".to_string(),
+        )
+        .await;
+    };
 
     let subject = match &source_binding {
         rollshot_agent::product_task::SourceBinding::ActionGuideProject {
@@ -626,11 +819,34 @@ async fn suggest_captions_with_store(
                 guide_digest: guide_digest.clone(),
             }
         }
-        _ => return Err("unexpected source binding domain for captions".to_string()),
+        _ => {
+            return fail_caption_run(
+                store,
+                task_id,
+                rollshot_agent::product_task::TaskTerminal::SourceValidationFailure,
+                "unexpected source binding domain for captions".to_string(),
+            )
+            .await;
+        }
     };
 
-    let authority = caption_authority(task_id.clone(), run_id_parsed.clone(), subject.clone())
-        .map_err(|e| format!("build authority: {e}"))?;
+    let authority = match caption_authority_with_submit_grant(
+        task_id.clone(),
+        run_id_parsed.clone(),
+        subject.clone(),
+        grant_submit,
+    ) {
+        Ok(authority) => authority,
+        Err(error) => {
+            return fail_caption_run(
+                store,
+                task_id,
+                rollshot_agent::product_task::TaskTerminal::AgentProtocolFailure,
+                format!("build authority: {error}"),
+            )
+            .await;
+        }
+    };
 
     let receipt = authority.receipt(now);
     let run_contract = RunContractReceiptV1 {
@@ -638,13 +854,22 @@ async fn suggest_captions_with_store(
         skill_use: skill_use.receipt(),
         bound_at_unix_ms: now,
     };
-    let bound = running
-        .bind_run_contract(run_contract, now)
-        .map_err(|e| format!("bind run contract: {e}"))?;
+    let bound = match running.bind_run_contract(run_contract, now) {
+        Ok(bound) => bound,
+        Err(error) => {
+            return fail_caption_run(
+                store,
+                task_id,
+                rollshot_agent::product_task::TaskTerminal::RuntimeFailure,
+                format!("bind run contract: {error}"),
+            )
+            .await;
+        }
+    };
     let store_clone = store.clone();
     let running_for_bind = running.clone();
     let bound_clone = bound.clone();
-    tokio::task::spawn_blocking(move || {
+    let bind_result = tokio::task::spawn_blocking(move || {
         store_clone.transition_audited(
             &running_for_bind,
             &bound_clone,
@@ -652,9 +877,30 @@ async fn suggest_captions_with_store(
             now,
         )
     })
-    .await
-    .map_err(|e| format!("spawn_blocking bind contract: {e}"))?
-    .map_err(|e| format!("audit bind contract: {e}"))?;
+    .await;
+    match bind_result {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            return fail_caption_run(
+                store,
+                task_id,
+                rollshot_agent::product_task::TaskTerminal::AuditFailure {
+                    category: format!("{:?}", error.audit_failure_category()),
+                },
+                format!("audit bind contract: {error}"),
+            )
+            .await;
+        }
+        Err(error) => {
+            return fail_caption_run(
+                store,
+                task_id,
+                rollshot_agent::product_task::TaskTerminal::RuntimeFailure,
+                format!("spawn_blocking bind contract: {error}"),
+            )
+            .await;
+        }
+    }
 
     // 4. Build profile and authorized input.
     let prompt = format!(
@@ -664,42 +910,69 @@ async fn suggest_captions_with_store(
         digest = skill_use.digest(),
         body = skill_use.body(),
     );
-    let profile = SingleSubmitProfile::from_skill(
+    let profile = match SingleSubmitProfile::from_skill(
         &skill_use,
         prompt.clone(),
         caption_tool_definition(),
         caption_tool_stub(),
         rollshot_agent::authority::RunOperation::SubmitReviewCandidate,
         "rollshot::action::caption_agent",
-    )
-    .map_err(|e| format!("build caption profile: {e:?}"))?;
+    ) {
+        Ok(profile) => profile,
+        Err(error) => {
+            return fail_caption_run(
+                store,
+                task_id,
+                rollshot_agent::product_task::TaskTerminal::AgentProtocolFailure,
+                format!("build caption profile: {error:?}"),
+            )
+            .await;
+        }
+    };
 
-    let input = rollshot_agent::domain::AuthorizedModelInput::new(
+    let input = match rollshot_agent::domain::AuthorizedModelInput::new(
         provider.clone(),
         model.clone(),
         prompt,
         vec![],
         vec![],
-    )
-    .map_err(|e| format!("build model input: {e}"))?;
+    ) {
+        Ok(input) => input,
+        Err(error) => {
+            return fail_caption_run(
+                store,
+                task_id,
+                rollshot_agent::product_task::TaskTerminal::AgentProtocolFailure,
+                format!("build model input: {error}"),
+            )
+            .await;
+        }
+    };
 
-    // 5. Run the single-submit profile.
+    // 5. Run the single-submit profile with durable authority-denial evidence.
     let runner = AgentRunner::new(AgentConfig::default());
+    let audit_sink = crate::agent_store::audit_store::TaskAuditSink::new(store.clone());
     let terminal = runner
         .run_single_submit_with_provider(
             profile,
             input,
             adapter.as_ref(),
-            caption_run_budget(),
+            budget,
             &cancellation,
             &authority,
             &subject,
-            None,
+            Some(&audit_sink),
         )
         .await;
 
-    // 6. Map terminal to caption drafts.
-    let drafts = decode_caption_terminal(&terminal)?;
+    // 6. Decode, promote, and return only after ReadyForReview is durable.
+    let drafts = match decode_caption_terminal(&terminal) {
+        Ok(drafts) => drafts,
+        Err(message) => {
+            return fail_caption_run(store, task_id, caption_task_terminal(&terminal), message)
+                .await;
+        }
+    };
     let proposal = rollshot_action::CaptionProposal::from_agent_drafts(
         rollshot_action::CaptionProposalId(run_id),
         run_id,
@@ -708,9 +981,58 @@ async fn suggest_captions_with_store(
         drafts,
     );
     if proposal.suggestions.is_empty() {
-        return Err("Agent returned no usable caption suggestions.".to_string());
+        return fail_caption_run(
+            store,
+            task_id,
+            rollshot_agent::product_task::TaskTerminal::AgentProtocolFailure,
+            "Agent returned no usable caption suggestions.".to_string(),
+        )
+        .await;
     }
-    Ok((task_id, proposal, provider, model))
+    let store_clone = store.clone();
+    let task_id_for_promotion = task_id.clone();
+    let proposal_for_promotion = proposal.clone();
+    let provider_for_promotion = provider.clone();
+    let model_for_promotion = model.clone();
+    let promotion = tokio::task::spawn_blocking(move || {
+        promote_caption_ready_for_review(
+            &store_clone,
+            &task_id_for_promotion,
+            &proposal_for_promotion,
+            &provider_for_promotion,
+            &model_for_promotion,
+        )
+    })
+    .await;
+    let snapshot = match promotion {
+        Ok(Ok(snapshot)) => snapshot,
+        Ok(Err(message)) => {
+            return fail_caption_run(
+                store,
+                task_id,
+                rollshot_agent::product_task::TaskTerminal::RuntimeFailure,
+                message,
+            )
+            .await;
+        }
+        Err(error) => {
+            return fail_caption_run(
+                store,
+                task_id,
+                rollshot_agent::product_task::TaskTerminal::RuntimeFailure,
+                format!("spawn_blocking promotion: {error}"),
+            )
+            .await;
+        }
+    };
+
+    Ok(CaptionRunSuccess {
+        task_id,
+        proposal,
+        snapshot,
+        provider_id: provider,
+        model_id: model,
+    })
 }
 
 // ========================================================================
@@ -727,7 +1049,7 @@ pub(crate) fn restore_caption_proposal(
     binding: &rollshot_agent::product_task::SourceBinding,
     now: i64,
 ) -> Option<(
-    rollshot_agent::product_task::ProductTaskId,
+    rollshot_agent::product_task::ProductTaskSnapshot,
     rollshot_action::CaptionProposal,
 )> {
     let snapshot = store.reconcile_for_source(binding, now).ok().flatten()?;
@@ -736,7 +1058,7 @@ pub(crate) fn restore_caption_proposal(
     }
     let payload = snapshot.pending_proposal_payload()?;
     match serde_json::from_slice::<rollshot_action::CaptionProposal>(payload) {
-        Ok(proposal) => Some((snapshot.task_id().clone(), proposal)),
+        Ok(proposal) => Some((snapshot, proposal)),
         Err(error) => {
             tracing::warn!(
                 target: "rollshot::action::caption_agent",
@@ -1055,7 +1377,7 @@ pub(crate) mod restore_test_helpers {
         now: i64,
         _provider: &dyn rollshot_agent::ProviderAdapter,
     ) -> Option<(
-        rollshot_agent::product_task::ProductTaskId,
+        rollshot_agent::product_task::ProductTaskSnapshot,
         rollshot_action::CaptionProposal,
     )> {
         restore_caption_proposal(store, binding, now)
@@ -1208,7 +1530,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod provider_tests {
+pub(crate) mod provider_tests {
     use super::*;
     use rollshot_agent::driver::SingleSubmitTerminal;
     use rollshot_agent::runtime::BudgetDimension;
@@ -1720,6 +2042,328 @@ mod provider_tests {
                 "{label}"
             );
         }
+    }
+    struct ScriptedCaptionProvider {
+        events: Vec<rollshot_agent::model::ModelStreamEvent>,
+    }
+
+    impl rollshot_agent::ProviderAdapter for ScriptedCaptionProvider {
+        fn stream(
+            &self,
+            _request: rollshot_agent::model::ModelRequest,
+            _bounds: rollshot_agent::StreamBounds,
+        ) -> std::pin::Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            std::pin::Pin<
+                                Box<
+                                    dyn iced::futures::Stream<
+                                            Item = Result<
+                                                rollshot_agent::model::ModelStreamEvent,
+                                                rollshot_agent::model::ModelError,
+                                            >,
+                                        > + Send,
+                                >,
+                            >,
+                            rollshot_agent::model::ModelError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            let events = self.events.clone();
+            Box::pin(async move {
+                Ok(
+                    Box::pin(iced::futures::stream::iter(events.into_iter().map(Ok)))
+                        as std::pin::Pin<
+                            Box<
+                                dyn iced::futures::Stream<
+                                        Item = Result<
+                                            rollshot_agent::model::ModelStreamEvent,
+                                            rollshot_agent::model::ModelError,
+                                        >,
+                                    > + Send,
+                            >,
+                        >,
+                )
+            })
+        }
+    }
+
+    pub(crate) fn caption_tool_provider(source: u64) -> Box<dyn rollshot_agent::ProviderAdapter> {
+        use rollshot_agent::model::{ModelCompletion, ModelStreamEvent, ModelUsage, StopReason};
+
+        let arguments = serde_json::json!({
+            "suggestions": [{
+                "source": source,
+                "title": "Open Settings",
+                "caption": "The user opens the settings panel.",
+                "confidence": 0.85,
+                "rationale": "The click begins the flow."
+            }]
+        })
+        .to_string();
+        Box::new(ScriptedCaptionProvider {
+            events: vec![
+                ModelStreamEvent::ToolCallStart {
+                    id: "tc_1".to_owned(),
+                    name: "submit_caption_suggestions".to_owned(),
+                },
+                ModelStreamEvent::ToolCallArgumentDelta {
+                    id: "tc_1".to_owned(),
+                    delta: arguments,
+                },
+                ModelStreamEvent::Completed(ModelCompletion {
+                    usage: ModelUsage {
+                        input_tokens: 5,
+                        output_tokens: 3,
+                        total_tokens: 8,
+                    },
+                    stop_reason: StopReason::ToolUse,
+                }),
+            ],
+        })
+    }
+
+    #[test]
+    fn real_worker_promotes_both_caption_payloads_before_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+
+        let success = run(suggest_captions_task(
+            42,
+            store.clone(),
+            rollshot_agent::runtime::RunCancellation::new(),
+            "test-model".to_owned(),
+            "test-provider".to_owned(),
+            caption_tool_provider(10),
+            ephemeral_context(),
+            None,
+        ))
+        .unwrap();
+
+        let snapshot = store.load(&success.task_id).unwrap();
+        assert_eq!(
+            snapshot.status(),
+            rollshot_agent::product_task::TaskStatus::ReadyForReview
+        );
+        assert!(snapshot.pending_artifact_payload().is_some());
+        let proposal_payload = snapshot
+            .pending_proposal_payload()
+            .expect("serialized proposal is retained for restore");
+        let restored: rollshot_action::CaptionProposal =
+            serde_json::from_slice(proposal_payload).unwrap();
+
+        assert_eq!(restored, success.proposal);
+        assert_eq!(snapshot, success.snapshot);
+    }
+
+    #[test]
+    fn real_worker_terminalizes_attempt_audit_commit_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(
+            crate::agent_store::TaskStore::open_with_failpoint(
+                dir.path(),
+                crate::agent_store::Failpoint::AuditCommit,
+            )
+            .unwrap(),
+        );
+
+        let result = run(suggest_captions_task(
+            42,
+            store.clone(),
+            rollshot_agent::runtime::RunCancellation::new(),
+            "test-model".to_owned(),
+            "test-provider".to_owned(),
+            caption_tool_provider(10),
+            ephemeral_context(),
+            None,
+        ));
+
+        assert!(result.is_err());
+        let snapshot = only_stored_task(&store);
+        assert!(matches!(
+            snapshot.status(),
+            rollshot_agent::product_task::TaskStatus::Failed {
+                terminal: rollshot_agent::product_task::TaskTerminal::AuditFailure { .. }
+            }
+        ));
+    }
+
+    fn only_stored_task(
+        store: &crate::agent_store::TaskStore,
+    ) -> rollshot_agent::product_task::ProductTaskSnapshot {
+        let task_ids: Vec<_> = std::fs::read_dir(store.tasks_dir())
+            .unwrap()
+            .map(|entry| {
+                let filename = entry.unwrap().file_name().into_string().unwrap();
+                let id = filename.strip_suffix(".json").unwrap();
+                rollshot_agent::product_task::ProductTaskId::parse(id).unwrap()
+            })
+            .collect();
+        assert_eq!(task_ids.len(), 1);
+        store.load(&task_ids[0]).unwrap()
+    }
+
+    #[test]
+    fn real_worker_persists_cancellation_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let cancellation = rollshot_agent::runtime::RunCancellation::new();
+        cancellation.cancel();
+
+        let result = run(suggest_captions_task(
+            42,
+            store.clone(),
+            cancellation,
+            "test-model".to_owned(),
+            "test-provider".to_owned(),
+            caption_tool_provider(10),
+            ephemeral_context(),
+            None,
+        ));
+
+        assert!(result.is_err());
+        let snapshot = only_stored_task(&store);
+        assert_eq!(
+            snapshot.status(),
+            rollshot_agent::product_task::TaskStatus::Cancelled
+        );
+        let kinds: Vec<_> = store
+            .committed_audit_events(snapshot.task_id())
+            .unwrap()
+            .into_iter()
+            .map(|event| event.event().kind())
+            .collect();
+        assert!(kinds.contains(&rollshot_agent::audit::AuditEventKindV1::TaskTerminated));
+    }
+
+    fn provider_with_events(
+        events: Vec<rollshot_agent::model::ModelStreamEvent>,
+    ) -> Box<dyn rollshot_agent::ProviderAdapter> {
+        Box::new(ScriptedCaptionProvider { events })
+    }
+
+    fn assert_worker_terminal(
+        adapter: Box<dyn rollshot_agent::ProviderAdapter>,
+        expected: rollshot_agent::product_task::TaskTerminal,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent_store::open_process_store(dir.path()).unwrap();
+
+        let result = run(suggest_captions_task(
+            42,
+            store.clone(),
+            rollshot_agent::runtime::RunCancellation::new(),
+            "test-model".to_owned(),
+            "test-provider".to_owned(),
+            adapter,
+            ephemeral_context(),
+            None,
+        ));
+
+        assert!(result.is_err());
+        let snapshot = only_stored_task(&store);
+        assert_eq!(
+            snapshot.status(),
+            rollshot_agent::product_task::TaskStatus::Failed { terminal: expected }
+        );
+        let kinds: Vec<_> = store
+            .committed_audit_events(snapshot.task_id())
+            .unwrap()
+            .into_iter()
+            .map(|event| event.event().kind())
+            .collect();
+        assert!(kinds.contains(&rollshot_agent::audit::AuditEventKindV1::TaskTerminated));
+    }
+
+    #[test]
+    fn real_worker_persists_provider_and_decode_failures() {
+        use rollshot_agent::model::{
+            ModelCompletion, ModelError, ModelStreamEvent, ModelUsage, StopReason,
+        };
+
+        assert_worker_terminal(
+            provider_with_events(vec![ModelStreamEvent::Error(ModelError::ProviderFailure(
+                "rate limited".to_owned(),
+            ))]),
+            rollshot_agent::product_task::TaskTerminal::ProviderFailure,
+        );
+        assert_worker_terminal(
+            provider_with_events(vec![
+                ModelStreamEvent::TextDelta("not caption json".to_owned()),
+                ModelStreamEvent::Completed(ModelCompletion {
+                    usage: ModelUsage {
+                        input_tokens: 5,
+                        output_tokens: 3,
+                        total_tokens: 8,
+                    },
+                    stop_reason: StopReason::EndTurn,
+                }),
+            ]),
+            rollshot_agent::product_task::TaskTerminal::AgentProtocolFailure,
+        );
+    }
+
+    #[test]
+    fn real_worker_persists_wall_time_and_authority_failures() {
+        let timeout_dir = tempfile::tempdir().unwrap();
+        let timeout_store = crate::agent_store::open_process_store(timeout_dir.path()).unwrap();
+        let timeout_budget = rollshot_agent::runtime::RunBudget {
+            wall_time: std::time::Duration::ZERO,
+            ..rollshot_agent::captions::caption_run_budget()
+        };
+        let timeout_result = run(suggest_captions_with_store(
+            42,
+            timeout_store.clone(),
+            rollshot_agent::runtime::RunCancellation::new(),
+            "test-model".to_owned(),
+            "test-provider".to_owned(),
+            caption_tool_provider(10),
+            ephemeral_context(),
+            None,
+            timeout_budget,
+            true,
+        ));
+        assert!(timeout_result.is_err());
+        assert!(matches!(
+            only_stored_task(&timeout_store).status(),
+            rollshot_agent::product_task::TaskStatus::Failed {
+                terminal: rollshot_agent::product_task::TaskTerminal::BudgetExhausted { .. }
+            }
+        ));
+
+        let denied_dir = tempfile::tempdir().unwrap();
+        let denied_store = crate::agent_store::open_process_store(denied_dir.path()).unwrap();
+        let denied_result = run(suggest_captions_with_store(
+            42,
+            denied_store.clone(),
+            rollshot_agent::runtime::RunCancellation::new(),
+            "test-model".to_owned(),
+            "test-provider".to_owned(),
+            caption_tool_provider(10),
+            ephemeral_context(),
+            None,
+            rollshot_agent::captions::caption_run_budget(),
+            false,
+        ));
+        assert!(denied_result.is_err());
+        let denied = only_stored_task(&denied_store);
+        assert!(matches!(
+            denied.status(),
+            rollshot_agent::product_task::TaskStatus::Failed {
+                terminal: rollshot_agent::product_task::TaskTerminal::AgentProtocolFailure
+            }
+        ));
+        let kinds: Vec<_> = denied_store
+            .committed_audit_events(denied.task_id())
+            .unwrap()
+            .into_iter()
+            .map(|event| event.event().kind())
+            .collect();
+        assert!(kinds.contains(&rollshot_agent::audit::AuditEventKindV1::AuthorityDenied));
+        assert!(kinds.contains(&rollshot_agent::audit::AuditEventKindV1::TaskTerminated));
     }
 }
 

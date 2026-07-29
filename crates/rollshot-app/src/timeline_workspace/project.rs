@@ -388,6 +388,7 @@ pub(crate) fn from_loaded_project(
         caption_cancellation: None,
         caption_task_id: None,
         caption_review_snapshot: None,
+        caption_review_persisting: false,
         visual_annotation_suggestion: super::VisualAnnotationSuggestionState::Idle,
         visual_annotation_agent_run_id: 0,
         storyboard_copy_operation_id: 0,
@@ -423,6 +424,19 @@ pub(crate) fn from_loaded_project(
     ws.rebuild_selection_handles();
     ws.load_publish_freshness();
     Ok(ws)
+}
+
+#[cfg(feature = "action-guide")]
+pub(crate) fn from_loaded_project_with_task_store(
+    loaded: LoadedProject,
+    access: ProjectAccess,
+    task_store: std::sync::Arc<crate::agent_store::TaskStore>,
+) -> Result<TimelineWorkspace, ProjectAdapterError> {
+    let restore_source = loaded.clone();
+    let mut workspace = from_loaded_project(loaded, access)?;
+    workspace.task_store = Some(task_store);
+    super::update::restore_caption_proposal_on_project_open(&mut workspace, &restore_source);
+    Ok(workspace)
 }
 
 #[allow(dead_code)]

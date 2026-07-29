@@ -11,13 +11,16 @@
 //! Atomic persistence via sibling-temp + fsync + rename.
 //! Commit outcomes classify rename + parent-directory sync results.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::future::Future;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
+use fs4::{FileExt, TryLockError};
 use rollshot_agent::audit::{
     derive_material_transition, AuditAppendReceiptV1, AuditEnvelopeV1, AuditEventId,
 };
@@ -36,6 +39,7 @@ use super::audit_store::{
 
 const TASKS_DIR: &str = "tasks";
 const LOCK_FILE: &str = ".lock";
+const LIVE_TASKS_DIR: &str = "live";
 const TASK_FILE_PREFIX: &str = "task-";
 const TASK_FILE_SUFFIX: &str = ".json";
 const TEMP_PREFIX: &str = ".tmp-";
@@ -61,6 +65,8 @@ pub enum Failpoint {
     Rename,
     /// Fail on parent directory sync after rename.
     DirectorySync,
+    /// Fail the audit commit append after a transition snapshot is visible.
+    AuditCommit,
 }
 
 // ============================================================================
@@ -184,10 +190,12 @@ pub struct AuditedCommitOutcome {
 pub struct TaskStore {
     config_dir: PathBuf,
     tasks_dir: PathBuf,
+    live_tasks_dir: PathBuf,
     lock_path: PathBuf,
     temp_counter: AtomicU64,
     failpoint: Option<Failpoint>,
     audit_journal: AuditJournal,
+    live_tasks: Arc<Mutex<HashMap<ProductTaskId, fs::File>>>,
 }
 
 impl TaskStore {
@@ -199,10 +207,15 @@ impl TaskStore {
         let config_dir = config_dir.into();
         let agent_tasks = config_dir.join("agent-tasks");
         let tasks_dir = agent_tasks.join(TASKS_DIR);
+        let live_tasks_dir = agent_tasks.join(LIVE_TASKS_DIR);
         let lock_path = agent_tasks.join(LOCK_FILE);
 
         fs::create_dir_all(&tasks_dir).map_err(|e| TaskStoreError::Io {
             category: "create_dir".to_owned(),
+            source: e,
+        })?;
+        fs::create_dir_all(&live_tasks_dir).map_err(|e| TaskStoreError::Io {
+            category: "create_live_dir".to_owned(),
             source: e,
         })?;
 
@@ -212,6 +225,7 @@ impl TaskStore {
             use std::os::unix::fs::PermissionsExt;
             let _ = fs::set_permissions(&agent_tasks, fs::Permissions::from_mode(0o700));
             let _ = fs::set_permissions(&tasks_dir, fs::Permissions::from_mode(0o700));
+            let _ = fs::set_permissions(&live_tasks_dir, fs::Permissions::from_mode(0o700));
         }
 
         // Create lock file if it doesn't exist.
@@ -238,10 +252,12 @@ impl TaskStore {
         let store = Self {
             config_dir,
             tasks_dir,
+            live_tasks_dir,
             lock_path,
             temp_counter: AtomicU64::new(0),
             failpoint: None,
             audit_journal,
+            live_tasks: Arc::new(Mutex::new(HashMap::new())),
         };
 
         // Reconcile all audit journals before returning.
@@ -384,6 +400,9 @@ impl TaskStore {
                 Ok(s) => s,
                 Err(_) => continue,
             };
+            if self.task_is_live(&task_id)? {
+                continue;
+            }
 
             let ephemeral = matches!(
                 snapshot.source_binding(),
@@ -741,7 +760,19 @@ impl TaskStore {
             });
         }
 
-        self.atomic_write(&path, snapshot, self.failpoint)
+        let owns_liveness = Self::snapshot_is_active(snapshot);
+        if owns_liveness {
+            self.begin_task_liveness(task_id)?;
+        }
+        match self.atomic_write(&path, snapshot, self.failpoint) {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                if owns_liveness {
+                    self.end_task_liveness(task_id);
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Create a task, bypassing any configured failpoint.
@@ -758,7 +789,19 @@ impl TaskStore {
             });
         }
 
-        self.atomic_write(&path, snapshot, None)
+        let owns_liveness = Self::snapshot_is_active(snapshot);
+        if owns_liveness {
+            self.begin_task_liveness(task_id)?;
+        }
+        match self.atomic_write(&path, snapshot, None) {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                if owns_liveness {
+                    self.end_task_liveness(task_id);
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Create a snapshot using an already-held lock. Caller must hold
@@ -809,7 +852,12 @@ impl TaskStore {
             source: e,
         })?;
 
-        self.compare_and_swap_snapshot_locked(expected, replacement, self.failpoint)
+        let outcome =
+            self.compare_and_swap_snapshot_locked(expected, replacement, self.failpoint)?;
+        if !Self::snapshot_is_active(replacement) {
+            self.end_task_liveness(replacement.task_id());
+        }
+        Ok(outcome)
     }
 
     /// CAS using an already-held lock. Caller must hold the exclusive
@@ -877,6 +925,99 @@ impl TaskStore {
         Ok(lock_file)
     }
 
+    fn snapshot_is_active(snapshot: &ProductTaskSnapshot) -> bool {
+        matches!(
+            snapshot.status(),
+            TaskStatus::Created
+                | TaskStatus::Running
+                | TaskStatus::ReadyForReview
+                | TaskStatus::Applying
+        )
+    }
+
+    fn liveness_path(&self, task_id: &ProductTaskId) -> PathBuf {
+        self.live_tasks_dir
+            .join(format!("{}.lock", task_id.as_str()))
+    }
+
+    fn begin_task_liveness(&self, task_id: &ProductTaskId) -> Result<(), TaskStoreError> {
+        let mut live_tasks = self.live_tasks.lock().map_err(|_| TaskStoreError::Io {
+            category: "live_tasks_lock".to_owned(),
+            source: io::Error::other("live task map poisoned"),
+        })?;
+        if live_tasks.contains_key(task_id) {
+            return Ok(());
+        }
+
+        let path = self.liveness_path(task_id);
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|e| TaskStoreError::Io {
+                category: "open_task_liveness".to_owned(),
+                source: e,
+            })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+        }
+
+        match FileExt::try_lock(&file) {
+            Ok(()) => {
+                live_tasks.insert(task_id.clone(), file);
+                Ok(())
+            }
+            Err(TryLockError::WouldBlock) => Err(TaskStoreError::LockContended),
+            Err(TryLockError::Error(error)) => Err(TaskStoreError::Io {
+                category: "lock_task_liveness".to_owned(),
+                source: error,
+            }),
+        }
+    }
+
+    fn task_is_live(&self, task_id: &ProductTaskId) -> Result<bool, TaskStoreError> {
+        let live_tasks = self.live_tasks.lock().map_err(|_| TaskStoreError::Io {
+            category: "live_tasks_lock".to_owned(),
+            source: io::Error::other("live task map poisoned"),
+        })?;
+        if live_tasks.contains_key(task_id) {
+            return Ok(true);
+        }
+        drop(live_tasks);
+
+        let path = self.liveness_path(task_id);
+        let file = match fs::OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(TaskStoreError::Io {
+                    category: "probe_task_liveness".to_owned(),
+                    source: error,
+                });
+            }
+        };
+        match FileExt::try_lock(&file) {
+            Ok(()) => Ok(false),
+            Err(TryLockError::WouldBlock) => Ok(true),
+            Err(TryLockError::Error(error)) => Err(TaskStoreError::Io {
+                category: "probe_task_liveness".to_owned(),
+                source: error,
+            }),
+        }
+    }
+
+    fn end_task_liveness(&self, task_id: &ProductTaskId) {
+        let Ok(mut live_tasks) = self.live_tasks.lock() else {
+            return;
+        };
+        live_tasks.remove(task_id);
+        let _ = fs::remove_file(self.liveness_path(task_id));
+    }
+
     /// Generate an opaque audit transaction ID.
     fn new_transaction_id() -> AuditTransactionId {
         use uuid::Uuid;
@@ -932,6 +1073,9 @@ impl TaskStore {
         let _prepare_receipt = self.audit_journal.append(task_id, prepare_payload)?;
 
         // Create snapshot.
+        if Self::snapshot_is_active(snapshot) {
+            self.begin_task_liveness(task_id)?;
+        }
         let store_outcome = match self.create_snapshot_locked(snapshot, None) {
             Ok(outcome) => outcome,
             Err(e) => {
@@ -942,6 +1086,9 @@ impl TaskStore {
                     reason: AuditAbortCategory::TaskStoreCommitFailed,
                 };
                 let _ = self.audit_journal.append(task_id, abort_payload);
+                if Self::snapshot_is_active(snapshot) {
+                    self.end_task_liveness(task_id);
+                }
                 return Err(e);
             }
         };
@@ -1034,12 +1181,29 @@ impl TaskStore {
             }
         };
 
+        if self.failpoint == Some(Failpoint::AuditCommit) {
+            if !Self::snapshot_is_active(new) {
+                self.end_task_liveness(task_id);
+            }
+            return Err(TaskStoreError::PreCommit {
+                reason: "failpoint: audit commit".to_owned(),
+            });
+        }
+
         // Commit audit.
         let commit_payload = JournalPayloadV1::Committed {
             transaction_id: txn_id,
             event_id: event_id.clone(),
         };
-        let audit_receipt = self.audit_journal.append(task_id, commit_payload)?;
+        let audit_receipt = match self.audit_journal.append(task_id, commit_payload) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                if !Self::snapshot_is_active(new) {
+                    self.end_task_liveness(task_id);
+                }
+                return Err(error.into());
+            }
+        };
 
         tracing::info!(
             target: "rollshot::app::agent_audit_store",
@@ -1048,6 +1212,9 @@ impl TaskStore {
             store_outcome = ?store_outcome,
             "transition_audited: complete"
         );
+        if !Self::snapshot_is_active(new) {
+            self.end_task_liveness(task_id);
+        }
 
         Ok(AuditedCommitOutcome {
             store: store_outcome,
@@ -1311,6 +1478,11 @@ impl TaskStore {
             // Reconcile running/applying → interrupted.
             match snapshot.status() {
                 TaskStatus::Created | TaskStatus::Running | TaskStatus::Applying => {
+                    if !snapshot.source_binding().identity_matches(binding)
+                        || self.task_is_live(&task_id)?
+                    {
+                        continue;
+                    }
                     // A task that was just created is still mid-launch: its
                     // `Created → Running` transition is a separate audited
                     // write, so interrupting it immediately would abort a
@@ -2262,6 +2434,7 @@ mod tests {
         let (store, _dir) = store();
         let expected = running_task_fixture();
         store.create(&expected).unwrap();
+        store.end_task_liveness(expected.task_id());
 
         let binding = source_binding_fixture();
         store.reconcile_for_source(&binding, 100).unwrap();
@@ -2277,6 +2450,7 @@ mod tests {
         store.create_without_failpoint(&ready).unwrap();
         let applying = ready.begin_apply(35).unwrap();
         store.compare_and_swap(&ready, &applying).unwrap();
+        store.end_task_liveness(ready.task_id());
 
         let binding = source_binding_fixture();
         store.reconcile_for_source(&binding, 100).unwrap();
@@ -3041,6 +3215,7 @@ mod tests {
         store
             .create_audited(&created, AuditEventId::new_v4(), 10)
             .unwrap();
+        store.end_task_liveness(created.task_id());
 
         let binding = source_binding_fixture();
         // Past the launch grace window: the task is genuinely abandoned.
@@ -3744,6 +3919,40 @@ mod tests {
             reopened.load(&task_id).unwrap().status(),
             TaskStatus::Stale,
             "an ephemeral guide has no durable target to apply to"
+        );
+    }
+
+    #[test]
+    fn second_live_store_does_not_interrupt_running_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let task_id = seed_running_caption(&first);
+
+        let second = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let binding = second.load(&task_id).unwrap().source_binding().clone();
+        let _ = second
+            .reconcile_for_source(&binding, chrono::Utc::now().timestamp_millis())
+            .unwrap();
+
+        assert_eq!(
+            second.load(&task_id).unwrap().status(),
+            TaskStatus::Running,
+            "opening another process store must not interrupt a live owner"
+        );
+    }
+
+    #[test]
+    fn second_live_store_does_not_stale_ephemeral_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = crate::agent_store::open_process_store(dir.path()).unwrap();
+        let task_id = seed_ephemeral_ready_for_review(&first);
+
+        let second = crate::agent_store::open_process_store(dir.path()).unwrap();
+
+        assert_eq!(
+            second.load(&task_id).unwrap().status(),
+            TaskStatus::ReadyForReview,
+            "an ephemeral review remains usable while its owning process is live"
         );
     }
 

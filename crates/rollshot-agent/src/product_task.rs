@@ -1374,24 +1374,7 @@ impl ProductTaskSnapshot {
         Ok(next)
     }
 
-    /// Transition: Applying → Completed. Clears pending payload after commit.
-    pub fn complete_apply(
-        &self,
-        receipt: ReviewReceipt,
-        now: i64,
-    ) -> Result<Self, TaskContractError> {
-        if self.status != TaskStatus::Applying {
-            return Err(TaskContractError::IllegalTransition {
-                from: self.status.clone(),
-            });
-        }
-        if now < self.updated_at_unix_ms {
-            return Err(TaskContractError::TimestampRegression {
-                current: self.updated_at_unix_ms,
-                attempted: now,
-            });
-        }
-        // Validate receipt matches embedded artifact
+    fn validate_apply_receipt(&self, receipt: &ReviewReceipt) -> Result<(), TaskContractError> {
         if let Some(meta) = &self.artifact_metadata {
             if receipt.artifact_id != meta.artifact_id {
                 return Err(TaskContractError::ArtifactMismatch {
@@ -1412,8 +1395,58 @@ impl ProductTaskSnapshot {
                 });
             }
         }
+        Ok(())
+    }
+
+    /// Transition: Applying → Completed. Clears pending payload after commit.
+    pub fn complete_apply(
+        &self,
+        receipt: ReviewReceipt,
+        now: i64,
+    ) -> Result<Self, TaskContractError> {
+        if self.status != TaskStatus::Applying {
+            return Err(TaskContractError::IllegalTransition {
+                from: self.status.clone(),
+            });
+        }
+        if now < self.updated_at_unix_ms {
+            return Err(TaskContractError::TimestampRegression {
+                current: self.updated_at_unix_ms,
+                attempted: now,
+            });
+        }
+        self.validate_apply_receipt(&receipt)?;
         let mut next = self.clone();
         next.status = TaskStatus::Completed;
+        next.review_receipt = Some(receipt);
+        next.pending_artifact_payload = None;
+        next.pending_proposal_payload = None;
+        next.snapshot_revision += 1;
+        next.updated_at_unix_ms = now;
+        Ok(next)
+    }
+
+    /// Transition: Applying → Rejected. Clears pending payload after commit.
+    pub fn reject_apply(
+        &self,
+        receipt: ReviewReceipt,
+        now: i64,
+    ) -> Result<Self, TaskContractError> {
+        if self.status != TaskStatus::Applying {
+            return Err(TaskContractError::IllegalTransition {
+                from: self.status.clone(),
+            });
+        }
+        if now < self.updated_at_unix_ms {
+            return Err(TaskContractError::TimestampRegression {
+                current: self.updated_at_unix_ms,
+                attempted: now,
+            });
+        }
+        self.validate_apply_receipt(&receipt)?;
+
+        let mut next = self.clone();
+        next.status = TaskStatus::Rejected;
         next.review_receipt = Some(receipt);
         next.pending_artifact_payload = None;
         next.pending_proposal_payload = None;
@@ -2210,6 +2243,16 @@ mod tests {
         assert!(completed.pending_artifact_payload().is_none());
         assert!(completed.artifact_metadata().is_some());
         assert!(completed.review_receipt().is_some());
+    }
+
+    #[test]
+    fn applying_batch_with_no_accepts_can_be_rejected() {
+        let applying = ready_task_fixture().begin_apply(40).unwrap();
+        let rejected = applying.reject_apply(apply_receipt_fixture(), 50).unwrap();
+
+        assert_eq!(rejected.status(), TaskStatus::Rejected);
+        assert!(rejected.pending_artifact_payload().is_none());
+        assert!(rejected.pending_proposal_payload().is_none());
     }
 
     #[test]
