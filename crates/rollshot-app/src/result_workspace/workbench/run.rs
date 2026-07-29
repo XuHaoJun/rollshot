@@ -4166,13 +4166,13 @@ mod reducer_tests {
 
         store.create(&running).unwrap();
 
-        // Advance store via second handle — creates CAS conflict.
-        let store2 = TaskStore::open(tmp.path()).unwrap();
-        let loaded2 = store2.load(&task_id).unwrap();
+        // Advance store to terminal via the same handle — creates CAS
+        // conflict when the stale `running` snapshot is used below.
+        let loaded2 = store.load(&task_id).unwrap();
         let terminal2 = loaded2
             .record_terminal(TaskTerminal::RuntimeFailure, 25)
             .unwrap();
-        store2.compare_and_swap(&loaded2, &terminal2).unwrap();
+        store.compare_and_swap(&loaded2, &terminal2).unwrap();
 
         // Attempt audited transition from the original running snapshot.
         // CAS conflict: disk has terminal2 (rev 2), expected is running (rev 1).
@@ -5154,7 +5154,8 @@ mod reducer_tests {
         let running = snapshot.start_attempt(attempt, 20).unwrap();
         store.create(&running).unwrap();
 
-        let source = TaskStoreContinuitySource::new(std::sync::Arc::new(store));
+        let store_arc = std::sync::Arc::new(store);
+        let source = TaskStoreContinuitySource::new(store_arc.clone());
         let source: std::sync::Arc<dyn rollshot_agent::continuity::ContinuitySnapshotSource> =
             std::sync::Arc::new(source);
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -5163,16 +5164,15 @@ mod reducer_tests {
         let first = rt.block_on(source.clone().load(task_id.clone())).unwrap();
         assert_eq!(first.status(), Ts::Running);
 
-        // Advance store to terminal.
-        let store2 = TaskStore::open(tmp.path()).unwrap();
-        let loaded = store2.load(&task_id).unwrap();
+        // Advance store to terminal via the same Arc handle.
+        let loaded = store_arc.load(&task_id).unwrap();
         let terminal = loaded
             .record_terminal(
                 rollshot_agent::product_task::TaskTerminal::RuntimeFailure,
                 30,
             )
             .unwrap();
-        store2.compare_and_swap(&loaded, &terminal).unwrap();
+        store_arc.compare_and_swap(&loaded, &terminal).unwrap();
 
         // Second load: terminal snapshot (revision changed).
         let second = rt.block_on(source.load(task_id.clone())).unwrap();
