@@ -291,6 +291,38 @@ impl TryFrom<&crate::product_task::ProductTaskSnapshot> for ContinuityProjection
                     hasher.update(b"rollshot-source-binding-action-guide-ephemeral-v1\0");
                     hasher.update(guide_digest.as_bytes());
                 }
+                crate::product_task::SourceBinding::ActionGuideVisualAnnotationProject {
+                    project_root_sha256,
+                    revision,
+                    projection_digest,
+                    step_source,
+                    keyframe,
+                    keyframe_sha256,
+                    annotation_state_sha256,
+                } => {
+                    hasher.update(b"rollshot-source-binding-visual-annotation-project-v1\0");
+                    hasher.update(project_root_sha256);
+                    hasher.update(revision.to_le_bytes());
+                    hasher.update(projection_digest.as_bytes());
+                    hasher.update(step_source.to_le_bytes());
+                    hasher.update(keyframe.to_le_bytes());
+                    hasher.update(keyframe_sha256);
+                    hasher.update(annotation_state_sha256);
+                }
+                crate::product_task::SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
+                    guide_digest,
+                    step_source,
+                    keyframe,
+                    keyframe_sha256,
+                    annotation_state_sha256,
+                } => {
+                    hasher.update(b"rollshot-source-binding-visual-annotation-ephemeral-v1\0");
+                    hasher.update(guide_digest.as_bytes());
+                    hasher.update(step_source.to_le_bytes());
+                    hasher.update(keyframe.to_le_bytes());
+                    hasher.update(keyframe_sha256);
+                    hasher.update(annotation_state_sha256);
+                }
             }
             format!("{:x}", hasher.finalize())
         };

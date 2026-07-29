@@ -204,6 +204,22 @@ pub enum SourceBinding {
     ActionGuideEphemeralGuide {
         guide_digest: String,
     },
+    ActionGuideVisualAnnotationProject {
+        project_root_sha256: [u8; 32],
+        revision: u64,
+        projection_digest: String,
+        step_source: u64,
+        keyframe: u64,
+        keyframe_sha256: [u8; 32],
+        annotation_state_sha256: [u8; 32],
+    },
+    ActionGuideVisualAnnotationEphemeralGuide {
+        guide_digest: String,
+        step_source: u64,
+        keyframe: u64,
+        keyframe_sha256: [u8; 32],
+        annotation_state_sha256: [u8; 32],
+    },
 }
 
 /// Deserialization shim accepting both the tagged form and the pre-migration
@@ -231,6 +247,22 @@ impl<'de> Deserialize<'de> for SourceBinding {
             },
             ActionGuideEphemeralGuide {
                 guide_digest: String,
+            },
+            ActionGuideVisualAnnotationProject {
+                project_root_sha256: [u8; 32],
+                revision: u64,
+                projection_digest: String,
+                step_source: u64,
+                keyframe: u64,
+                keyframe_sha256: [u8; 32],
+                annotation_state_sha256: [u8; 32],
+            },
+            ActionGuideVisualAnnotationEphemeralGuide {
+                guide_digest: String,
+                step_source: u64,
+                keyframe: u64,
+                keyframe_sha256: [u8; 32],
+                annotation_state_sha256: [u8; 32],
             },
         }
 
@@ -278,6 +310,36 @@ impl<'de> Deserialize<'de> for SourceBinding {
             Repr::Tagged(Tagged::ActionGuideEphemeralGuide { guide_digest }) => {
                 Self::ActionGuideEphemeralGuide { guide_digest }
             }
+            Repr::Tagged(Tagged::ActionGuideVisualAnnotationProject {
+                project_root_sha256,
+                revision,
+                projection_digest,
+                step_source,
+                keyframe,
+                keyframe_sha256,
+                annotation_state_sha256,
+            }) => Self::ActionGuideVisualAnnotationProject {
+                project_root_sha256,
+                revision,
+                projection_digest,
+                step_source,
+                keyframe,
+                keyframe_sha256,
+                annotation_state_sha256,
+            },
+            Repr::Tagged(Tagged::ActionGuideVisualAnnotationEphemeralGuide {
+                guide_digest,
+                step_source,
+                keyframe,
+                keyframe_sha256,
+                annotation_state_sha256,
+            }) => Self::ActionGuideVisualAnnotationEphemeralGuide {
+                guide_digest,
+                step_source,
+                keyframe,
+                keyframe_sha256,
+                annotation_state_sha256,
+            },
             Repr::LegacyFlat(flat) => Self::SmartRedaction {
                 base_image_sha256: flat.base_image_sha256,
                 annotation_state_sha256: flat.annotation_state_sha256,
@@ -345,6 +407,34 @@ impl SourceBinding {
                 Self::ActionGuideEphemeralGuide { guide_digest: a },
                 Self::ActionGuideEphemeralGuide { guide_digest: b },
             ) => a == b,
+            (
+                Self::ActionGuideVisualAnnotationProject {
+                    project_root_sha256: a,
+                    step_source: sa,
+                    ..
+                },
+                Self::ActionGuideVisualAnnotationProject {
+                    project_root_sha256: b,
+                    step_source: sb,
+                    ..
+                },
+            ) => a == b && sa == sb,
+            (
+                Self::ActionGuideVisualAnnotationEphemeralGuide {
+                    guide_digest: ga,
+                    step_source: sa,
+                    keyframe: ka,
+                    keyframe_sha256: kha,
+                    annotation_state_sha256: asa,
+                },
+                Self::ActionGuideVisualAnnotationEphemeralGuide {
+                    guide_digest: gb,
+                    step_source: sb,
+                    keyframe: kb,
+                    keyframe_sha256: khb,
+                    annotation_state_sha256: asb,
+                },
+            ) => ga == gb && sa == sb && ka == kb && kha == khb && asa == asb,
             _ => false,
         }
     }
@@ -382,6 +472,40 @@ impl SourceBinding {
                 Self::ActionGuideEphemeralGuide { guide_digest: a },
                 Self::ActionGuideEphemeralGuide { guide_digest: b },
             ) => a == b,
+            (
+                Self::ActionGuideVisualAnnotationProject {
+                    revision: ra,
+                    projection_digest: da,
+                    keyframe: ka,
+                    keyframe_sha256: kha,
+                    annotation_state_sha256: asa,
+                    ..
+                },
+                Self::ActionGuideVisualAnnotationProject {
+                    revision: rb,
+                    projection_digest: db,
+                    keyframe: kb,
+                    keyframe_sha256: khb,
+                    annotation_state_sha256: asb,
+                    ..
+                },
+            ) => ra == rb && da == db && ka == kb && kha == khb && asa == asb,
+            (
+                Self::ActionGuideVisualAnnotationEphemeralGuide {
+                    guide_digest: ga,
+                    step_source: sa,
+                    keyframe: ka,
+                    keyframe_sha256: kha,
+                    annotation_state_sha256: asa,
+                },
+                Self::ActionGuideVisualAnnotationEphemeralGuide {
+                    guide_digest: gb,
+                    step_source: sb,
+                    keyframe: kb,
+                    keyframe_sha256: khb,
+                    annotation_state_sha256: asb,
+                },
+            ) => ga == gb && sa == sb && ka == kb && kha == khb && asa == asb,
             _ => false,
         }
     }
@@ -3170,6 +3294,22 @@ mod tests {
             SourceBinding::ActionGuideEphemeralGuide {
                 guide_digest: "cd".repeat(32),
             },
+            SourceBinding::ActionGuideVisualAnnotationProject {
+                project_root_sha256: [3u8; 32],
+                revision: 1,
+                projection_digest: "ab".repeat(32),
+                step_source: 7,
+                keyframe: 9,
+                keyframe_sha256: [4u8; 32],
+                annotation_state_sha256: [5u8; 32],
+            },
+            SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
+                guide_digest: "cd".repeat(32),
+                step_source: 7,
+                keyframe: 9,
+                keyframe_sha256: [4u8; 32],
+                annotation_state_sha256: [5u8; 32],
+            },
         ];
 
         for case in cases {
@@ -3303,6 +3443,174 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ArtifactKind::ActionGuideCaptions).unwrap(),
             "\"action_guide_captions\""
+        );
+    }
+
+    fn visual_project_binding() -> SourceBinding {
+        SourceBinding::ActionGuideVisualAnnotationProject {
+            project_root_sha256: [3; 32],
+            revision: 1,
+            projection_digest: "ab".repeat(32),
+            step_source: 7,
+            keyframe: 9,
+            keyframe_sha256: [4; 32],
+            annotation_state_sha256: [5; 32],
+        }
+    }
+
+    #[test]
+    fn visual_project_identity_is_root_and_step_source_only() {
+        let base = visual_project_binding();
+        let mut fresh_change = base.clone();
+        if let SourceBinding::ActionGuideVisualAnnotationProject { revision, .. } =
+            &mut fresh_change
+        {
+            *revision += 1;
+        }
+        assert!(base.identity_matches(&fresh_change));
+        assert!(!base.freshness_matches(&fresh_change));
+
+        let mut different_step = base.clone();
+        if let SourceBinding::ActionGuideVisualAnnotationProject {
+            step_source, ..
+        } = &mut different_step
+        {
+            *step_source += 1;
+        }
+        assert!(!base.identity_matches(&different_step));
+
+        let mut different_root = base.clone();
+        if let SourceBinding::ActionGuideVisualAnnotationProject {
+            project_root_sha256,
+            ..
+        } = &mut different_root
+        {
+            project_root_sha256[0] ^= 0xff;
+        }
+        assert!(!base.identity_matches(&different_root));
+
+        // Freshness-change fields individually break freshness but not identity.
+        let mut proj_change = base.clone();
+        if let SourceBinding::ActionGuideVisualAnnotationProject {
+            projection_digest, ..
+        } = &mut proj_change
+        {
+            projection_digest.push('x');
+        }
+        assert!(base.identity_matches(&proj_change));
+        assert!(!base.freshness_matches(&proj_change));
+
+        let mut keyframe_change = base.clone();
+        if let SourceBinding::ActionGuideVisualAnnotationProject {
+            keyframe, ..
+        } = &mut keyframe_change
+        {
+            *keyframe += 1;
+        }
+        assert!(base.identity_matches(&keyframe_change));
+        assert!(!base.freshness_matches(&keyframe_change));
+
+        let mut kh_change = base.clone();
+        if let SourceBinding::ActionGuideVisualAnnotationProject {
+            keyframe_sha256,
+            ..
+        } = &mut kh_change
+        {
+            keyframe_sha256[0] ^= 0xff;
+        }
+        assert!(base.identity_matches(&kh_change));
+        assert!(!base.freshness_matches(&kh_change));
+
+        let mut as_change = base.clone();
+        if let SourceBinding::ActionGuideVisualAnnotationProject {
+            annotation_state_sha256,
+            ..
+        } = &mut as_change
+        {
+            annotation_state_sha256[0] ^= 0xff;
+        }
+        assert!(base.identity_matches(&as_change));
+        assert!(!base.freshness_matches(&as_change));
+    }
+
+    #[test]
+    fn visual_ephemeral_identity_is_complete_variant() {
+        let a = SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
+            guide_digest: "ab".repeat(32),
+            step_source: 7,
+            keyframe: 9,
+            keyframe_sha256: [4; 32],
+            annotation_state_sha256: [5; 32],
+        };
+        let b = a.clone();
+        assert!(a.identity_matches(&b));
+        assert!(a.freshness_matches(&b));
+
+        // Any field change breaks both identity and freshness.
+        let mut changed = a.clone();
+        if let SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
+            step_source, ..
+        } = &mut changed
+        {
+            *step_source += 1;
+        }
+        assert!(!a.identity_matches(&changed));
+        assert!(!a.freshness_matches(&changed));
+    }
+
+    #[test]
+    fn visual_binding_domains_never_alias_captions() {
+        let visual = SourceBinding::ActionGuideVisualAnnotationProject {
+            project_root_sha256: [3; 32],
+            revision: 1,
+            projection_digest: "ab".repeat(32),
+            step_source: 7,
+            keyframe: 9,
+            keyframe_sha256: [4; 32],
+            annotation_state_sha256: [5; 32],
+        };
+        let caption = SourceBinding::ActionGuideProject {
+            project_root_sha256: [3; 32],
+            revision: 1,
+            projection_digest: "ab".repeat(32),
+        };
+        assert!(!visual.identity_matches(&caption));
+        assert!(!caption.identity_matches(&visual));
+
+        let visual_ephemeral = SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
+            guide_digest: "cd".repeat(32),
+            step_source: 7,
+            keyframe: 9,
+            keyframe_sha256: [4; 32],
+            annotation_state_sha256: [5; 32],
+        };
+        let ephemeral = SourceBinding::ActionGuideEphemeralGuide {
+            guide_digest: "cd".repeat(32),
+        };
+        assert!(!visual_ephemeral.identity_matches(&ephemeral));
+        assert!(!ephemeral.identity_matches(&visual_ephemeral));
+    }
+
+    #[test]
+    fn visual_annotation_wire_names_are_snake_case() {
+        let project = serde_json::to_string(&visual_project_binding()).unwrap();
+        assert!(
+            project.contains("action_guide_visual_annotation_project"),
+            "unexpected wire name: {project}"
+        );
+
+        let ephemeral =
+            serde_json::to_string(&SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
+                guide_digest: "cd".repeat(32),
+                step_source: 7,
+                keyframe: 9,
+                keyframe_sha256: [4; 32],
+                annotation_state_sha256: [5; 32],
+            })
+            .unwrap();
+        assert!(
+            ephemeral.contains("action_guide_visual_annotation_ephemeral_guide"),
+            "unexpected wire name: {ephemeral}"
         );
     }
 }
