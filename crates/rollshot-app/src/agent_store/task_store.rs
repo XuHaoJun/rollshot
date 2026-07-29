@@ -3497,12 +3497,10 @@ mod tests {
         let smart_id = smart.task_id().clone();
         let captions_id = captions.task_id().clone();
 
-        let ha = std::thread::spawn(move || {
-            a.create_audited(&smart, AuditEventId::new_v4(), 1_000)
-        });
-        let hb = std::thread::spawn(move || {
-            b.create_audited(&captions, AuditEventId::new_v4(), 1_000)
-        });
+        let ha =
+            std::thread::spawn(move || a.create_audited(&smart, AuditEventId::new_v4(), 1_000));
+        let hb =
+            std::thread::spawn(move || b.create_audited(&captions, AuditEventId::new_v4(), 1_000));
 
         ha.join().unwrap().expect("smart redaction create failed");
         hb.join().unwrap().expect("caption create failed");
@@ -3541,8 +3539,7 @@ mod tests {
     /// Seed an ephemeral guide in `ReadyForReview` — must become `Stale` on
     /// reopen.
     fn seed_ephemeral_ready_for_review(store: &TaskStore) -> ProductTaskId {
-        let id =
-            ProductTaskId::parse("task-00000000-0000-4000-8000-0000000000c1").unwrap();
+        let id = ProductTaskId::parse("task-00000000-0000-4000-8000-0000000000c1").unwrap();
         let binding = SourceBinding::ActionGuideEphemeralGuide {
             guide_digest: "aa".repeat(32),
         };
@@ -3553,7 +3550,8 @@ mod tests {
             now_ms(),
         )
         .unwrap();
-        store.create_audited(&created, AuditEventId::new_v4(), now_ms())
+        store
+            .create_audited(&created, AuditEventId::new_v4(), now_ms())
             .unwrap();
         // Walk the task through to ReadyForReview.
         let run_id = RunId::parse("run-00000000-0000-4000-8000-0000000000c1").unwrap();
@@ -3582,21 +3580,17 @@ mod tests {
     /// Seed a durable (non-ephemeral) caption in `ReadyForReview` — must be
     /// left alone on reopen.
     fn seed_durable_ready_for_review_caption(store: &TaskStore) -> ProductTaskId {
-        let id =
-            ProductTaskId::parse("task-00000000-0000-4000-8000-0000000000c2").unwrap();
+        let id = ProductTaskId::parse("task-00000000-0000-4000-8000-0000000000c2").unwrap();
         let binding = SourceBinding::ActionGuideProject {
             project_root_sha256: [3u8; 32],
             revision: 1,
             projection_digest: "bb".repeat(32),
         };
-        let created = ProductTaskSnapshot::new(
-            id.clone(),
-            TaskKind::ActionGuideCaptions,
-            binding,
-            now_ms(),
-        )
-        .unwrap();
-        store.create_audited(&created, AuditEventId::new_v4(), now_ms())
+        let created =
+            ProductTaskSnapshot::new(id.clone(), TaskKind::ActionGuideCaptions, binding, now_ms())
+                .unwrap();
+        store
+            .create_audited(&created, AuditEventId::new_v4(), now_ms())
             .unwrap();
         let run_id = RunId::parse("run-00000000-0000-4000-8000-0000000000c2").unwrap();
         let running = created
@@ -3624,8 +3618,7 @@ mod tests {
     /// Seed a smart-redaction task in `Running` — must become `Interrupted` on
     /// reopen.
     fn seed_running_smart_redaction(store: &TaskStore) -> ProductTaskId {
-        let id =
-            ProductTaskId::parse("task-00000000-0000-4000-8000-0000000000c3").unwrap();
+        let id = ProductTaskId::parse("task-00000000-0000-4000-8000-0000000000c3").unwrap();
         let binding = SourceBinding::smart_redaction([4u8; 32], [5u8; 32], 0, "p".into(), None);
         let created = ProductTaskSnapshot::new(
             id.clone(),
@@ -3634,7 +3627,8 @@ mod tests {
             now_ms(),
         )
         .unwrap();
-        store.create_audited(&created, AuditEventId::new_v4(), now_ms())
+        store
+            .create_audited(&created, AuditEventId::new_v4(), now_ms())
             .unwrap();
         let run_id = RunId::parse("run-00000000-0000-4000-8000-0000000000c3").unwrap();
         let running = created
@@ -3651,21 +3645,17 @@ mod tests {
 
     /// Seed a caption task in `Running` — must become `Interrupted` on reopen.
     fn seed_running_caption(store: &TaskStore) -> ProductTaskId {
-        let id =
-            ProductTaskId::parse("task-00000000-0000-4000-8000-0000000000c4").unwrap();
+        let id = ProductTaskId::parse("task-00000000-0000-4000-8000-0000000000c4").unwrap();
         let binding = SourceBinding::ActionGuideProject {
             project_root_sha256: [6u8; 32],
             revision: 1,
             projection_digest: "cc".repeat(32),
         };
-        let created = ProductTaskSnapshot::new(
-            id.clone(),
-            TaskKind::ActionGuideCaptions,
-            binding,
-            now_ms(),
-        )
-        .unwrap();
-        store.create_audited(&created, AuditEventId::new_v4(), now_ms())
+        let created =
+            ProductTaskSnapshot::new(id.clone(), TaskKind::ActionGuideCaptions, binding, now_ms())
+                .unwrap();
+        store
+            .create_audited(&created, AuditEventId::new_v4(), now_ms())
             .unwrap();
         let run_id = RunId::parse("run-00000000-0000-4000-8000-0000000000c4").unwrap();
         let running = created
@@ -3682,21 +3672,17 @@ mod tests {
 
     /// Seed a caption task in `Completed` — must be left alone on reopen.
     fn seed_completed_caption(store: &TaskStore) -> ProductTaskId {
-        let id =
-            ProductTaskId::parse("task-00000000-0000-4000-8000-0000000000c5").unwrap();
+        let id = ProductTaskId::parse("task-00000000-0000-4000-8000-0000000000c5").unwrap();
         let binding = SourceBinding::ActionGuideProject {
             project_root_sha256: [7u8; 32],
             revision: 1,
             projection_digest: "dd".repeat(32),
         };
-        let created = ProductTaskSnapshot::new(
-            id.clone(),
-            TaskKind::ActionGuideCaptions,
-            binding,
-            now_ms(),
-        )
-        .unwrap();
-        store.create_audited(&created, AuditEventId::new_v4(), now_ms())
+        let created =
+            ProductTaskSnapshot::new(id.clone(), TaskKind::ActionGuideCaptions, binding, now_ms())
+                .unwrap();
+        store
+            .create_audited(&created, AuditEventId::new_v4(), now_ms())
             .unwrap();
         let run_id = RunId::parse("run-00000000-0000-4000-8000-0000000000c5").unwrap();
         let running = created
@@ -3766,7 +3752,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (smart_id, caption_id) = {
             let store = crate::agent_store::open_process_store(dir.path()).unwrap();
-            (seed_running_smart_redaction(&store), seed_running_caption(&store))
+            (
+                seed_running_smart_redaction(&store),
+                seed_running_caption(&store),
+            )
         };
 
         let reopened = crate::agent_store::open_process_store(dir.path()).unwrap();

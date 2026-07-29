@@ -1,5 +1,6 @@
 pub mod audit;
 pub mod authority;
+pub mod captions;
 pub mod continuity;
 pub mod domain;
 pub mod driver;
@@ -10,7 +11,6 @@ pub(crate) mod provider;
 pub mod runtime;
 pub mod skills;
 pub mod tools;
-pub mod captions;
 pub mod visual_annotation;
 
 pub use provider::{AnthropicAdapter, OpenAIAdapter, ProviderAdapter, StreamBounds};

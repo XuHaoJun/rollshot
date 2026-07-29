@@ -983,10 +983,8 @@ const BUNDLED_BODY: &str = include_str!("../skills/smart-redaction/SKILL.md");
 /// Well-known package ID for the bundled Action Guide captions skill.
 pub const ACTION_GUIDE_CAPTIONS_PACKAGE_ID: &str = "action-guide-captions";
 
-const CAPTIONS_BUNDLED_BODY: &str =
-    include_str!("../skills/action-guide-captions/SKILL.md");
-const CAPTIONS_BUNDLED_MANIFEST: &str =
-    include_str!("../skills/action-guide-captions/skill.toml");
+const CAPTIONS_BUNDLED_BODY: &str = include_str!("../skills/action-guide-captions/SKILL.md");
+const CAPTIONS_BUNDLED_MANIFEST: &str = include_str!("../skills/action-guide-captions/skill.toml");
 
 static BUNDLED_REPORT: LazyLock<CatalogBuildReport> = LazyLock::new(|| {
     let limits = SkillCatalogLimits::v1();
@@ -2160,7 +2158,8 @@ main = "SKILL.md"
     fn bundled_caption_skill_golden_digest_stable() {
         // Golden digest \u2014 update only when SKILL.md or skill.toml content
         // changes. Mirrors bundled_smart_redaction_golden_digest_stable.
-        let skill_use = super::bundled_action_guide_captions_use().expect("caption skill must resolve");
+        let skill_use =
+            super::bundled_action_guide_captions_use().expect("caption skill must resolve");
         let expected = "3aaa0566bd4cb28eecc87f964c093a4d3bceeb7c0e4d0de0860a43988cb865db";
         assert_eq!(
             skill_use.digest(),
