@@ -1904,12 +1904,27 @@ mod tests {
         );
 
         // Per-suggestion: at least one "Accept" and "Reject" button.
+        // `find("Accept")` uses exact text match, so it does not match
+        // the header's "Accept all" button — verify they are distinct.
         let accept_btn = ui
             .find("Accept")
             .expect("per-suggestion Accept button must be present");
         assert!(
             accept_btn.visible_bounds().is_some(),
             "per-suggestion Accept button must be visible"
+        );
+        assert_ne!(
+            accept_btn.visible_bounds(),
+            accept_all.visible_bounds(),
+            "per-suggestion Accept must be distinct from Accept all"
+        );
+
+        let reject_btn = ui
+            .find("Reject")
+            .expect("per-suggestion Reject button must be present");
+        assert!(
+            reject_btn.visible_bounds().is_some(),
+            "per-suggestion Reject button must be visible"
         );
 
         // Capture snapshot for visual evidence.
