@@ -1,5 +1,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use image::RgbaImage;
 
@@ -222,6 +224,7 @@ fn cleanup_temp(temp_path: &Path) {
 pub(crate) fn run_encoder(
     config: crate::RunConfig,
     receiver: LatestFrameReceiver,
+    ffmpeg_child_pid: Arc<AtomicU32>,
 ) -> Result<EncoderSummary, PipelineError> {
     let temp_path = temp_output_path(&config.output);
 
@@ -264,6 +267,9 @@ pub(crate) fn run_encoder(
             category: io_error_category(&e),
         }
     })?;
+
+    // Publish child PID for RSS sampling from the producer thread.
+    ffmpeg_child_pid.store(child.id(), Ordering::Release);
 
     // Drain stderr on its own thread BEFORE writing frames (deadlock prevention).
     let mut stderr = child.stderr.take().expect("stderr was piped");
@@ -446,7 +452,8 @@ mod tests {
         let (sender, receiver) = latest_frame_mailbox(2);
         drop(sender);
 
-        let result = run_encoder(config.clone(), receiver);
+        let pid = Arc::new(AtomicU32::new(0));
+        let result = run_encoder(config.clone(), receiver, pid);
         assert!(matches!(result, Err(PipelineError::Exit { .. })));
         assert!(!config.output.exists());
         assert!(!temp_output_path(&config.output).exists());
@@ -472,7 +479,8 @@ mod tests {
         let (sender, receiver) = latest_frame_mailbox(2);
         drop(sender);
 
-        let result = run_encoder(config.clone(), receiver);
+        let pid = Arc::new(AtomicU32::new(0));
+        let result = run_encoder(config.clone(), receiver, pid);
         assert!(matches!(result, Err(PipelineError::Spawn { .. })));
         assert!(!config.output.exists());
         assert!(!temp_output_path(&config.output).exists());

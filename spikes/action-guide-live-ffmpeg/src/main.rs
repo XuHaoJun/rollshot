@@ -1,7 +1,11 @@
+mod metrics;
 mod pipeline;
 mod workload;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 // Dead code suppression: path fields are consumed by run_encoder (future task).
 #[allow(dead_code)]
@@ -149,25 +153,258 @@ pub(crate) fn parse_args(args: &[String]) -> Result<RunConfig, String> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    // Skip binary name
-    match parse_args(&args[1..]) {
-        Ok(config) => {
-            // Task 3 will replace this with the actual run.
-            // Print validated numeric fields only — no path fields.
-            println!(
-                "validated: {}x{} @{} fps, {}s, queue={}",
-                config.width,
-                config.height,
-                config.fps,
-                config.duration_secs,
-                config.queue_capacity
-            );
-            std::process::exit(0);
-        }
+    let config = match parse_args(&args[1..]) {
+        Ok(c) => c,
         Err(e) => {
             eprintln!("error: {e}");
             std::process::exit(1);
         }
+    };
+
+    // Ensure report parent directory exists.
+    if let Some(parent) = config.report.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let total_frames = config.duration_secs * config.fps as u64;
+    let frame_interval = Duration::from_nanos(1_000_000_000 / config.fps as u64);
+    let start = Instant::now();
+
+    // Shared PID for RSS sampling of the FFmpeg child.
+    let ffmpeg_child_pid = Arc::new(AtomicU32::new(0));
+
+    // Create mailbox.
+    let (sender, receiver) =
+        pipeline::latest_frame_mailbox(config.queue_capacity);
+
+    // Spawn encoder worker thread.
+    let encoder_config = config.clone();
+    let encoder_pid = Arc::clone(&ffmpeg_child_pid);
+    let encoder_handle = std::thread::spawn(move || {
+        pipeline::run_encoder(encoder_config, receiver, encoder_pid)
+    });
+
+    // Metrics accumulators.
+    let mut offer_latencies_us: Vec<u64> = Vec::with_capacity(total_frames as usize);
+    let mut offer_outcomes: Vec<String> = Vec::with_capacity(total_frames as usize);
+    let mut self_rss_samples: Vec<metrics::RssResult> = Vec::new();
+    let mut ffmpeg_rss_samples: Vec<metrics::RssResult> = Vec::new();
+    let mut windows: Vec<metrics::OfferWindow> = Vec::new();
+    let mut current_window_offered: u64 = 0;
+    let mut current_window_replaced: u64 = 0;
+    let mut last_second: u64 = 0;
+
+    // Producer loop.
+    for frame_index in 0..total_frames {
+        // Render deterministic frame outside the timed section.
+        let frame_image = workload::render_frame(&config, frame_index);
+
+        // Sleep until this frame's absolute deadline.
+        let deadline = start + frame_interval * frame_index as u32;
+        let now = Instant::now();
+        if deadline > now {
+            std::thread::sleep(deadline - now);
+        }
+
+        // Timed section: clone and offer.
+        let offer_start = Instant::now();
+        let timed = pipeline::TimedFrame {
+            at_ms: frame_index * 1_000 / config.fps as u64,
+            image: frame_image.clone(),
+        };
+        let result = sender.offer(timed);
+        let offer_us = offer_start.elapsed().as_micros() as u64;
+
+        offer_latencies_us.push(offer_us);
+        offer_outcomes.push(format!("{result:?}"));
+
+        // Track offer outcomes for window.
+        current_window_offered += 1;
+        match result {
+            pipeline::OfferResult::ReplacedOldest | pipeline::OfferResult::Disconnected => {
+                current_window_replaced += 1;
+            }
+            pipeline::OfferResult::Queued => {}
+        }
+
+        // Sample RSS on second boundaries.
+        let current_second = frame_index / config.fps as u64;
+        if current_second > last_second {
+            // Flush completed window.
+            windows.push(metrics::OfferWindow {
+                offered: current_window_offered,
+                replaced_or_dropped: current_window_replaced,
+            });
+            current_window_offered = 0;
+            current_window_replaced = 0;
+
+            self_rss_samples.push(sample_rss(std::process::id()));
+            let ff_pid = ffmpeg_child_pid.load(Ordering::Acquire);
+            if ff_pid != 0 {
+                ffmpeg_rss_samples.push(sample_rss(ff_pid));
+            }
+            last_second = current_second;
+        }
+    }
+
+    // Flush the final window.
+    windows.push(metrics::OfferWindow {
+        offered: current_window_offered,
+        replaced_or_dropped: current_window_replaced,
+    });
+
+    // Disconnect sender; encoder will drain remaining and finish.
+    drop(sender);
+
+    // Wait for encoder.
+    let encoder_result = encoder_handle.join().expect("encoder thread panicked");
+
+    let summary = match encoder_result {
+        Ok(s) => s,
+        Err(e) => {
+            let category = match &e {
+                pipeline::PipelineError::Spawn { .. } => metrics::FailureCategory::EncoderSpawn,
+                pipeline::PipelineError::Write { .. } => metrics::FailureCategory::EncoderWrite,
+                pipeline::PipelineError::Exit { .. } => metrics::FailureCategory::EncoderExit,
+                pipeline::PipelineError::Rename { .. } => metrics::FailureCategory::EncoderRename,
+            };
+            write_failure_report(&config, &self_rss_samples, &ffmpeg_rss_samples,
+                &offer_latencies_us, &offer_outcomes, &windows, category);
+            eprintln!("encoder error");
+            std::process::exit(1);
+        }
+    };
+
+    // Validate output exists.
+    if !config.output.exists() {
+        write_failure_report(&config, &self_rss_samples, &ffmpeg_rss_samples,
+            &offer_latencies_us, &offer_outcomes, &windows,
+            metrics::FailureCategory::EncoderExit);
+        eprintln!("output file missing after encoding");
+        std::process::exit(1);
+    }
+
+    // Probe the output.
+    let probe = match metrics::run_probe(
+        &config.ffprobe,
+        &config.output,
+        config.width,
+        config.height,
+        config.fps,
+    ) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            eprintln!("probe error: {e}");
+            None
+        }
+    };
+
+    // Build report.
+    let report = metrics::RunReport {
+        width: config.width,
+        height: config.height,
+        fps: config.fps,
+        duration_secs: config.duration_secs,
+        queue_capacity: config.queue_capacity,
+        encoder_frames_written: summary.frames_written,
+        encoder_exit_status: summary.ffmpeg_exit_status,
+        offer_latencies_us: offer_latencies_us.clone(),
+        offer_outcomes: offer_outcomes.clone(),
+        windows: windows.clone(),
+        self_rss: self_rss_samples.clone(),
+        ffmpeg_rss: ffmpeg_rss_samples.clone(),
+        probe: probe.clone(),
+        memory_gate: metrics::MemoryGateStatus {
+            test_result: metrics::TestResult::Pass,
+            peak_to_trough_mib: 0,
+            slope_mib_per_min: 0.0,
+        },
+        gate_decision: metrics::GateDecision {
+            decision: metrics::Decision::Go,
+            failed_gates: vec![],
+        },
+        failure_category: None,
+        environment: metrics::gather_environment(&config.ffmpeg, &config.ffprobe),
+    };
+
+    // Evaluate gates.
+    let (gate_decision, memory_gate_status) = metrics::evaluate(report.clone());
+
+    // Build final report with gate decision.
+    let mut final_report = report;
+    final_report.gate_decision = gate_decision.clone();
+    final_report.memory_gate = memory_gate_status;
+
+    // Write JSON report.
+    match serde_json::to_string_pretty(&final_report) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&config.report, json) {
+                eprintln!("warning: failed to write report: {e}");
+            }
+        }
+        Err(e) => {
+            eprintln!("warning: failed to serialize report: {e}");
+        }
+    }
+
+    // Exit based on gate decision.
+    match gate_decision.decision {
+        metrics::Decision::Go => std::process::exit(0),
+        metrics::Decision::NoGo => {
+            eprintln!("NO-GO: failed gates: {:?}", gate_decision.failed_gates);
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Sample RSS for a PID. Returns Error result on failure.
+fn sample_rss(pid: u32) -> metrics::RssResult {
+    match metrics::rss_kib(pid) {
+        Ok(kib) => metrics::RssResult::Ok { kib },
+        Err(e) => metrics::RssResult::Error {
+            reason: e.to_string(),
+        },
+    }
+}
+
+/// Write a failure report and exit with code 1.
+fn write_failure_report(
+    config: &RunConfig,
+    self_rss: &[metrics::RssResult],
+    ffmpeg_rss: &[metrics::RssResult],
+    offer_latencies_us: &[u64],
+    offer_outcomes: &[String],
+    windows: &[metrics::OfferWindow],
+    category: metrics::FailureCategory,
+) {
+    let report = metrics::RunReport {
+        width: config.width,
+        height: config.height,
+        fps: config.fps,
+        duration_secs: config.duration_secs,
+        queue_capacity: config.queue_capacity,
+        encoder_frames_written: 0,
+        encoder_exit_status: -1,
+        offer_latencies_us: offer_latencies_us.to_vec(),
+        offer_outcomes: offer_outcomes.to_vec(),
+        windows: windows.to_vec(),
+        self_rss: self_rss.to_vec(),
+        ffmpeg_rss: ffmpeg_rss.to_vec(),
+        probe: None,
+        memory_gate: metrics::MemoryGateStatus {
+            test_result: metrics::TestResult::Untested,
+            peak_to_trough_mib: 0,
+            slope_mib_per_min: 0.0,
+        },
+        gate_decision: metrics::GateDecision {
+            decision: metrics::Decision::NoGo,
+            failed_gates: vec![],
+        },
+        failure_category: Some(category),
+        environment: metrics::gather_environment(&config.ffmpeg, &config.ffprobe),
+    };
+    if let Ok(json) = serde_json::to_string_pretty(&report) {
+        let _ = std::fs::write(&config.report, json);
     }
 }
 
