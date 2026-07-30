@@ -1,9 +1,9 @@
 # Native Action Guide Motion Recording Design
 
-**Date:** 2026-07-30  
-**Status:** Approved; awaiting implementation plan  
-**Area:** Action Guide, capture, project assets, video export  
-**Branch:** `feat/native-action-guide-motion-recording`  
+**Date:** 2026-07-30
+**Status:** Approved; awaiting implementation plan
+**Area:** Action Guide, capture, project assets, video export
+**Branch:** `feat/native-action-guide-motion-recording`
 **Motivating idea:**
 [`docs/ideas/2026-07-22-agent-skills-action-guide-launch-video.md`](../../ideas/2026-07-22-agent-skills-action-guide-launch-video.md)
 
@@ -92,7 +92,7 @@ video editor.
 After **Record new**, Rollshot presents a compact preflight choice. The new
 option is off by default:
 
-> **Keep a silent screen recording**  
+> **Keep a silent screen recording**
 > Saves the complete motion inside the Action Guide capture region with the
 > project. No system audio or microphone.
 
