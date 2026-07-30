@@ -1,3 +1,4 @@
+mod pipeline;
 mod workload;
 
 use std::path::PathBuf;
