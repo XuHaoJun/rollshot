@@ -70,7 +70,7 @@ UNTESTED — Linux hard gate failed first; macOS run not dispatched.
 - **Offer outcomes:** 18,000 Queued, 0 ReplacedOldest, 0 Disconnected
 - **Offer latency (µs):** p50 = 1300, p99 = 1557, max = 4302, min = 394
 - **Saturation windows:** 0 of 120 five-second windows above 10% replacement/drop threshold
-- **Self RSS:** 27.2–27.8 MiB across 599 samples (1 MiB peak-to-trough per report), slope 0.13 MiB/min
+- **Self RSS:** 26.5–27.8 MiB across 599 samples (1 MiB peak-to-trough per report), slope 0.13 MiB/min
 - **FFmpeg RSS:** 450–728 MiB, stabilizing after warm-up with slow 0.69 MiB/min growth
 - **Probe:** H.264, 1920×1080, 30/1 fps, duration 600,000 ms, 0 audio streams
 
