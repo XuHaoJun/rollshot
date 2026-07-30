@@ -2289,7 +2289,9 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                 ),
                 _ => format!("All {stale} visual annotation suggestions were stale."),
             });
-            schedule_visual_review_persistence(state)
+            let update = schedule_visual_review_persistence(state);
+            state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
+            update
         }
         Message::RejectVisualAnnotationSuggestion => {
             if state.visual_annotation_review_persisting {
