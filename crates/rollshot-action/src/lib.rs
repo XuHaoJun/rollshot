@@ -73,6 +73,7 @@ pub use video_import::{
 pub use visual_annotation_proposal::{
     VisualAnnotationApplyOutcome, VisualAnnotationBase, VisualAnnotationPayload,
     VisualAnnotationProposal, VisualAnnotationProposalError, VisualAnnotationProposalId,
-    VisualAnnotationProvenance, VisualAnnotationSuggestion, VisualAnnotationSuggestionDraft,
-    VisualAnnotationSuggestionId, VisualAnnotationSuggestionStatus, MAX_VISUAL_SUGGESTIONS,
+    VisualAnnotationProposalOrigin, VisualAnnotationProvenance, VisualAnnotationSuggestion,
+    VisualAnnotationSuggestionDraft, VisualAnnotationSuggestionId,
+    VisualAnnotationSuggestionStatus, MAX_VISUAL_SUGGESTIONS,
 };

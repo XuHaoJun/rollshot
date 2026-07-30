@@ -347,6 +347,19 @@ pub struct TimelineWorkspace {
     /// Monotonic local run id for visual annotation suggestion provenance.
     #[allow(dead_code)]
     pub(crate) visual_annotation_agent_run_id: u64,
+    /// Task store ID of the visual annotation task created for the current
+    /// suggestion run. `None` until the suggestion run creates a task.
+    #[allow(dead_code)]
+    pub(crate) visual_annotation_task_id: Option<rollshot_agent::product_task::ProductTaskId>,
+    /// Cached `ReadyForReview` snapshot for the current visual annotation
+    /// proposal. `None` until the suggestion run promotes the task.
+    #[allow(dead_code)]
+    pub(crate) visual_annotation_review_snapshot:
+        Option<rollshot_agent::product_task::ProductTaskSnapshot>,
+    /// A visual annotation review decision is being durably committed;
+    /// serializes subsequent decisions.
+    #[allow(dead_code)]
+    pub(crate) visual_annotation_review_persisting: bool,
     /// Monotonic operation id for storyboard copy provenance and late-result
     /// race protection. Incremented on each [`CopyStoryboardRequested`].
     pub(crate) storyboard_copy_operation_id: u64,
@@ -444,6 +457,9 @@ impl TimelineWorkspace {
             caption_review_persisting: false,
             visual_annotation_suggestion: VisualAnnotationSuggestionState::Idle,
             visual_annotation_agent_run_id: 0,
+            visual_annotation_task_id: None,
+            visual_annotation_review_snapshot: None,
+            visual_annotation_review_persisting: false,
             storyboard_copy_operation_id: 0,
             export_state: GuideExportState::Idle,
             last_export: None,
@@ -536,6 +552,9 @@ impl TimelineWorkspace {
             caption_review_persisting: false,
             visual_annotation_suggestion: VisualAnnotationSuggestionState::Idle,
             visual_annotation_agent_run_id: 0,
+            visual_annotation_task_id: None,
+            visual_annotation_review_snapshot: None,
+            visual_annotation_review_persisting: false,
             storyboard_copy_operation_id: 0,
             export_state: GuideExportState::Idle,
             last_export: None,
@@ -860,6 +879,46 @@ impl TimelineWorkspace {
     }
 }
 
+/// Pure context selection helper for visual annotation dispatch.
+/// Returns [`VisualAnnotationContextRequest::Durable`] only when the project
+/// is saved and clean; otherwise returns [`VisualAnnotationContextRequest::Ephemeral`]
+/// with the current guide cloned from the workspace.
+#[cfg(feature = "action-guide")]
+pub(crate) fn visual_annotation_context_request(
+    ws: &TimelineWorkspace,
+) -> crate::timeline_workspace::visual_annotation_agent::VisualAnnotationContextRequest {
+    use crate::timeline_workspace::visual_annotation_agent::VisualAnnotationContextRequest;
+
+    if let (
+        Some(project::ProjectSession::Saved {
+            root,
+            base_revision,
+            ..
+        }),
+        ProjectSaveState::Clean,
+    ) = (&ws.project_session, ws.save_state)
+    {
+        let step = ws
+            .selected_step()
+            .expect("selected step for context request");
+        VisualAnnotationContextRequest::Durable {
+            root: root.clone(),
+            expected_revision: *base_revision,
+            step_source: step.source,
+            keyframe: step.keyframe,
+        }
+    } else {
+        let step = ws
+            .selected_step()
+            .expect("selected step for context request");
+        VisualAnnotationContextRequest::Ephemeral {
+            guide: ws.guide.clone(),
+            step_source: step.source,
+            keyframe: step.keyframe,
+        }
+    }
+}
+
 /// Build an iced image handle from a retained RGBA frame.
 ///
 /// NOTE: this clones the raw pixel bytes into the handle. It is only called
@@ -974,7 +1033,8 @@ mod tests {
         ActionRecorder, CandidateKind, CandidateStep, CaptureRegion, DetectReason, DetectorConfig,
         FrameStore, InputCapability, InputSourceKind, Recording, StoreConfig,
         VisualAnnotationPayload, VisualAnnotationProposal, VisualAnnotationProposalId,
-        VisualAnnotationSuggestionDraft, VisualAnnotationSuggestionId,
+        VisualAnnotationProposalOrigin, VisualAnnotationSuggestionDraft,
+        VisualAnnotationSuggestionId,
     };
 
     fn region_32() -> CaptureRegion {
@@ -1059,10 +1119,15 @@ mod tests {
         VisualAnnotationProposal::from_agent_drafts(
             VisualAnnotationProposalId(1),
             1,
+            VisualAnnotationProposalOrigin::EphemeralGuide {
+                guide_digest: "aa".repeat(32),
+            },
             step,
             doc.document.state_id(),
             image.width(),
             image.height(),
+            [1u8; 32],
+            [2u8; 32],
             vec![
                 VisualAnnotationSuggestionDraft {
                     id: VisualAnnotationSuggestionId(1),
@@ -2845,6 +2910,92 @@ mod tests {
             );
         }
 
+        // ---- Visual annotation context request tests (Task 10) ----
+
+        #[test]
+        fn visual_context_request_fields_initialized_empty_in_from_imported_video() {
+            let (seed, _parent) = imported_seed_fixture();
+            let ws = TimelineWorkspace::from_imported_video(seed);
+            assert!(ws.visual_annotation_task_id.is_none());
+            assert!(ws.visual_annotation_review_snapshot.is_none());
+            assert!(!ws.visual_annotation_review_persisting);
+        }
+
+        #[test]
+        fn visual_context_request_fields_initialized_empty_in_new() {
+            let ws = workspace(recording_from_frames());
+            assert!(ws.visual_annotation_task_id.is_none());
+            assert!(ws.visual_annotation_review_snapshot.is_none());
+            assert!(!ws.visual_annotation_review_persisting);
+        }
+
+        #[test]
+        fn visual_context_request_fields_initialized_empty_in_from_loaded_project() {
+            let ws = ws_project_backed();
+            assert!(ws.visual_annotation_task_id.is_none());
+            assert!(ws.visual_annotation_review_snapshot.is_none());
+            assert!(!ws.visual_annotation_review_persisting);
+        }
+
+        #[test]
+        fn visual_context_request_uses_durable_only_for_saved_clean_project() {
+            // Saved + Clean → Durable
+            let ws = ws_project_backed();
+            assert_eq!(ws.save_state, ProjectSaveState::Clean);
+            assert!(ws.project_session.is_some());
+            let request = super::super::visual_annotation_context_request(&ws);
+            match request {
+                super::super::visual_annotation_agent::VisualAnnotationContextRequest::Durable {
+                    root,
+                    expected_revision,
+                    step_source,
+                    keyframe,
+                } => {
+                    assert_eq!(root, std::path::PathBuf::from("/tmp/test-project"));
+                    assert_eq!(expected_revision, 1);
+                    let step = ws.selected_step().expect("selected step");
+                    assert_eq!(step_source, step.source);
+                    assert_eq!(keyframe, step.keyframe);
+                }
+                _ => panic!("expected Durable for saved clean project"),
+            }
+
+            // Saved + Dirty → Ephemeral
+            let mut ws = ws_project_backed();
+            ws.save_state = ProjectSaveState::Dirty;
+            let request = super::super::visual_annotation_context_request(&ws);
+            match request {
+                super::super::visual_annotation_agent::VisualAnnotationContextRequest::Ephemeral {
+                    guide: _,
+                    step_source,
+                    keyframe,
+                } => {
+                    let step = ws.selected_step().expect("selected step");
+                    assert_eq!(step_source, step.source);
+                    assert_eq!(keyframe, step.keyframe);
+                }
+                _ => panic!("expected Ephemeral for dirty project"),
+            }
+
+            // Unsaved → Ephemeral
+            let ws = workspace(recording_from_frames());
+            assert!(ws.project_session.is_none());
+            let request = super::super::visual_annotation_context_request(&ws);
+            match request {
+                super::super::visual_annotation_agent::VisualAnnotationContextRequest::Ephemeral {
+                    guide,
+                    step_source,
+                    keyframe,
+                } => {
+                    assert_eq!(guide.steps().len(), ws.guide.steps().len());
+                    let step = ws.selected_step().expect("selected step");
+                    assert_eq!(step_source, step.source);
+                    assert_eq!(keyframe, step.keyframe);
+                }
+                _ => panic!("expected Ephemeral for unsaved project"),
+            }
+        }
+
         fn ws_project_backed_with_visual_proposal() -> (
             TimelineWorkspace,
             rollshot_action::VisualAnnotationSuggestionId,
@@ -2867,10 +3018,15 @@ mod tests {
             let proposal = rollshot_action::VisualAnnotationProposal::from_agent_drafts(
                 rollshot_action::VisualAnnotationProposalId(1),
                 1,
+                rollshot_action::VisualAnnotationProposalOrigin::EphemeralGuide {
+                    guide_digest: "aa".repeat(32),
+                },
                 &step,
                 doc.document.state_id(),
                 image.width(),
                 image.height(),
+                [1u8; 32],
+                [2u8; 32],
                 vec![rollshot_action::VisualAnnotationSuggestionDraft {
                     id: suggestion_id,
                     payload: rollshot_action::VisualAnnotationPayload::TextNote {

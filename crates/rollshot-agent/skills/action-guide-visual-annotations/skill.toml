@@ -1,0 +1,6 @@
+schema_version = 1
+package_id = "action-guide-visual-annotations"
+name = "Action Guide Visual Annotations"
+description = "Suggest reviewable visual annotations for one Action Guide keyframe."
+declared_version = "1"
+main = "SKILL.md"

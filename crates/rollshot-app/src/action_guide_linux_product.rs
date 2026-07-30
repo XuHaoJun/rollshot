@@ -36,7 +36,7 @@ pub(crate) enum Phase {
 #[derive(Debug, Clone)]
 pub(crate) enum Message {
     Home(action_guide_home::Message),
-    Timeline(crate::timeline_workspace::Message),
+    Timeline(Box<crate::timeline_workspace::Message>),
     SelectionInspected {
         path: std::path::PathBuf,
         kind: SelectedDirectoryKind,
@@ -152,7 +152,9 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
                     let mut ws =
                         crate::timeline_workspace::TimelineWorkspace::from_imported_video(seed);
                     ws.task_store = Some(state.task_store.clone());
-                    let initial_load = ws.initial_frame_load_task().map(Message::Timeline);
+                    let initial_load = ws
+                        .initial_frame_load_task()
+                        .map(|m| Message::Timeline(Box::new(m)));
                     state.timeline = Some(ws);
                     state.phase = Phase::Timeline;
                     initial_load
@@ -163,9 +165,11 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
             let Some(ref mut ws) = state.timeline else {
                 return iced::Task::none();
             };
-            let result = crate::timeline_workspace::update(ws, tl_msg);
+            let result = crate::timeline_workspace::update(ws, *tl_msg);
             match result.effect {
-                crate::timeline_workspace::Effect::None => result.task.map(Message::Timeline),
+                crate::timeline_workspace::Effect::None => {
+                    result.task.map(|m| Message::Timeline(Box::new(m)))
+                }
                 crate::timeline_workspace::Effect::CloseWorkspace => {
                     state.timeline = None;
                     state.phase = Phase::Home;
@@ -221,7 +225,9 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
                     if let Some((root, display_name)) = ws.project_recent_metadata() {
                         state.home.record_project_open(root, display_name);
                     }
-                    let initial_load = ws.initial_frame_load_task().map(Message::Timeline);
+                    let initial_load = ws
+                        .initial_frame_load_task()
+                        .map(|m| Message::Timeline(Box::new(m)));
                     state.timeline = Some(ws);
                     state.phase = Phase::Timeline;
                     state.home.opening = false;
@@ -262,7 +268,7 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
             if state.phase == Phase::Timeline {
                 update(
                     state,
-                    Message::Timeline(crate::timeline_workspace::Message::CloseRequested),
+                    Message::Timeline(Box::new(crate::timeline_workspace::Message::CloseRequested)),
                 )
             } else {
                 iced::window::close(id)
@@ -279,7 +285,7 @@ fn view(state: &State, _window: iced::window::Id) -> iced::Element<'_, Message> 
         Phase::LockConflict => lock_conflict_view(),
         Phase::Timeline => {
             if let Some(ref ws) = state.timeline {
-                crate::timeline_workspace::view(ws).map(Message::Timeline)
+                crate::timeline_workspace::view(ws).map(|m| Message::Timeline(Box::new(m)))
             } else {
                 iced::widget::text("No timeline loaded").into()
             }
@@ -323,7 +329,7 @@ fn subscription(state: &State) -> iced::Subscription<Message> {
         ]),
         Phase::Timeline => {
             if let Some(ref ws) = state.timeline {
-                crate::timeline_workspace::subscription(ws).map(Message::Timeline)
+                crate::timeline_workspace::subscription(ws).map(|m| Message::Timeline(Box::new(m)))
             } else {
                 iced::Subscription::none()
             }
@@ -785,7 +791,7 @@ mod tests {
 
         let task = update(
             &mut state,
-            Message::Timeline(crate::timeline_workspace::Message::ConfirmDiscard),
+            Message::Timeline(Box::new(crate::timeline_workspace::Message::ConfirmDiscard)),
         );
         assert_eq!(state.phase, Phase::Home);
         assert!(state.timeline.is_none());
@@ -814,7 +820,7 @@ mod tests {
 
         let task = update(
             &mut state,
-            Message::Timeline(crate::timeline_workspace::Message::SelectStep(1)),
+            Message::Timeline(Box::new(crate::timeline_workspace::Message::SelectStep(1))),
         );
         assert_eq!(state.phase, Phase::Home);
         assert!(task.units() == 0);

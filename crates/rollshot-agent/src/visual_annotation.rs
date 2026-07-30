@@ -74,9 +74,19 @@ pub enum VisualAnnotationRunTerminal {
     Suggested(Vec<VisualAnnotationDraft>),
     NoSuggestion(VisualAnnotationNoSuggestion),
     Cancelled,
-    BudgetExhausted { dimension: BudgetDimension },
+    BudgetExhausted {
+        dimension: BudgetDimension,
+    },
     ProviderFailure,
     ProtocolFailure,
+    /// The authority snapshot does not grant the required operation.
+    AuthorityDenied {
+        operation: crate::authority::RunOperation,
+    },
+    /// Required audit evidence could not be durably appended.
+    AuditFailure {
+        category: crate::audit::AuditFailureCategory,
+    },
 }
 
 // ---------- Internal tagged schema (private) ----------
@@ -1013,6 +1023,52 @@ pub(crate) mod tests {
             })
         }
 
+        /// Permissive authority for visual annotation tests — grants both
+        /// `DiscloseScreenshotAttachment` and `SubmitReviewCandidate`.
+        pub(crate) fn va_authority() -> (
+            crate::authority::AuthoritySnapshot,
+            crate::authority::AuthoritySubject,
+        ) {
+            use crate::authority::{
+                AuthorityBinding, AuthoritySnapshot, AuthoritySubject, DisclosureCeiling,
+                RunOperation,
+            };
+            use crate::domain::RunId;
+            use crate::product_task::{ProductTaskId, TaskAttemptId};
+            use std::collections::BTreeSet;
+
+            let task_id =
+                ProductTaskId::parse("task-00000000-0000-4000-8000-000000000001").unwrap();
+            let run_id = RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap();
+            let subject = AuthoritySubject::ActionGuideEphemeralGuide {
+                guide_digest: "aa".repeat(32),
+            };
+            let mut grants = BTreeSet::new();
+            grants.insert(RunOperation::DiscloseScreenshotAttachment);
+            grants.insert(RunOperation::SubmitReviewCandidate);
+            let binding =
+                AuthorityBinding::new(task_id, TaskAttemptId::new(1), run_id, subject.clone());
+            let authority = AuthoritySnapshot::new(
+                binding,
+                "rollshot-v1".to_owned(),
+                DisclosureCeiling::FullScreenshot,
+                true,
+                BTreeSet::new(),
+                grants,
+            )
+            .unwrap();
+            (authority, subject)
+        }
+
+        pub(crate) fn va_profile() -> crate::driver::VisualAnnotationProfile<'static> {
+            let skill = crate::skills::bundled_action_guide_visual_annotations_use()
+                .expect("bundled visual skill must resolve");
+            // Leak the SkillUse so the profile can borrow it with 'static.
+            let skill: &'static crate::skills::SkillUse = Box::leak(Box::new(skill));
+            crate::driver::VisualAnnotationProfile::from_skill(skill)
+                .expect("bundled visual skill must be accepted")
+        }
+
         #[tokio::test]
         async fn one_tool_call_returns_suggested() {
             let args = serde_json::json!({
@@ -1031,12 +1087,17 @@ pub(crate) mod tests {
             let input = authorized_input_with_one_png();
             let cancel = RunCancellation::new();
 
+            let (authority, subject) = va_authority();
             let result = runner
                 .run_visual_annotation_with_provider(
+                    va_profile(),
                     input,
                     &provider,
                     visual_annotation_run_budget(),
                     &cancel,
+                    &authority,
+                    &subject,
+                    None,
                 )
                 .await;
 
@@ -1078,12 +1139,17 @@ pub(crate) mod tests {
             let input = authorized_input_with_one_png();
             let cancel = RunCancellation::new();
 
+            let (authority, subject) = va_authority();
             let result = runner
                 .run_visual_annotation_with_provider(
+                    va_profile(),
                     input,
                     &provider,
                     visual_annotation_run_budget(),
                     &cancel,
+                    &authority,
+                    &subject,
+                    None,
                 )
                 .await;
 
@@ -1104,12 +1170,17 @@ pub(crate) mod tests {
             let input = authorized_input_with_one_png();
             let cancel = RunCancellation::new();
 
+            let (authority, subject) = va_authority();
             let result = runner
                 .run_visual_annotation_with_provider(
+                    va_profile(),
                     input,
                     &provider,
                     visual_annotation_run_budget(),
                     &cancel,
+                    &authority,
+                    &subject,
+                    None,
                 )
                 .await;
 
@@ -1135,12 +1206,17 @@ pub(crate) mod tests {
             let cancel = RunCancellation::new();
             cancel.cancel();
 
+            let (authority, subject) = va_authority();
             let result = runner
                 .run_visual_annotation_with_provider(
+                    va_profile(),
                     input,
                     &provider,
                     visual_annotation_run_budget(),
                     &cancel,
+                    &authority,
+                    &subject,
+                    None,
                 )
                 .await;
 
@@ -1167,8 +1243,18 @@ pub(crate) mod tests {
             let input = authorized_input_with_one_png();
             let cancel = RunCancellation::new();
 
+            let (authority, subject) = va_authority();
             let result = runner
-                .run_visual_annotation_with_provider(input, &provider, budget, &cancel)
+                .run_visual_annotation_with_provider(
+                    va_profile(),
+                    input,
+                    &provider,
+                    budget,
+                    &cancel,
+                    &authority,
+                    &subject,
+                    None,
+                )
                 .await;
 
             match result {
@@ -1196,12 +1282,17 @@ pub(crate) mod tests {
             let input = authorized_input_with_one_png();
             let cancel = RunCancellation::new();
 
+            let (authority, subject) = va_authority();
             let _ = runner
                 .run_visual_annotation_with_provider(
+                    va_profile(),
                     input,
                     &provider,
                     visual_annotation_run_budget(),
                     &cancel,
+                    &authority,
+                    &subject,
+                    None,
                 )
                 .await;
 
@@ -1216,6 +1307,11 @@ pub(crate) mod tests {
             assert!(
                 system_prompt.contains("submit_visual_annotation_suggestions"),
                 "first request system prompt must reference the tool, got: {system_prompt}"
+            );
+            assert_eq!(
+                system_prompt,
+                crate::driver::VISUAL_ANNOTATION_SYSTEM_PROMPT_BASELINE,
+                "model request system prompt must be byte-identical to the baseline"
             );
             assert_eq!(first.tool_definitions.len(), 1);
             assert_eq!(
@@ -1246,12 +1342,17 @@ pub(crate) mod tests {
             let input = authorized_input_with_one_png();
             let cancel = RunCancellation::new();
 
+            let (authority, subject) = va_authority();
             let result = runner
                 .run_visual_annotation_with_provider(
+                    va_profile(),
                     input,
                     &provider,
                     visual_annotation_run_budget(),
                     &cancel,
+                    &authority,
+                    &subject,
+                    None,
                 )
                 .await;
 

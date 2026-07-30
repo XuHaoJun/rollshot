@@ -881,13 +881,19 @@ mod tests {
         w: u32,
         h: u32,
     ) -> rollshot_action::VisualAnnotationProposal {
+        let origin = rollshot_action::VisualAnnotationProposalOrigin::EphemeralGuide {
+            guide_digest: "aa".repeat(32),
+        };
         rollshot_action::VisualAnnotationProposal::from_agent_drafts(
             rollshot_action::VisualAnnotationProposalId(1),
             1,
+            origin,
             step,
             state_id,
             w,
             h,
+            [1u8; 32],
+            [2u8; 32],
             vec![
                 rollshot_action::VisualAnnotationSuggestionDraft {
                     id: rollshot_action::VisualAnnotationSuggestionId(1),

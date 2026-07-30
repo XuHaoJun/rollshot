@@ -391,6 +391,9 @@ pub(crate) fn from_loaded_project(
         caption_review_persisting: false,
         visual_annotation_suggestion: super::VisualAnnotationSuggestionState::Idle,
         visual_annotation_agent_run_id: 0,
+        visual_annotation_task_id: None,
+        visual_annotation_review_snapshot: None,
+        visual_annotation_review_persisting: false,
         storyboard_copy_operation_id: 0,
         export_state: super::GuideExportState::Idle,
         last_export: None,
@@ -436,6 +439,8 @@ pub(crate) fn from_loaded_project_with_task_store(
     let mut workspace = from_loaded_project(loaded, access)?;
     workspace.task_store = Some(task_store);
     super::update::restore_caption_proposal_on_project_open(&mut workspace, &restore_source);
+    // Visual annotation restore is deferred until a step is selected and
+    // its keyframe is hydrated (SelectStep handler).
     Ok(workspace)
 }
 

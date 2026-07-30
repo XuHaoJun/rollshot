@@ -1064,7 +1064,9 @@ async fn openai_stream_consumes_at_least_two_chunks() {
 
 mod visual_annotation {
     use super::*;
+    use rollshot_agent::driver::VisualAnnotationProfile;
     use rollshot_agent::runtime::BudgetDimension;
+    use rollshot_agent::skills::bundled_action_guide_visual_annotations_use;
     use std::sync::Arc;
 
     struct ScriptedProvider {
@@ -1240,6 +1242,7 @@ mod visual_annotation {
         };
         let cancellation = RunCancellation::new();
         let run_cancellation = cancellation.clone();
+        let (authority, subject) = va_authority();
         let task = tokio::spawn(async move {
             let mut budget = visual_annotation_run_budget();
             budget.wall_time = std::time::Duration::from_secs(10);
@@ -1248,10 +1251,14 @@ mod visual_annotation {
                 ..AgentConfig::default()
             })
             .run_visual_annotation_with_provider(
+                va_profile(),
                 authorized_input_with_one_png(),
                 &provider,
                 budget,
                 &run_cancellation,
+                &authority,
+                &subject,
+                None,
             )
             .await
         });
@@ -1306,6 +1313,46 @@ mod visual_annotation {
         })
     }
 
+    fn va_profile() -> VisualAnnotationProfile<'static> {
+        let skill = bundled_action_guide_visual_annotations_use()
+            .expect("bundled visual skill must resolve");
+        let skill: &'static rollshot_agent::skills::SkillUse = Box::leak(Box::new(skill));
+        VisualAnnotationProfile::from_skill(skill).expect("bundled visual skill must be accepted")
+    }
+
+    fn va_authority() -> (
+        rollshot_agent::authority::AuthoritySnapshot,
+        rollshot_agent::authority::AuthoritySubject,
+    ) {
+        use rollshot_agent::authority::{
+            AuthorityBinding, AuthoritySnapshot, AuthoritySubject, DisclosureCeiling, RunOperation,
+        };
+        use rollshot_agent::domain::RunId;
+        use rollshot_agent::product_task::{ProductTaskId, TaskAttemptId};
+        use std::collections::BTreeSet;
+
+        let task_id = ProductTaskId::parse("task-00000000-0000-4000-8000-000000000001").unwrap();
+        let run_id = RunId::parse("run-00000000-0000-4000-8000-000000000001").unwrap();
+        let subject = AuthoritySubject::ActionGuideEphemeralGuide {
+            guide_digest: "aa".repeat(32),
+        };
+        let mut grants = BTreeSet::new();
+        grants.insert(RunOperation::DiscloseScreenshotAttachment);
+        grants.insert(RunOperation::SubmitReviewCandidate);
+        let binding =
+            AuthorityBinding::new(task_id, TaskAttemptId::new(1), run_id, subject.clone());
+        let authority = AuthoritySnapshot::new(
+            binding,
+            "rollshot-v1".to_owned(),
+            DisclosureCeiling::FullScreenshot,
+            true,
+            BTreeSet::new(),
+            grants,
+        )
+        .unwrap();
+        (authority, subject)
+    }
+
     // ---- One attachment ----
 
     #[tokio::test]
@@ -1326,12 +1373,17 @@ mod visual_annotation {
         let input = authorized_input_with_one_png();
         let cancel = RunCancellation::new();
 
+        let (authority, subject) = va_authority();
         let _ = runner
             .run_visual_annotation_with_provider(
+                va_profile(),
                 input,
                 &provider,
                 visual_annotation_run_budget(),
                 &cancel,
+                &authority,
+                &subject,
+                None,
             )
             .await;
 
@@ -1367,8 +1419,18 @@ mod visual_annotation {
         let input = authorized_input_with_one_png();
         let cancel = RunCancellation::new();
 
+        let (authority, subject) = va_authority();
         let _ = runner
-            .run_visual_annotation_with_provider(input, &provider, budget, &cancel)
+            .run_visual_annotation_with_provider(
+                va_profile(),
+                input,
+                &provider,
+                budget,
+                &cancel,
+                &authority,
+                &subject,
+                None,
+            )
             .await;
 
         let requests = provider.requests.lock().unwrap();
@@ -1403,8 +1465,18 @@ mod visual_annotation {
         let input = authorized_input_with_one_png();
         let cancel = RunCancellation::new();
 
+        let (authority, subject) = va_authority();
         let result = runner
-            .run_visual_annotation_with_provider(input, &provider, budget, &cancel)
+            .run_visual_annotation_with_provider(
+                va_profile(),
+                input,
+                &provider,
+                budget,
+                &cancel,
+                &authority,
+                &subject,
+                None,
+            )
             .await;
 
         match result {
@@ -1461,12 +1533,17 @@ mod visual_annotation {
         let cancel = RunCancellation::new();
         cancel.cancel();
 
+        let (authority, subject) = va_authority();
         let result = runner
             .run_visual_annotation_with_provider(
+                va_profile(),
                 input,
                 &provider,
                 visual_annotation_run_budget(),
                 &cancel,
+                &authority,
+                &subject,
+                None,
             )
             .await;
 
@@ -1510,12 +1587,17 @@ mod visual_annotation {
         .expect("valid input");
         let cancel = RunCancellation::new();
 
+        let (authority, subject) = va_authority();
         let result = runner
             .run_visual_annotation_with_provider(
+                va_profile(),
                 input,
                 &provider,
                 visual_annotation_run_budget(),
                 &cancel,
+                &authority,
+                &subject,
+                None,
             )
             .await;
 
@@ -1673,12 +1755,17 @@ mod visual_annotation {
         let input = authorized_input_with_one_png();
         let cancel = RunCancellation::new();
 
+        let (authority, subject) = va_authority();
         let result = runner
             .run_visual_annotation_with_provider(
+                va_profile(),
                 input,
                 &provider,
                 visual_annotation_run_budget(),
                 &cancel,
+                &authority,
+                &subject,
+                None,
             )
             .await;
 
