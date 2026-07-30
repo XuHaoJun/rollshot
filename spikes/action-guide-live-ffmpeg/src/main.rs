@@ -151,7 +151,14 @@ fn main() {
         Ok(config) => {
             // Task 3 will replace this with the actual run.
             // Print validated numeric fields only — no path fields.
-            println!("validated: {}x{} @{} fps, {}s, queue={}", config.width, config.height, config.fps, config.duration_secs, config.queue_capacity);
+            println!(
+                "validated: {}x{} @{} fps, {}s, queue={}",
+                config.width,
+                config.height,
+                config.fps,
+                config.duration_secs,
+                config.queue_capacity
+            );
             std::process::exit(0);
         }
         Err(e) => {
@@ -172,10 +179,14 @@ mod tests {
     #[test]
     fn parse_valid_args_with_defaults() {
         let cfg = parse_args(&args(&[
-            "--ffmpeg", "/usr/bin/ffmpeg",
-            "--ffprobe", "/usr/bin/ffprobe",
-            "--output", "out.mp4",
-            "--report", "report.json",
+            "--ffmpeg",
+            "/usr/bin/ffmpeg",
+            "--ffprobe",
+            "/usr/bin/ffprobe",
+            "--output",
+            "out.mp4",
+            "--report",
+            "report.json",
         ]))
         .unwrap();
         assert_eq!(cfg.ffmpeg, PathBuf::from("/usr/bin/ffmpeg"));
@@ -192,15 +203,24 @@ mod tests {
     #[test]
     fn parse_custom_numeric_values() {
         let cfg = parse_args(&args(&[
-            "--ffmpeg", "ffmpeg",
-            "--ffprobe", "ffprobe",
-            "--output", "o.mp4",
-            "--report", "r.json",
-            "--width", "1280",
-            "--height", "720",
-            "--fps", "60",
-            "--duration-secs", "120",
-            "--queue-capacity", "4",
+            "--ffmpeg",
+            "ffmpeg",
+            "--ffprobe",
+            "ffprobe",
+            "--output",
+            "o.mp4",
+            "--report",
+            "r.json",
+            "--width",
+            "1280",
+            "--height",
+            "720",
+            "--fps",
+            "60",
+            "--duration-secs",
+            "120",
+            "--queue-capacity",
+            "4",
         ]))
         .unwrap();
         assert_eq!(cfg.width, 1280);
@@ -218,10 +238,14 @@ mod tests {
     #[test]
     fn unknown_flag_is_error() {
         let err = parse_args(&args(&[
-            "--ffmpeg", "ffmpeg",
-            "--ffprobe", "ffprobe",
-            "--output", "o.mp4",
-            "--report", "r.json",
+            "--ffmpeg",
+            "ffmpeg",
+            "--ffprobe",
+            "ffprobe",
+            "--output",
+            "o.mp4",
+            "--report",
+            "r.json",
             "--bogus",
         ]))
         .unwrap_err();
@@ -230,60 +254,112 @@ mod tests {
 
     #[test]
     fn zero_width_is_error() {
-        assert!(parse_args(&args(&[
-            "--ffmpeg", "ffmpeg",
-            "--ffprobe", "ffprobe",
-            "--output", "o.mp4",
-            "--report", "r.json",
-            "--width", "0",
-        ]))
-        .is_err());
+        assert!(
+            parse_args(&args(&[
+                "--ffmpeg",
+                "ffmpeg",
+                "--ffprobe",
+                "ffprobe",
+                "--output",
+                "o.mp4",
+                "--report",
+                "r.json",
+                "--width",
+                "0",
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn zero_height_is_error() {
+        assert!(
+            parse_args(&args(&[
+                "--ffmpeg",
+                "ffmpeg",
+                "--ffprobe",
+                "ffprobe",
+                "--output",
+                "o.mp4",
+                "--report",
+                "r.json",
+                "--height",
+                "0",
+            ]))
+            .is_err()
+        );
     }
 
     #[test]
     fn zero_fps_is_error() {
-        assert!(parse_args(&args(&[
-            "--ffmpeg", "ffmpeg",
-            "--ffprobe", "ffprobe",
-            "--output", "o.mp4",
-            "--report", "r.json",
-            "--fps", "0",
-        ]))
-        .is_err());
+        assert!(
+            parse_args(&args(&[
+                "--ffmpeg",
+                "ffmpeg",
+                "--ffprobe",
+                "ffprobe",
+                "--output",
+                "o.mp4",
+                "--report",
+                "r.json",
+                "--fps",
+                "0",
+            ]))
+            .is_err()
+        );
     }
 
     #[test]
     fn zero_duration_is_error() {
-        assert!(parse_args(&args(&[
-            "--ffmpeg", "ffmpeg",
-            "--ffprobe", "ffprobe",
-            "--output", "o.mp4",
-            "--report", "r.json",
-            "--duration-secs", "0",
-        ]))
-        .is_err());
+        assert!(
+            parse_args(&args(&[
+                "--ffmpeg",
+                "ffmpeg",
+                "--ffprobe",
+                "ffprobe",
+                "--output",
+                "o.mp4",
+                "--report",
+                "r.json",
+                "--duration-secs",
+                "0",
+            ]))
+            .is_err()
+        );
     }
 
     #[test]
     fn zero_queue_capacity_is_error() {
-        assert!(parse_args(&args(&[
-            "--ffmpeg", "ffmpeg",
-            "--ffprobe", "ffprobe",
-            "--output", "o.mp4",
-            "--report", "r.json",
-            "--queue-capacity", "0",
-        ]))
-        .is_err());
+        assert!(
+            parse_args(&args(&[
+                "--ffmpeg",
+                "ffmpeg",
+                "--ffprobe",
+                "ffprobe",
+                "--output",
+                "o.mp4",
+                "--report",
+                "r.json",
+                "--queue-capacity",
+                "0",
+            ]))
+            .is_err()
+        );
     }
 
     #[test]
     fn odd_width_is_error() {
         let err = parse_args(&args(&[
-            "--ffmpeg", "ffmpeg",
-            "--ffprobe", "ffprobe",
-            "--output", "o.mp4",
-            "--report", "r.json",
-            "--width", "1921",
+            "--ffmpeg",
+            "ffmpeg",
+            "--ffprobe",
+            "ffprobe",
+            "--output",
+            "o.mp4",
+            "--report",
+            "r.json",
+            "--width",
+            "1921",
         ]))
         .unwrap_err();
         assert!(err.contains("even"));
@@ -292,11 +368,16 @@ mod tests {
     #[test]
     fn odd_height_is_error() {
         let err = parse_args(&args(&[
-            "--ffmpeg", "ffmpeg",
-            "--ffprobe", "ffprobe",
-            "--output", "o.mp4",
-            "--report", "r.json",
-            "--height", "1081",
+            "--ffmpeg",
+            "ffmpeg",
+            "--ffprobe",
+            "ffprobe",
+            "--output",
+            "o.mp4",
+            "--report",
+            "r.json",
+            "--height",
+            "1081",
         ]))
         .unwrap_err();
         assert!(err.contains("even"));
@@ -304,23 +385,33 @@ mod tests {
 
     #[test]
     fn missing_value_is_error() {
-        assert!(parse_args(&args(&[
-            "--ffmpeg", "ffmpeg",
-            "--ffprobe", "ffprobe",
-            "--output", "o.mp4",
-            "--report",
-        ]))
-        .is_err());
+        assert!(
+            parse_args(&args(&[
+                "--ffmpeg",
+                "ffmpeg",
+                "--ffprobe",
+                "ffprobe",
+                "--output",
+                "o.mp4",
+                "--report",
+            ]))
+            .is_err()
+        );
     }
 
     #[test]
     fn invalid_number_is_error() {
         let err = parse_args(&args(&[
-            "--ffmpeg", "ffmpeg",
-            "--ffprobe", "ffprobe",
-            "--output", "o.mp4",
-            "--report", "r.json",
-            "--width", "abc",
+            "--ffmpeg",
+            "ffmpeg",
+            "--ffprobe",
+            "ffprobe",
+            "--output",
+            "o.mp4",
+            "--report",
+            "r.json",
+            "--width",
+            "abc",
         ]))
         .unwrap_err();
         assert!(err.contains("u32"));
