@@ -2452,7 +2452,7 @@ mod tests {
                             Output = Result<
                                 std::pin::Pin<
                                     Box<
-                                        dyn futures_util::Stream<
+                                        dyn iced::futures::Stream<
                                                 Item = Result<
                                                     rollshot_agent::model::ModelStreamEvent,
                                                     rollshot_agent::model::ModelError,
@@ -2468,11 +2468,11 @@ mod tests {
             > {
                 let events = self.response.lock().unwrap().take().unwrap_or_default();
                 Box::pin(async move {
-                    let s = futures_util::stream::iter(events.into_iter().map(Ok));
+                    let s = iced::futures::stream::iter(events.into_iter().map(Ok));
                     Ok(Box::pin(s)
                         as std::pin::Pin<
                             Box<
-                                dyn futures_util::Stream<
+                                dyn iced::futures::Stream<
                                         Item = Result<
                                             rollshot_agent::model::ModelStreamEvent,
                                             rollshot_agent::model::ModelError,
