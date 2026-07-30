@@ -850,6 +850,19 @@ impl ProductArtifactMetadata {
         self.run_contract.as_ref()
     }
 
+    /// Attach the active run contract and run-config digest.
+    /// Used by promotion paths that construct via `new_v3` and need
+    /// to carry the bound authority/skill receipt into the artifact.
+    pub fn with_run_contract(
+        mut self,
+        run_contract: RunContractReceiptV1,
+        run_config_digest: String,
+    ) -> Self {
+        self.run_contract = Some(run_contract);
+        self.run_config_digest = run_config_digest;
+        self
+    }
+
     pub fn kind(&self) -> ArtifactKind {
         self.kind
     }

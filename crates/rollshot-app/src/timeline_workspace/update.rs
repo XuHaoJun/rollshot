@@ -379,11 +379,11 @@ async fn persist_visual_review_batch(
             persisted = applying;
         }
 
-        let has_pending = proposal
+        let has_decided_all = proposal
             .suggestions
             .iter()
-            .any(|s| s.status == rollshot_action::VisualAnnotationSuggestionStatus::Pending);
-        if has_pending {
+            .all(|s| s.status != rollshot_action::VisualAnnotationSuggestionStatus::Pending);
+        if !has_decided_all {
             return Ok(persisted);
         }
         if persisted.status() != TaskStatus::Applying {
@@ -551,6 +551,9 @@ pub(super) fn restore_visual_annotation_proposal_for_selected_step(state: &mut T
         }) => (root, base_revision),
         _ => return,
     };
+    if state.save_state != super::ProjectSaveState::Clean {
+        return;
+    }
     let Some(store) = &state.task_store else {
         return;
     };
@@ -657,10 +660,13 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
     match message {
         Message::SelectStep(index) => {
             if state.guide.steps().iter().any(|s| s.index == index) {
+                let changed = state.selected != Some(index);
                 state.selected = Some(index);
                 // Dismiss any in-memory visual annotation review before
                 // attempting restore for the newly selected step.
-                dismiss_stale_visual_annotation_review(state);
+                if changed {
+                    dismiss_stale_visual_annotation_review(state);
+                }
                 #[cfg(feature = "action-guide")]
                 {
                     // Extract selected step info before borrowing frame_source.
@@ -2259,8 +2265,20 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                     return Update::none();
                 }
             };
-            state.visual_annotation_suggestion = super::VisualAnnotationSuggestionState::Idle;
             if applied > 0 {
+                // Mark successfully applied items as Accepted.
+                if let super::VisualAnnotationSuggestionState::PendingReview(ref mut proposal) =
+                    state.visual_annotation_suggestion
+                {
+                    for suggestion in &mut proposal.suggestions {
+                        if suggestion.status
+                            == rollshot_action::VisualAnnotationSuggestionStatus::Pending
+                        {
+                            suggestion.status =
+                                rollshot_action::VisualAnnotationSuggestionStatus::Accepted;
+                        }
+                    }
+                }
                 state.mark_project_dirty();
             }
             state.message = Some(match stale {

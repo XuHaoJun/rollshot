@@ -498,33 +498,18 @@ pub(crate) async fn suggest_visual_annotation_task(
         });
     };
 
-    let subject = match &source_binding {
-        rollshot_agent::product_task::SourceBinding::ActionGuideVisualAnnotationProject {
-            project_root_sha256,
-            revision,
-            projection_digest,
-            ..
-        } => rollshot_agent::authority::AuthoritySubject::ActionGuideProject {
-            project_root_sha256: *project_root_sha256,
-            revision: *revision,
-            projection_digest: projection_digest.clone(),
-        },
-        rollshot_agent::product_task::SourceBinding::ActionGuideVisualAnnotationEphemeralGuide {
-            guide_digest,
-            ..
-        } => rollshot_agent::authority::AuthoritySubject::ActionGuideEphemeralGuide {
-            guide_digest: guide_digest.clone(),
-        },
-        _ => {
-            let _ = persist_visual_terminal(
-                store,
-                task_id,
-                TaskTerminal::SourceValidationFailure,
-                now,
-            )
-            .await;
+    let subject = match build_visual_document_subject(
+        image_width,
+        image_height,
+        document_state_id,
+        keyframe_sha256,
+    ) {
+        Ok(subject) => subject,
+        Err(error) => {
+            let _ =
+                persist_visual_terminal(store, task_id, TaskTerminal::RuntimeFailure, now).await;
             return Ok(VisualAnnotationTaskResult::NoSuggestion {
-                reason: Some("unexpected source binding domain for visual annotations".to_string()),
+                reason: Some(error),
             });
         }
     };
@@ -720,16 +705,41 @@ pub(crate) async fn suggest_visual_annotation_task(
                                 error = %error,
                                 "visual annotation promotion failed"
                             );
-                            let _ = persist_visual_terminal(
-                                store,
-                                task_id,
-                                TaskTerminal::RuntimeFailure,
-                                now,
-                            )
-                            .await;
-                            Ok(VisualAnnotationTaskResult::NoSuggestion {
-                                reason: Some(format!("promotion failed: {error}")),
-                            })
+                            // The promotion CAS may have succeeded before
+                            // the audit commit failed. Reload to check the
+                            // authoritative state.
+                            match store.load(&task_id) {
+                                Ok(snapshot)
+                                    if snapshot.status()
+                                        == rollshot_agent::product_task::TaskStatus::ReadyForReview =>
+                                {
+                                    Ok(VisualAnnotationTaskResult::Success(Box::new(
+                                        VisualAnnotationRunSuccess {
+                                            task_id,
+                                            proposal,
+                                            snapshot,
+                                            provider_id: provider_name,
+                                            model_id: model,
+                                        },
+                                    )))
+                                }
+                                _ => {
+                                    // Still running — terminalize.
+                                    let _ = persist_visual_terminal(
+                                        store,
+                                        task_id,
+                                        TaskTerminal::RuntimeFailure,
+                                        std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_millis() as i64,
+                                    )
+                                    .await;
+                                    Ok(VisualAnnotationTaskResult::NoSuggestion {
+                                        reason: Some(format!("promotion failed: {error}")),
+                                    })
+                                }
+                            }
                         }
                         Err(error) => {
                             tracing::error!(
@@ -769,20 +779,41 @@ pub(crate) async fn suggest_visual_annotation_task(
                 }
             }
         }
+        rollshot_agent::VisualAnnotationRunTerminal::NoSuggestion(_) => {
+            // Valid model response: no annotation target found.
+            // No terminal is persisted — the task remains Running
+            // and will be interrupted on close/restart.
+            Ok(map_terminal_to_result(
+                rollshot_agent::VisualAnnotationRunTerminal::NoSuggestion(String::new()),
+                run_id,
+                origin,
+                &step,
+                document_state_id,
+                image_width,
+                image_height,
+                keyframe_sha256,
+                annotation_state_sha256,
+            ))
+        }
         other => {
             // Map non-success terminals to task terminal and persist.
+            // Generate a fresh timestamp at actual run finish time
+            // rather than reusing the task-creation timestamp.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64;
             let task_terminal = match &other {
                 rollshot_agent::VisualAnnotationRunTerminal::Cancelled => TaskTerminal::Cancelled,
-                rollshot_agent::VisualAnnotationRunTerminal::BudgetExhausted { .. } => {
-                    TaskTerminal::RuntimeFailure
+                rollshot_agent::VisualAnnotationRunTerminal::BudgetExhausted { dimension } => {
+                    TaskTerminal::BudgetExhausted {
+                        dimension: dimension.clone(),
+                    }
                 }
                 rollshot_agent::VisualAnnotationRunTerminal::ProviderFailure => {
                     TaskTerminal::ProviderFailure
                 }
                 rollshot_agent::VisualAnnotationRunTerminal::ProtocolFailure => {
-                    TaskTerminal::AgentProtocolFailure
-                }
-                rollshot_agent::VisualAnnotationRunTerminal::NoSuggestion(_) => {
                     TaskTerminal::AgentProtocolFailure
                 }
                 rollshot_agent::VisualAnnotationRunTerminal::AuthorityDenied { .. } => {
@@ -793,7 +824,8 @@ pub(crate) async fn suggest_visual_annotation_task(
                         category: format!("{category:?}"),
                     }
                 }
-                rollshot_agent::VisualAnnotationRunTerminal::Suggested(_) => unreachable!(),
+                rollshot_agent::VisualAnnotationRunTerminal::NoSuggestion(_)
+                | rollshot_agent::VisualAnnotationRunTerminal::Suggested(_) => unreachable!(),
             };
             let _ = persist_visual_terminal(store, task_id, task_terminal, now).await;
             Ok(map_terminal_to_result(
@@ -973,6 +1005,42 @@ pub(crate) fn visual_source_binding(
 ///
 /// Always grants [`RunOperation::DiscloseScreenshotAttachment`] and
 /// [`RunOperation::SubmitReviewCandidate`] with
+/// [`DisclosureCeiling::FullScreenshot`]. The subject is a
+/// [`DocumentContentBinding`] binding the authority to the exact source
+/// image and checked document state, per the live design spec §6.
+/// Build a [`DocumentContentBinding`] and [`AuthoritySubject`] for a visual
+/// annotation run. The binding ties the authority to the exact source image
+/// and checked document state, per the live design spec §6.
+pub(crate) fn build_visual_document_subject(
+    image_width: u32,
+    image_height: u32,
+    document_state_id: u64,
+    keyframe_sha256: [u8; 32],
+) -> Result<rollshot_agent::authority::AuthoritySubject, String> {
+    use rollshot_agent::authority::AuthoritySubject;
+    use rollshot_agent::product_task::{AnnotationStateV1, DocumentContentBinding};
+
+    let state_id = u32::try_from(document_state_id).map_err(|_| {
+        format!(
+            "document state id {document_state_id} exceeds u32; \
+             must fail before provider call"
+        )
+    })?;
+    let annotation_state = AnnotationStateV1 {
+        width: image_width,
+        height: image_height,
+        state_id,
+        annotations: Vec::new(),
+    };
+    let content_binding = DocumentContentBinding::new(keyframe_sha256, &annotation_state, state_id)
+        .map_err(|e| format!("build document content binding: {e}"))?;
+    Ok(AuthoritySubject::Document(content_binding))
+}
+
+/// Build an [`AuthoritySnapshot`] for a visual annotation run.
+///
+/// Always grants [`RunOperation::DiscloseScreenshotAttachment`] and
+/// [`RunOperation::SubmitReviewCandidate`] with
 /// [`DisclosureCeiling::FullScreenshot`]. The caller supplies the
 /// [`AuthoritySubject`].
 pub(crate) fn visual_authority(
@@ -1027,6 +1095,8 @@ pub(crate) fn promote_visual_ready_for_review(
     let proposal_payload = serde_json::to_vec(proposal)
         .map_err(|error| format!("serialize visual proposal: {error}"))?;
     let artifact_payload = proposal_payload.clone();
+    let run_contract = last_attempt.run_contract().cloned();
+    let run_config_digest = format!("visual-annotation-{}-{}", provider_id, model_id);
     let meta = ProductArtifactMetadata::new_v3(
         ArtifactId::parse(format!(
             "artifact-{}",
@@ -1047,12 +1117,19 @@ pub(crate) fn promote_visual_ready_for_review(
         proposal.id.0.to_string(),
         provider_id.to_owned(),
         model_id.to_owned(),
-        String::new(),
+        run_config_digest.clone(),
         ArtifactSummary::ActionGuideVisualAnnotation {
             suggestion_count: proposal.suggestions.len() as u32,
         },
         chrono::Utc::now().timestamp_millis(),
     );
+    // Carry the bound run contract from the attempt into the artifact
+    // metadata so the authority receipt and bundled-skill digest are
+    // preserved for post-hoc audit.
+    let meta = match run_contract {
+        Some(contract) => meta.with_run_contract(contract, run_config_digest),
+        None => meta,
+    };
     let now = chrono::Utc::now().timestamp_millis();
     let promoted = snapshot
         .record_ready_for_review(meta, artifact_payload, Some(proposal_payload), now)

@@ -386,12 +386,10 @@ impl TaskStore {
     /// `Applying` task in any domain becomes `Interrupted`, because its process
     /// is gone.
     ///
-    /// `Created` uses the same `CREATED_INTERRUPT_GRACE_MS` window as
-    /// `reconcile_for_source`: a task created moments ago may belong to a live
-    /// run whose `Created → Running` write has not landed yet. At `open` that is
-    /// only reachable when a second process is mid-launch, which the
-    /// one-instance rule forbids — but the guard costs nothing and keeps the two
-    /// reconcilers from disagreeing.
+    /// `Created` tasks are interrupted immediately (no grace period) because
+    /// the previous process is necessarily gone under the one-instance rule.
+    /// The `CREATED_INTERRUPT_GRACE_MS` window only applies in
+    /// `reconcile_for_source` where a same-process launch may be mid-flight.
     pub fn sweep_ephemeral_on_open(&self, now: i64) -> Result<usize, TaskStoreError> {
         let mut resolved = 0usize;
 
@@ -412,12 +410,8 @@ impl TaskStore {
 
             let next = match (snapshot.status(), ephemeral) {
                 (TaskStatus::ReadyForReview, true) => snapshot.mark_stale(now).ok(),
-                (TaskStatus::Created, _)
-                    if now - snapshot.updated_at_unix_ms() < CREATED_INTERRUPT_GRACE_MS =>
-                {
-                    None
-                }
-                (TaskStatus::Created | TaskStatus::Running | TaskStatus::Applying, _) => {
+                (TaskStatus::Created, _) => snapshot.reconcile_interrupted(now).ok().flatten(),
+                (TaskStatus::Running | TaskStatus::Applying, _) => {
                     snapshot.reconcile_interrupted(now).ok().flatten()
                 }
                 _ => None,
