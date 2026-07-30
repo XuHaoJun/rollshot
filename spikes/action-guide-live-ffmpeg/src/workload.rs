@@ -7,6 +7,8 @@ use image::RgbaImage;
 /// a vertically scrolling list of text-like bars, a changing chart region, and
 /// a moving cursor. Every position and color is derived from `frame_index`;
 /// no random numbers are used. All pixels have alpha = 255.
+// Dead code suppression: future-task API surface (producer loop).
+#[allow(dead_code)]
 pub(crate) fn render_frame(cfg: &RunConfig, frame_index: u64) -> RgbaImage {
     let w = cfg.width;
     let h = cfg.height;
@@ -54,9 +56,9 @@ pub(crate) fn render_frame(cfg: &RunConfig, frame_index: u64) -> RgbaImage {
         let bx = chart_x + i * 18;
         let fraction = ((i as u64 * 7 + frame_index) % 100) as f32 / 100.0;
         let bar_h = (chart_height as f32 * fraction) as u32;
-        let r = (100u32 + (i as u32) * 13) as u8;
+        let r = (100u32 + i * 13) as u8;
         let g = (140u64 + (frame_index * 7 + i as u64) % 116) as u8;
-        let b = (200u32).wrapping_sub((i as u32).wrapping_mul(5)) as u8;
+        let b = (200u32).wrapping_sub(i.wrapping_mul(5)) as u8;
         for y in (chart_bottom - bar_h)..chart_bottom {
             for x in bx..(bx + 12).min(w) {
                 img.put_pixel(x, y, image::Rgba([r, g, b, 255]));

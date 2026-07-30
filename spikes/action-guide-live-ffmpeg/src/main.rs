@@ -3,6 +3,8 @@ mod workload;
 
 use std::path::PathBuf;
 
+// Dead code suppression: path fields are consumed by run_encoder (future task).
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct RunConfig {
     pub ffmpeg: PathBuf,
@@ -125,10 +127,10 @@ pub(crate) fn parse_args(args: &[String]) -> Result<RunConfig, String> {
     if queue_capacity == 0 {
         return Err("--queue-capacity must be non-zero".into());
     }
-    if width % 2 != 0 {
+    if !width.is_multiple_of(2) {
         return Err(format!("--width must be even, got {width}"));
     }
-    if height % 2 != 0 {
+    if !height.is_multiple_of(2) {
         return Err(format!("--height must be even, got {height}"));
     }
 

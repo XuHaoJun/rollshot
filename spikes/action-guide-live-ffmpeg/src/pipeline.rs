@@ -7,11 +7,16 @@ use image::RgbaImage;
 // Mailbox types
 // ---------------------------------------------------------------------------
 
+// Dead code suppression: all types below are API surface consumed by the
+// producer loop (future task). Only exercised by tests today.
+#[allow(dead_code)]
 pub(crate) struct TimedFrame {
     pub at_ms: u64,
     pub image: RgbaImage,
 }
 
+// Dead code suppression: future-task API surface (producer loop).
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OfferResult {
     Queued,
@@ -19,11 +24,15 @@ pub(crate) enum OfferResult {
     Disconnected,
 }
 
+// Dead code suppression: future-task API surface (producer loop).
+#[allow(dead_code)]
 pub(crate) struct LatestFrameSender {
     tx: crossbeam_channel::Sender<TimedFrame>,
     rx: crossbeam_channel::Receiver<TimedFrame>,
 }
 
+// Dead code suppression: future-task API surface (producer loop).
+#[allow(dead_code)]
 impl LatestFrameSender {
     /// Offer a frame to the mailbox. Never blocks.
     /// If the queue is full, evicts the oldest frame and inserts the new one.
@@ -46,6 +55,8 @@ impl LatestFrameSender {
     }
 }
 
+// Dead code suppression: future-task API surface (producer loop).
+#[allow(dead_code)]
 pub(crate) struct LatestFrameReceiver {
     rx: crossbeam_channel::Receiver<TimedFrame>,
 }
@@ -61,9 +72,9 @@ impl LatestFrameReceiver {
 ///
 /// The sender holds a clone of the receiver solely for eviction; it never
 /// performs a blocking send.
-pub(crate) fn latest_frame_mailbox(
-    capacity: usize,
-) -> (LatestFrameSender, LatestFrameReceiver) {
+// Dead code suppression: future-task API surface (producer loop).
+#[allow(dead_code)]
+pub(crate) fn latest_frame_mailbox(capacity: usize) -> (LatestFrameSender, LatestFrameReceiver) {
     let (tx, rx) = crossbeam_channel::bounded(capacity);
     let rx_clone = rx.clone();
     (
@@ -76,6 +87,8 @@ pub(crate) fn latest_frame_mailbox(
 // CFR scheduler (integer-only arithmetic)
 // ---------------------------------------------------------------------------
 
+// Dead code suppression: future-task API surface (producer loop).
+#[allow(dead_code)]
 pub(crate) struct CfrScheduler {
     fps: u32,
     next_tick: u64,
@@ -146,14 +159,27 @@ impl CfrScheduler {
 // FFmpeg process lifecycle
 // ---------------------------------------------------------------------------
 
+// Dead code suppression: future-task API surface (producer loop).
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) enum PipelineError {
-    Spawn { category: String },
-    Write { category: String },
-    Exit { status: &'static str, category: String },
-    Rename { category: String },
+    Spawn {
+        category: String,
+    },
+    Write {
+        category: String,
+    },
+    Exit {
+        status: &'static str,
+        category: String,
+    },
+    Rename {
+        category: String,
+    },
 }
 
+// Dead code suppression: future-task API surface (producer loop).
+#[allow(dead_code)]
 pub(crate) struct EncoderSummary {
     pub frames_written: u64,
     pub pid: u32,
@@ -163,12 +189,16 @@ pub(crate) struct EncoderSummary {
 }
 
 /// Derive the temp sibling path: `<parent>/<stem>.tmp.mp4`.
+// Dead code suppression: future-task API surface (producer loop).
+#[allow(dead_code)]
 pub(crate) fn temp_output_path(output: &Path) -> PathBuf {
     let parent = output.parent().unwrap_or(Path::new("."));
     let stem = output.file_stem().unwrap_or_default();
     parent.join(format!("{}.tmp.mp4", stem.to_string_lossy()))
 }
 
+// Dead code suppression: future-task API surface (producer loop).
+#[allow(dead_code)]
 fn io_error_category(e: &std::io::Error) -> String {
     match e.kind() {
         std::io::ErrorKind::NotFound => "not_found".into(),
@@ -177,6 +207,8 @@ fn io_error_category(e: &std::io::Error) -> String {
     }
 }
 
+// Dead code suppression: future-task API surface (producer loop).
+#[allow(dead_code)]
 fn cleanup_temp(temp_path: &Path) {
     let _ = std::fs::remove_file(temp_path);
 }
@@ -185,6 +217,8 @@ fn cleanup_temp(temp_path: &Path) {
 /// and produce an atomic MP4 output.
 ///
 /// On any failure the temp sibling is removed before returning.
+// Dead code suppression: future-task API surface (producer loop).
+#[allow(dead_code)]
 pub(crate) fn run_encoder(
     config: crate::RunConfig,
     receiver: LatestFrameReceiver,
@@ -246,31 +280,26 @@ pub(crate) fn run_encoder(
     let mut last_at_ms: u64 = 0;
 
     // --- frame-writing loop ---
-    loop {
-        match receiver.recv() {
-            Ok(frame) => {
-                let at_ms = frame.at_ms;
-                let ticks = scheduler.push(at_ms);
-                if ticks > 0 {
-                    let pixels = frame.image.as_raw();
-                    for _ in 0..ticks {
-                        if let Err(e) = stdin.write_all(pixels) {
-                            drop(stdin);
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            let _ = stderr_thread.join();
-                            cleanup_temp(&temp_path);
-                            return Err(PipelineError::Write {
-                                category: io_error_category(&e),
-                            });
-                        }
-                    }
-                    last_at_ms = at_ms;
+    while let Ok(frame) = receiver.recv() {
+        let at_ms = frame.at_ms;
+        let ticks = scheduler.push(at_ms);
+        if ticks > 0 {
+            let pixels = frame.image.as_raw();
+            for _ in 0..ticks {
+                if let Err(e) = stdin.write_all(pixels) {
+                    drop(stdin);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stderr_thread.join();
+                    cleanup_temp(&temp_path);
+                    return Err(PipelineError::Write {
+                        category: io_error_category(&e),
+                    });
                 }
-                current_frame = Some(frame);
             }
-            Err(_) => break, // all senders dropped
+            last_at_ms = at_ms;
         }
+        current_frame = Some(frame);
     }
 
     // --- finish: hold last frame for remaining ticks ---
