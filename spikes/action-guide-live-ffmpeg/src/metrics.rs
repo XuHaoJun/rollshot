@@ -313,7 +313,7 @@ pub(crate) fn run_probe(
 pub(crate) fn evaluate(report: &mut RunReport) -> GateDecision {
     let mut failed_gates: Vec<Gate> = Vec::new();
 
-    // Gate 1: Producer p99 clone+offer <= 1_000 µs
+    // Gate 1: Producer p99 share+offer <= 1_000 µs
     if !report.offer_latencies_us.is_empty() {
         let mut sorted = report.offer_latencies_us.clone();
         sorted.sort_unstable();

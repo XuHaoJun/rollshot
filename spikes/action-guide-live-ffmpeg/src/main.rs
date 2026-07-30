@@ -205,13 +205,17 @@ fn main() {
             std::thread::sleep(deadline - now);
         }
 
-        // Timed section: clone and offer.
+        // Timed section: share and offer. The wrap models the production
+        // crop-then-wrap-once at the action-thread boundary; the offer is an
+        // Arc clone (pointer + refcount), never a pixel copy.
         let offer_start = Instant::now();
+        let shared = Arc::new(frame_image);
         let timed = pipeline::TimedFrame {
             at_ms: frame_index * 1_000 / config.fps as u64,
-            image: frame_image.clone(),
+            image: Arc::clone(&shared),
         };
         let result = sender.offer(timed);
+        drop(shared);
         let offer_us = offer_start.elapsed().as_micros() as u64;
 
         offer_latencies_us.push(offer_us);

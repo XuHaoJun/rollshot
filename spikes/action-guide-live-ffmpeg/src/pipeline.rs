@@ -14,7 +14,7 @@ use image::RgbaImage;
 #[allow(dead_code)]
 pub(crate) struct TimedFrame {
     pub at_ms: u64,
-    pub image: RgbaImage,
+    pub image: Arc<RgbaImage>,
 }
 
 // Dead code suppression: future-task API surface (producer loop).
@@ -389,11 +389,24 @@ mod tests {
     fn frame(at_ms: u64) -> TimedFrame {
         TimedFrame {
             at_ms,
-            image: RgbaImage::from_pixel(2, 2, image::Rgba([0, 0, 0, 255])),
+            image: Arc::new(RgbaImage::from_pixel(2, 2, image::Rgba([0, 0, 0, 255]))),
         }
     }
 
     // -- Mailbox tests --
+
+    #[test]
+    fn offer_shares_allocation_without_copy() {
+        let (sender, receiver) = latest_frame_mailbox(2);
+        let image = std::sync::Arc::new(RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255])));
+        let offered = TimedFrame {
+            at_ms: 0,
+            image: std::sync::Arc::clone(&image),
+        };
+        assert_eq!(sender.offer(offered), OfferResult::Queued);
+        let received = receiver.recv().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&image, &received.image));
+    }
 
     #[test]
     fn latest_mailbox_replaces_oldest_without_waiting() {
