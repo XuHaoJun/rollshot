@@ -784,7 +784,9 @@ pub(crate) async fn suggest_visual_annotation_task(
             // No terminal is persisted — the task remains Running
             // and will be interrupted on close/restart.
             Ok(map_terminal_to_result(
-                rollshot_agent::VisualAnnotationRunTerminal::NoSuggestion(rollshot_agent::VisualAnnotationNoSuggestion::NoClearTarget { reason: None }),
+                rollshot_agent::VisualAnnotationRunTerminal::NoSuggestion(
+                    rollshot_agent::VisualAnnotationNoSuggestion::NoClearTarget { reason: None },
+                ),
                 run_id,
                 origin,
                 &step,
