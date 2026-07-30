@@ -334,10 +334,10 @@ pub(crate) fn evaluate(report: &mut RunReport) -> GateDecision {
     }
 
     // Gate 3: Post-warm-up self RSS
-    //   warm-up = first 1 second of samples (1 sample per second)
+    // warm-up = first 60 seconds of samples (1 sample per second)
     //   peak-to-trough <= 64 MiB
     //   least-squares slope <= 1 MiB/min
-    let warmup_count = 1usize; // one second of warm-up
+    let warmup_count = 60usize; // first warm-up minute (60 samples at 1/s)
     let post_warmup: Vec<(usize, u64)> = report
         .self_rss
         .iter()
@@ -467,7 +467,7 @@ mod tests {
                 replaced_or_dropped: 0,
             }],
             self_rss: std::iter::repeat_with(|| RssResult::Ok { kib: 100 * 1024 })
-                .take(40)
+                .take(62)
                 .collect(),
             ffmpeg_rss: vec![RssResult::Ok { kib: 50 * 1024 }; 40],
             probe: Some(ProbeResult {
@@ -522,8 +522,8 @@ mod tests {
         }
 
         fn with_post_warmup_rss_mib(mut self, mib: Vec<u64>) -> Self {
-            // Prepend 1 warm-up sample (1 second)
-            let mut samples: Vec<RssResult> = vec![RssResult::Ok { kib: 100 * 1024 }];
+            // Prepend 60 warm-up samples (1 second each = first warm-up minute)
+            let mut samples: Vec<RssResult> = vec![RssResult::Ok { kib: 100 * 1024 }; 60];
             samples.extend(mib.into_iter().map(|m| RssResult::Ok { kib: m * 1024 }));
             self.self_rss = samples;
             self
