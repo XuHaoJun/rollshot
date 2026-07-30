@@ -2121,7 +2121,10 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                     adapter,
                     task_cancellation,
                 ),
-                move |result| Message::VisualAnnotationProposalLoaded { run_id, result: Box::new(result) },
+                move |result| Message::VisualAnnotationProposalLoaded {
+                    run_id,
+                    result: Box::new(result),
+                },
             ))
         }
         Message::VisualAnnotationProposalLoaded { run_id, result } => {

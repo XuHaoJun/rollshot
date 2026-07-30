@@ -152,7 +152,9 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
                     let mut ws =
                         crate::timeline_workspace::TimelineWorkspace::from_imported_video(seed);
                     ws.task_store = Some(state.task_store.clone());
-                    let initial_load = ws.initial_frame_load_task().map(|m| Message::Timeline(Box::new(m)));
+                    let initial_load = ws
+                        .initial_frame_load_task()
+                        .map(|m| Message::Timeline(Box::new(m)));
                     state.timeline = Some(ws);
                     state.phase = Phase::Timeline;
                     initial_load
@@ -165,7 +167,9 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
             };
             let result = crate::timeline_workspace::update(ws, *tl_msg);
             match result.effect {
-                crate::timeline_workspace::Effect::None => result.task.map(|m| Message::Timeline(Box::new(m))),
+                crate::timeline_workspace::Effect::None => {
+                    result.task.map(|m| Message::Timeline(Box::new(m)))
+                }
                 crate::timeline_workspace::Effect::CloseWorkspace => {
                     state.timeline = None;
                     state.phase = Phase::Home;
@@ -221,7 +225,9 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
                     if let Some((root, display_name)) = ws.project_recent_metadata() {
                         state.home.record_project_open(root, display_name);
                     }
-                    let initial_load = ws.initial_frame_load_task().map(|m| Message::Timeline(Box::new(m)));
+                    let initial_load = ws
+                        .initial_frame_load_task()
+                        .map(|m| Message::Timeline(Box::new(m)));
                     state.timeline = Some(ws);
                     state.phase = Phase::Timeline;
                     state.home.opening = false;
