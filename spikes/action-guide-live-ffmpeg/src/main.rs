@@ -3,8 +3,8 @@ mod pipeline;
 mod workload;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 // Dead code suppression: path fields are consumed by run_encoder (future task).
@@ -174,15 +174,13 @@ fn main() {
     let ffmpeg_child_pid = Arc::new(AtomicU32::new(0));
 
     // Create mailbox.
-    let (sender, receiver) =
-        pipeline::latest_frame_mailbox(config.queue_capacity);
+    let (sender, receiver) = pipeline::latest_frame_mailbox(config.queue_capacity);
 
     // Spawn encoder worker thread.
     let encoder_config = config.clone();
     let encoder_pid = Arc::clone(&ffmpeg_child_pid);
-    let encoder_handle = std::thread::spawn(move || {
-        pipeline::run_encoder(encoder_config, receiver, encoder_pid)
-    });
+    let encoder_handle =
+        std::thread::spawn(move || pipeline::run_encoder(encoder_config, receiver, encoder_pid));
 
     // Metrics accumulators.
     let mut offer_latencies_us: Vec<u64> = Vec::with_capacity(total_frames as usize);
@@ -193,6 +191,7 @@ fn main() {
     let mut current_window_offered: u64 = 0;
     let mut current_window_replaced: u64 = 0;
     let mut last_second: u64 = 0;
+    let mut last_window_second: u64 = 0;
 
     // Producer loop.
     for frame_index in 0..total_frames {
@@ -230,20 +229,24 @@ fn main() {
         // Sample RSS on second boundaries.
         let current_second = frame_index / config.fps as u64;
         if current_second > last_second {
-            // Flush completed window.
-            windows.push(metrics::OfferWindow {
-                offered: current_window_offered,
-                replaced_or_dropped: current_window_replaced,
-            });
-            current_window_offered = 0;
-            current_window_replaced = 0;
-
             self_rss_samples.push(sample_rss(std::process::id()));
             let ff_pid = ffmpeg_child_pid.load(Ordering::Acquire);
             if ff_pid != 0 {
                 ffmpeg_rss_samples.push(sample_rss(ff_pid));
             }
             last_second = current_second;
+
+            // Flush completed 5-second window.
+            let window_second = current_second / 5;
+            if window_second > last_window_second {
+                windows.push(metrics::OfferWindow {
+                    offered: current_window_offered,
+                    replaced_or_dropped: current_window_replaced,
+                });
+                current_window_offered = 0;
+                current_window_replaced = 0;
+                last_window_second = window_second;
+            }
         }
     }
 
@@ -263,13 +266,20 @@ fn main() {
         Ok(s) => s,
         Err(e) => {
             let category = match &e {
-                pipeline::PipelineError::Spawn { .. } => metrics::FailureCategory::EncoderSpawn,
-                pipeline::PipelineError::Write { .. } => metrics::FailureCategory::EncoderWrite,
-                pipeline::PipelineError::Exit { .. } => metrics::FailureCategory::EncoderExit,
-                pipeline::PipelineError::Rename { .. } => metrics::FailureCategory::EncoderRename,
+                pipeline::PipelineError::Spawn { .. } => metrics::FailureCategory::Spawn,
+                pipeline::PipelineError::Write { .. } => metrics::FailureCategory::Write,
+                pipeline::PipelineError::Exit { .. } => metrics::FailureCategory::Exit,
+                pipeline::PipelineError::Rename { .. } => metrics::FailureCategory::Rename,
             };
-            write_failure_report(&config, &self_rss_samples, &ffmpeg_rss_samples,
-                &offer_latencies_us, &offer_outcomes, &windows, category);
+            write_failure_report(
+                &config,
+                &self_rss_samples,
+                &ffmpeg_rss_samples,
+                &offer_latencies_us,
+                &offer_outcomes,
+                &windows,
+                category,
+            );
             eprintln!("encoder error");
             std::process::exit(1);
         }
@@ -277,9 +287,15 @@ fn main() {
 
     // Validate output exists.
     if !config.output.exists() {
-        write_failure_report(&config, &self_rss_samples, &ffmpeg_rss_samples,
-            &offer_latencies_us, &offer_outcomes, &windows,
-            metrics::FailureCategory::EncoderExit);
+        write_failure_report(
+            &config,
+            &self_rss_samples,
+            &ffmpeg_rss_samples,
+            &offer_latencies_us,
+            &offer_outcomes,
+            &windows,
+            metrics::FailureCategory::Exit,
+        );
         eprintln!("output file missing after encoding");
         std::process::exit(1);
     }
@@ -300,7 +316,7 @@ fn main() {
     };
 
     // Build report.
-    let report = metrics::RunReport {
+    let mut final_report = metrics::RunReport {
         width: config.width,
         height: config.height,
         fps: config.fps,
@@ -328,12 +344,10 @@ fn main() {
     };
 
     // Evaluate gates.
-    let (gate_decision, memory_gate_status) = metrics::evaluate(report.clone());
+    let gate_decision = metrics::evaluate(&mut final_report);
 
     // Build final report with gate decision.
-    let mut final_report = report;
     final_report.gate_decision = gate_decision.clone();
-    final_report.memory_gate = memory_gate_status;
 
     // Write JSON report.
     match serde_json::to_string_pretty(&final_report) {
@@ -398,7 +412,11 @@ fn write_failure_report(
         },
         gate_decision: metrics::GateDecision {
             decision: metrics::Decision::NoGo,
-            failed_gates: vec![],
+            failed_gates: vec![
+                metrics::Gate::Exit,
+                metrics::Gate::Probe,
+                metrics::Gate::Duration,
+            ],
         },
         failure_category: Some(category),
         environment: metrics::gather_environment(&config.ffmpeg, &config.ffprobe),

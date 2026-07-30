@@ -87,10 +87,10 @@ pub(crate) struct OfferWindow {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum FailureCategory {
-    EncoderSpawn,
-    EncoderWrite,
-    EncoderExit,
-    EncoderRename,
+    Spawn,
+    Write,
+    Exit,
+    Rename,
 }
 
 // -- Gate enum --------------------------------------------------------------
@@ -160,14 +160,16 @@ pub(crate) fn rss_kib(pid: u32) -> std::io::Result<u64> {
     let output = std::process::Command::new("ps")
         .args(["-o", "rss=", "-p", &pid.to_string()])
         .output()?;
-    let text =
-        std::str::from_utf8(&output.stdout).map_err(std::io::Error::other)?;
+    let text = std::str::from_utf8(&output.stdout).map_err(std::io::Error::other)?;
     text.trim().parse::<u64>().map_err(std::io::Error::other)
 }
 
 // -- Environment gathering --------------------------------------------------
 
-pub(crate) fn gather_environment(ffmpeg: &std::path::Path, ffprobe: &std::path::Path) -> EnvironmentInfo {
+pub(crate) fn gather_environment(
+    ffmpeg: &std::path::Path,
+    ffprobe: &std::path::Path,
+) -> EnvironmentInfo {
     EnvironmentInfo {
         os_info: cmd_first_line("uname", &["-a"]),
         rustc_version: cmd_first_line("rustc", &["--version"]),
@@ -218,10 +220,14 @@ pub(crate) fn run_probe(
 
     let probe_json = std::process::Command::new(ffprobe)
         .args([
-            "-v", "error",
-            "-show_entries", "stream=codec_name,codec_type,width,height,avg_frame_rate",
-            "-show_entries", "format=duration",
-            "-of", "json",
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_name,codec_type,width,height,avg_frame_rate",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "json",
         ])
         .arg(output)
         .output()
@@ -231,8 +237,8 @@ pub(crate) fn run_probe(
         return Err("probe exited with non-zero status".into());
     }
 
-    let probe: ProbeOutput =
-        serde_json::from_slice(&probe_json.stdout).map_err(|e| format!("probe parse error: {e}"))?;
+    let probe: ProbeOutput = serde_json::from_slice(&probe_json.stdout)
+        .map_err(|e| format!("probe parse error: {e}"))?;
 
     // Exactly one video stream
     let video_streams: Vec<_> = probe
@@ -304,7 +310,7 @@ pub(crate) fn run_probe(
 
 // -- Gate evaluation --------------------------------------------------------
 
-pub(crate) fn evaluate(mut report: RunReport) -> (GateDecision, MemoryGateStatus) {
+pub(crate) fn evaluate(report: &mut RunReport) -> GateDecision {
     let mut failed_gates: Vec<Gate> = Vec::new();
 
     // Gate 1: Producer p99 clone+offer <= 1_000 µs
@@ -319,10 +325,10 @@ pub(crate) fn evaluate(mut report: RunReport) -> (GateDecision, MemoryGateStatus
     }
 
     // Gate 2: Zero 5-second windows with dropped/replaced ratio > 10%
-    let has_saturation = report.windows.iter().any(|w| {
-        w.offered > 0
-            && (w.replaced_or_dropped as f64 / w.offered as f64) > 0.10
-    });
+    let has_saturation = report
+        .windows
+        .iter()
+        .any(|w| w.offered > 0 && (w.replaced_or_dropped as f64 / w.offered as f64) > 0.10);
     if has_saturation {
         failed_gates.push(Gate::QueueSaturation);
     }
@@ -361,7 +367,10 @@ pub(crate) fn evaluate(mut report: RunReport) -> (GateDecision, MemoryGateStatus
         let n = post_warmup.len() as f64;
         let sum_x: f64 = post_warmup.iter().map(|(i, _)| *i as f64).sum();
         let sum_y: f64 = post_warmup.iter().map(|(_, k)| *k as f64 / 1024.0).sum();
-        let sum_xx: f64 = post_warmup.iter().map(|(i, _)| (*i as f64) * (*i as f64)).sum();
+        let sum_xx: f64 = post_warmup
+            .iter()
+            .map(|(i, _)| (*i as f64) * (*i as f64))
+            .sum();
         let sum_xy: f64 = post_warmup
             .iter()
             .map(|(i, k)| (*i as f64) * (*k as f64 / 1024.0))
@@ -429,16 +438,10 @@ pub(crate) fn evaluate(mut report: RunReport) -> (GateDecision, MemoryGateStatus
         Decision::NoGo
     };
 
-    // Move updated memory_gate back.
-    let memory_gate = report.memory_gate.clone();
-
-    (
-        GateDecision {
-            decision,
-            failed_gates,
-        },
-        memory_gate,
-    )
+    GateDecision {
+        decision,
+        failed_gates,
+    }
 }
 
 // -- Tests ------------------------------------------------------------------
@@ -528,8 +531,7 @@ mod tests {
 
         fn with_durations(mut self, source_ms: u64, encoded_ms: u64) -> Self {
             self.duration_secs = source_ms / 1000;
-            self.encoder_frames_written =
-                (encoded_ms * self.fps as u64) / 1000;
+            self.encoder_frames_written = (encoded_ms * self.fps as u64) / 1000;
             self.probe = Some(ProbeResult {
                 video_codec: "h264".into(),
                 video_fps: format!("{}/1", self.fps),
@@ -563,68 +565,63 @@ mod tests {
 
     #[test]
     fn gate_rejects_slow_producer_p99() {
-        let report = fixture_report().with_offer_latencies_us(
-            vec![200; 99]
-                .into_iter()
-                .chain([1_100])
-                .collect(),
-        );
-        let (decision, _) = evaluate(report);
+        let mut report = fixture_report()
+            .with_offer_latencies_us(vec![200; 99].into_iter().chain([1_100]).collect());
+        let decision = evaluate(&mut report);
         assert_eq!(decision.decision, Decision::NoGo);
         assert!(decision.failed_gates.contains(&Gate::ProducerP99));
     }
 
     #[test]
     fn gate_rejects_persistent_five_second_saturation() {
-        let report = fixture_report().with_window(OfferWindow {
+        let mut report = fixture_report().with_window(OfferWindow {
             offered: 150,
             replaced_or_dropped: 16,
         });
-        let (decision, _) = evaluate(report);
+        let decision = evaluate(&mut report);
         assert!(decision.failed_gates.contains(&Gate::QueueSaturation));
     }
 
     #[test]
     fn gate_rejects_unbounded_memory_growth() {
-        let report =
-            fixture_report().with_post_warmup_rss_mib(vec![100, 120, 145, 170]);
-        let (decision, _) = evaluate(report);
+        let mut report = fixture_report().with_post_warmup_rss_mib(vec![100, 120, 145, 170]);
+        let decision = evaluate(&mut report);
         assert!(decision.failed_gates.contains(&Gate::MemoryBound));
     }
 
     #[test]
     fn gate_accepts_duration_difference_of_one_frame() {
-        let report = fixture_report().with_durations(10_000, 10_034);
-        let (decision, _) = evaluate(report);
+        let mut report = fixture_report().with_durations(10_000, 10_034);
+        let decision = evaluate(&mut report);
         assert!(!decision.failed_gates.contains(&Gate::Duration));
     }
 
     #[test]
     fn gate_accepts_good_report() {
-        let report = fixture_report();
-        let (decision, _) = evaluate(report);
+        let mut report = fixture_report();
+        let decision = evaluate(&mut report);
         assert_eq!(decision.decision, Decision::Go);
         assert!(decision.failed_gates.is_empty());
     }
 
     #[test]
     fn gate_rejects_ffmpeg_nonzero_exit() {
-        let report = fixture_report().with_encoder_exit(1);
-        let (decision, _) = evaluate(report);
+        let mut report = fixture_report().with_encoder_exit(1);
+        let decision = evaluate(&mut report);
         assert!(decision.failed_gates.contains(&Gate::Exit));
     }
 
     #[test]
     fn gate_rejects_missing_probe() {
-        let report = fixture_report().with_no_probe();
-        let (decision, _) = evaluate(report);
+        let mut report = fixture_report().with_no_probe();
+        let decision = evaluate(&mut report);
         assert!(decision.failed_gates.contains(&Gate::Probe));
         assert!(decision.failed_gates.contains(&Gate::Duration));
     }
 
     #[test]
     fn gate_rejects_wrong_codec() {
-        let report = fixture_report().with_probe(ProbeResult {
+        let mut report = fixture_report().with_probe(ProbeResult {
             video_codec: "vp9".into(),
             video_fps: "30/1".into(),
             video_width: 1920,
@@ -632,13 +629,13 @@ mod tests {
             audio_stream_count: 0,
             format_duration_ms: 5_000,
         });
-        let (decision, _) = evaluate(report);
+        let decision = evaluate(&mut report);
         assert!(decision.failed_gates.contains(&Gate::Probe));
     }
 
     #[test]
     fn gate_rejects_audio_stream_present() {
-        let report = fixture_report().with_probe(ProbeResult {
+        let mut report = fixture_report().with_probe(ProbeResult {
             video_codec: "h264".into(),
             video_fps: "30/1".into(),
             video_width: 1920,
@@ -646,13 +643,13 @@ mod tests {
             audio_stream_count: 1,
             format_duration_ms: 5_000,
         });
-        let (decision, _) = evaluate(report);
+        let decision = evaluate(&mut report);
         assert!(decision.failed_gates.contains(&Gate::Probe));
     }
 
     #[test]
     fn gate_rejects_wrong_dimensions() {
-        let report = fixture_report().with_probe(ProbeResult {
+        let mut report = fixture_report().with_probe(ProbeResult {
             video_codec: "h264".into(),
             video_fps: "30/1".into(),
             video_width: 1280,
@@ -660,13 +657,13 @@ mod tests {
             audio_stream_count: 0,
             format_duration_ms: 5_000,
         });
-        let (decision, _) = evaluate(report);
+        let decision = evaluate(&mut report);
         assert!(decision.failed_gates.contains(&Gate::Probe));
     }
 
     #[test]
     fn gate_rejects_wrong_frame_rate() {
-        let report = fixture_report().with_probe(ProbeResult {
+        let mut report = fixture_report().with_probe(ProbeResult {
             video_codec: "h264".into(),
             video_fps: "60/1".into(),
             video_width: 1920,
@@ -674,43 +671,42 @@ mod tests {
             audio_stream_count: 0,
             format_duration_ms: 5_000,
         });
-        let (decision, _) = evaluate(report);
+        let decision = evaluate(&mut report);
         assert!(decision.failed_gates.contains(&Gate::Probe));
     }
 
     #[test]
     fn gate_rejects_duration_delta_over_34ms() {
-        let report = fixture_report().with_durations(10_000, 10_035);
-        let (decision, _) = evaluate(report);
+        let mut report = fixture_report().with_durations(10_000, 10_035);
+        let decision = evaluate(&mut report);
         assert!(decision.failed_gates.contains(&Gate::Duration));
     }
 
     #[test]
     fn untested_memory_gate_yields_nogo() {
         let mut report = fixture_report();
-        // Replace self_rss with errors
         report.self_rss = vec![
-            RssResult::Error { reason: "test".into() };
+            RssResult::Error {
+                reason: "test".into()
+            };
             (report.fps as usize) + 2
         ];
-        let (decision, _) = evaluate(report);
+        let decision = evaluate(&mut report);
         assert!(decision.failed_gates.contains(&Gate::MemoryBound));
     }
 
     #[test]
     fn gate_accepts_flat_memory_profile() {
-        let report = fixture_report()
-            .with_post_warmup_rss_mib(vec![100, 100, 100, 100]);
-        let (decision, _) = evaluate(report);
+        let mut report = fixture_report().with_post_warmup_rss_mib(vec![100, 100, 100, 100]);
+        let decision = evaluate(&mut report);
         assert!(!decision.failed_gates.contains(&Gate::MemoryBound));
     }
 
     #[test]
     fn gate_rejects_slope_over_one_mib_per_min() {
         // 5 post-warm-up samples, increasing by ~30 MiB each → slope > 1 MiB/min
-        let report = fixture_report()
-            .with_post_warmup_rss_mib(vec![100, 130, 160, 190, 220]);
-        let (decision, _) = evaluate(report);
+        let mut report = fixture_report().with_post_warmup_rss_mib(vec![100, 130, 160, 190, 220]);
+        let decision = evaluate(&mut report);
         assert!(decision.failed_gates.contains(&Gate::MemoryBound));
     }
 
@@ -718,10 +714,7 @@ mod tests {
 
     #[test]
     fn rss_ok_maps_to_pass() {
-        assert_eq!(
-            RssResult::Ok { kib: 1024 }.test_result(),
-            TestResult::Pass
-        );
+        assert_eq!(RssResult::Ok { kib: 1024 }.test_result(), TestResult::Pass);
     }
 
     #[test]
