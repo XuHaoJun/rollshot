@@ -89,17 +89,23 @@ pub(crate) enum VisualAnnotationContextRequest {
 #[derive(Debug)]
 pub(crate) enum PreparedVisualAnnotationContext {
     Durable {
+        #[allow(dead_code)]
         guide: rollshot_action::Guide,
         projection: rollshot_action::project::ActionGuideContextProjectionV1,
         origin: VisualAnnotationProposalOrigin,
         project_root: std::path::PathBuf,
+        #[allow(dead_code)]
         step_source: u64,
+        #[allow(dead_code)]
         keyframe: u64,
     },
     Ephemeral {
+        #[allow(dead_code)]
         guide: rollshot_action::Guide,
         origin: VisualAnnotationProposalOrigin,
+        #[allow(dead_code)]
         step_source: u64,
+        #[allow(dead_code)]
         keyframe: u64,
     },
 }
@@ -203,7 +209,7 @@ pub(crate) struct VisualAnnotationTaskInput {
 #[derive(Debug, Clone)]
 pub(crate) enum VisualAnnotationTaskResult {
     /// Successful proposal with durable task metadata.
-    Success(VisualAnnotationRunSuccess),
+    Success(Box<VisualAnnotationRunSuccess>),
     NoSuggestion {
         reason: Option<String>,
     },
@@ -217,7 +223,9 @@ pub(crate) struct VisualAnnotationRunSuccess {
     pub task_id: rollshot_agent::product_task::ProductTaskId,
     pub proposal: VisualAnnotationProposal,
     pub snapshot: rollshot_agent::product_task::ProductTaskSnapshot,
+    #[allow(dead_code)]
     pub provider_id: String,
+    #[allow(dead_code)]
     pub model_id: String,
 }
 
@@ -257,6 +265,7 @@ pub(crate) fn encode_visual_annotation_attachment(
 
 /// Scale normalized agent drafts (0.0..=1.0) to pixel-space coordinates
 /// and build a [`VisualAnnotationProposal`].
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn suggestion_batch_to_proposal(
     run_id: u64,
     origin: VisualAnnotationProposalOrigin,
@@ -696,7 +705,7 @@ pub(crate) async fn suggest_visual_annotation_task(
                     })
                     .await;
                     match promotion {
-                        Ok(Ok(snapshot)) => Ok(VisualAnnotationTaskResult::Success(
+                        Ok(Ok(snapshot)) => Ok(VisualAnnotationTaskResult::Success(Box::new(
                             VisualAnnotationRunSuccess {
                                 task_id,
                                 proposal,
@@ -704,7 +713,7 @@ pub(crate) async fn suggest_visual_annotation_task(
                                 provider_id: provider_name,
                                 model_id: model,
                             },
-                        )),
+                        ))),
                         Ok(Err(error)) => {
                             tracing::error!(
                                 target: "rollshot::action::visual_annotation_agent",
@@ -814,6 +823,7 @@ fn build_visual_annotation_prompt(step: &GuideStep) -> String {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn map_terminal_to_result(
     terminal: VisualAnnotationRunTerminal,
     run_id: u64,
@@ -1151,6 +1161,7 @@ pub(crate) fn visual_review_receipt(
 ///
 /// Returns `Some((snapshot, proposal))` only when the task is `ReadyForReview`,
 /// the stored proposal decodes, and `rebase_restored` yields `Ready`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn restore_visual_annotation_proposal(
     store: &crate::agent_store::TaskStore,
     binding: &rollshot_agent::product_task::SourceBinding,
@@ -1477,6 +1488,7 @@ pub(crate) mod restore_test_helpers {
 
     /// `restore_visual_annotation_proposal` with an explicit provider argument
     /// (used to prove no provider call is made). The provider is unused.
+    #[allow(clippy::too_many_arguments)]
     pub fn restore_visual_with_provider(
         store: &crate::agent_store::TaskStore,
         binding: &rollshot_agent::product_task::SourceBinding,
@@ -1507,6 +1519,7 @@ pub(crate) mod restore_test_helpers {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn visual_authority_with_grants(
     task_id: rollshot_agent::product_task::ProductTaskId,
     run_id: rollshot_agent::domain::RunId,
@@ -2393,7 +2406,6 @@ mod tests {
         use super::*;
         use rollshot_agent::authority::DisclosureCeiling;
         use rollshot_agent::product_task::{ArtifactKind, ArtifactSummary, TaskKind, TaskStatus};
-        use rollshot_agent::NormalizedPoint;
 
         /// Scripted provider that returns one valid tool call.
         struct OneCallProvider {
@@ -2950,7 +2962,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::agent_store::TaskStore::open(dir.path()).unwrap();
         let binding = visual_binding_fixture();
-        let task_id = seed_ready_for_review_visual_task(&store, &binding);
+        let _task_id = seed_ready_for_review_visual_task(&store, &binding);
 
         // Same binding (passes reconcile_for_source), but keyframe digest
         // differs — rebase_restored marks all suggestions Stale.
@@ -2973,7 +2985,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::agent_store::TaskStore::open(dir.path()).unwrap();
         let binding = visual_binding_fixture();
-        let task_id = seed_ready_for_review_visual_task(&store, &binding);
+        let _task_id = seed_ready_for_review_visual_task(&store, &binding);
 
         let result = restore_visual_annotation_proposal(
             &store,
@@ -2994,7 +3006,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::agent_store::TaskStore::open(dir.path()).unwrap();
         let binding = visual_binding_fixture();
-        let task_id = seed_ready_for_review_visual_task(&store, &binding);
+        let _task_id = seed_ready_for_review_visual_task(&store, &binding);
 
         // Different image width.
         let result = restore_visual_annotation_proposal(
@@ -3650,8 +3662,6 @@ mod tests {
 
     #[test]
     fn visual_task_files_hold_no_image_or_skill_body() {
-        use rollshot_agent::product_task::TaskStatus;
-
         let dir = tempfile::tempdir().unwrap();
         let store = crate::agent_store::TaskStore::open(dir.path()).unwrap();
         let binding = visual_binding_fixture();

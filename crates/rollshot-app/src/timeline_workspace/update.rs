@@ -155,7 +155,7 @@ pub enum Message {
     #[allow(dead_code)]
     VisualAnnotationProposalLoaded {
         run_id: u64,
-        result: Result<super::visual_annotation_agent::VisualAnnotationTaskResult, String>,
+        result: Box<Result<super::visual_annotation_agent::VisualAnnotationTaskResult, String>>,
     },
     /// Cancel the in-flight visual annotation suggestion run and transition to Idle.
     #[allow(dead_code)]
@@ -571,7 +571,7 @@ pub(super) fn restore_visual_annotation_proposal_for_selected_step(state: &mut T
     let mut frame_source = state.frame_source.take();
     let image_data = frame_source.as_mut().and_then(|s| {
         s.cached(step.keyframe).map(|img| {
-            let sha = super::visual_annotation_agent::visual_keyframe_digest(&*img);
+            let sha = super::visual_annotation_agent::visual_keyframe_digest(&img);
             (img.width(), img.height(), sha)
         })
     });
@@ -730,8 +730,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                         }
                         if uncached.is_empty() {
                             // All frames cached — attempt visual restore now.
-                            // The mutable borrow on frame_source is about to be released.
-                            drop(source);
+                            let _ = source;
                             if keyframe_hydrated {
                                 restore_visual_annotation_proposal_for_selected_step(state);
                             }
@@ -743,7 +742,7 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                             .filter_map(|&id| source.load_request(id).map(|req| (id, req)))
                             .collect();
                         if requests.is_empty() {
-                            drop(source);
+                            let _ = source;
                             if keyframe_hydrated {
                                 restore_visual_annotation_proposal_for_selected_step(state);
                             }
@@ -2122,10 +2121,11 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                     adapter,
                     task_cancellation,
                 ),
-                move |result| Message::VisualAnnotationProposalLoaded { run_id, result },
+                move |result| Message::VisualAnnotationProposalLoaded { run_id, result: Box::new(result) },
             ))
         }
         Message::VisualAnnotationProposalLoaded { run_id, result } => {
+            let result = *result;
             let expected_id = match &state.visual_annotation_suggestion {
                 super::VisualAnnotationSuggestionState::Running { run_id, .. } => Some(*run_id),
                 _ => None,
@@ -3561,8 +3561,7 @@ fn handle_frame_load_completed(
     // frames needed async decode).
     let keyframe_available = keyframe_loaded || source.cached(keyframe).is_some();
 
-    // Release the mutable borrow on frame_source before attempting restore.
-    drop(source);
+    let _ = source;
 
     if any_required_failed {
         // Set CorruptReadOnly access to prevent further mutations.
@@ -6414,9 +6413,9 @@ mod tests {
             &mut state,
             Message::VisualAnnotationProposalLoaded {
                 run_id,
-                result: Ok(
-                    crate::timeline_workspace::visual_annotation_agent::VisualAnnotationTaskResult::Success(success),
-                ),
+                result: Box::new(Ok(
+                    crate::timeline_workspace::visual_annotation_agent::VisualAnnotationTaskResult::Success(Box::new(success)),
+                )),
             },
         );
 
@@ -6447,9 +6446,9 @@ mod tests {
             &mut state,
             Message::VisualAnnotationProposalLoaded {
                 run_id: 1,
-                result: Ok(
-                    crate::timeline_workspace::visual_annotation_agent::VisualAnnotationTaskResult::Success(old_success),
-                ),
+                result: Box::new(Ok(
+                    crate::timeline_workspace::visual_annotation_agent::VisualAnnotationTaskResult::Success(Box::new(old_success)),
+                )),
             },
         );
 
@@ -6478,9 +6477,9 @@ mod tests {
             &mut state,
             Message::VisualAnnotationProposalLoaded {
                 run_id,
-                result: Ok(crate::timeline_workspace::visual_annotation_agent::VisualAnnotationTaskResult::NoSuggestion {
+                result: Box::new(Ok(crate::timeline_workspace::visual_annotation_agent::VisualAnnotationTaskResult::NoSuggestion {
                     reason: Some("no suggestion".to_string()),
-                }),
+                })),
             },
         );
 
@@ -6511,7 +6510,7 @@ mod tests {
             &mut state,
             Message::VisualAnnotationProposalLoaded {
                 run_id,
-                result: Err("provider failed".to_string()),
+                result: Box::new(Err("provider failed".to_string())),
             },
         );
 
@@ -6906,7 +6905,7 @@ mod tests {
     ) -> crate::timeline_workspace::visual_annotation_agent::VisualAnnotationRunSuccess {
         use rollshot_agent::product_task::{ProductTaskSnapshot, SourceBinding, TaskKind};
         let proposal = visual_proposal_for_first_step(state, run_id);
-        let task_id = rollshot_agent::product_task::ProductTaskId::parse(&format!(
+        let task_id = rollshot_agent::product_task::ProductTaskId::parse(format!(
             "task-00000000-0000-4000-8000-{run_id:012x}"
         ))
         .unwrap();
