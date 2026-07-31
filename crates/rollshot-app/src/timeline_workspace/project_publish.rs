@@ -873,6 +873,7 @@ mod tests {
                 annotations: None,
             }],
             import_warnings: Vec::new(),
+            motion: None,
         }
     }
 

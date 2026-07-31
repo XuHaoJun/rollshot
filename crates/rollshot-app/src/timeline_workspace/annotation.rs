@@ -661,11 +661,11 @@ mod tests {
     fn frame_store_with_two_frames() -> FrameStore {
         let mut store = FrameStore::new(StoreConfig::default());
         let first = store.ingest(
-            ::image::RgbaImage::from_pixel(8, 8, ::image::Rgba([0, 0, 0, 255])),
+            std::sync::Arc::new(::image::RgbaImage::from_pixel(8, 8, ::image::Rgba([0, 0, 0, 255]))),
             0,
         );
         let second = store.ingest(
-            ::image::RgbaImage::from_pixel(8, 8, ::image::Rgba([255, 255, 255, 255])),
+            std::sync::Arc::new(::image::RgbaImage::from_pixel(8, 8, ::image::Rgba([255, 255, 255, 255]))),
             100,
         );
         store.retain_window(first);

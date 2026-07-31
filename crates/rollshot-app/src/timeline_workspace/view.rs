@@ -1923,11 +1923,11 @@ mod tests {
 
         fn ws_project_backed() -> TimelineWorkspace {
             use rollshot_action::project::{
-                ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
+                ProjectFrame, ProjectManifestV2, ProjectStep, ProjectStepId,
             };
             use rollshot_action::{CandidateKind, DetectReason, InputCapability, InputSourceKind};
 
-            let manifest = ProjectManifestV1 {
+            let manifest = ProjectManifestV2 {
                 schema_version: 1,
                 revision: 7,
                 title: "Test Guide".into(),
@@ -1959,10 +1959,12 @@ mod tests {
                     nearby: vec![1],
                     annotations: None,
                 }],
+                import_warnings: Vec::new(),
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root: std::path::PathBuf::from("/tmp/test-project"),
                 manifest: manifest.into(),
+                motion: rollshot_action::project::MotionAssetLoad::None,
             };
             let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
             let mut ws = crate::timeline_workspace::project::from_loaded_project(

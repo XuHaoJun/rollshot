@@ -141,6 +141,7 @@ fn build_initial_snapshot(pixel_a: Arc<RgbaImage>, pixel_b: Arc<RgbaImage>) -> P
             },
         ],
         import_warnings: Vec::new(),
+        motion: None,
     }
 }
 
@@ -331,6 +332,7 @@ fn round_trip_full_public_api_contract() {
             },
         ],
         import_warnings: Vec::new(),
+        motion: None,
     };
 
     // ---- Save (revision 2) ----
@@ -665,6 +667,7 @@ fn save_rejects_changed_base_revision() {
             annotations: None,
         }],
         import_warnings: Vec::new(),
+        motion: None,
     };
 
     let err = save_project(&snap, &root).unwrap_err();

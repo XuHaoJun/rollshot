@@ -593,7 +593,7 @@ pub(super) fn restore_visual_annotation_proposal_for_selected_step(state: &mut T
             Err(_) => return,
         };
     // Load the project to build the projection for the source binding.
-    let loaded = match rollshot_action::project::load_project(root) {
+    let loaded = match rollshot_action::project::load_project(root, None) {
         Ok(l) => l,
         Err(_) => return,
     };
@@ -4154,6 +4154,7 @@ fn handle_save_worker_finished(
             let loaded = rollshot_action::project::LoadedProject {
                 root: root.clone(),
                 manifest,
+                motion: rollshot_action::project::MotionAssetLoad::None,
             };
             let source = rollshot_action::ProjectFrameSource::from_loaded(
                 &loaded,
@@ -4188,6 +4189,7 @@ fn handle_save_worker_finished(
             let loaded = rollshot_action::project::LoadedProject {
                 root: root.clone(),
                 manifest,
+                motion: rollshot_action::project::MotionAssetLoad::None,
             };
             let source = rollshot_action::ProjectFrameSource::from_loaded(
                 &loaded,
@@ -5792,9 +5794,10 @@ mod tests {
                 annotations: None,
             }],
             import_warnings: Vec::new(),
+            motion: None,
         };
         create_project(&snapshot, &project_root).unwrap();
-        let loaded = load_project(&project_root).unwrap();
+        let loaded = load_project(&project_root, None).unwrap();
         let projection = ActionGuideContextProjectionV1::from_loaded_project(&loaded).unwrap();
         let guide = projection.to_guide().unwrap();
         let context = super::super::caption_agent::PreparedCaptionContext::Durable {
@@ -7493,11 +7496,11 @@ key_source = { Env = "OPENAI_API_KEY" }
 
         fn ws_project_backed_clean() -> TimelineWorkspace {
             use rollshot_action::project::{
-                ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
+                ProjectFrame, ProjectManifestV2, ProjectStep, ProjectStepId,
             };
             use rollshot_action::{CandidateKind, DetectReason, InputCapability, InputSourceKind};
 
-            let manifest = ProjectManifestV1 {
+            let manifest = ProjectManifestV2 {
                 schema_version: 1,
                 revision: 7,
                 title: "Test Guide".into(),
@@ -7529,10 +7532,12 @@ key_source = { Env = "OPENAI_API_KEY" }
                     nearby: vec![1],
                     annotations: None,
                 }],
+                import_warnings: Vec::new(),
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root: std::path::PathBuf::from("/tmp/test-project"),
                 manifest: manifest.into(),
+                motion: rollshot_action::project::MotionAssetLoad::None,
             };
             let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
             let mut ws = crate::timeline_workspace::project::from_loaded_project(
@@ -7812,7 +7817,7 @@ key_source = { Env = "OPENAI_API_KEY" }
         #[test]
         fn aggregate_published_when_all_current() {
             use rollshot_action::project::{
-                ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
+                ProjectFrame, ProjectManifestV2, ProjectStep, ProjectStepId,
             };
             use rollshot_action::{CandidateKind, DetectReason, InputCapability, InputSourceKind};
 
@@ -7820,7 +7825,7 @@ key_source = { Env = "OPENAI_API_KEY" }
             let root = dir.path().join("test-project.rollshot-guide");
             std::fs::create_dir_all(&root).unwrap();
 
-            let manifest = ProjectManifestV1 {
+            let manifest = ProjectManifestV2 {
                 schema_version: 1,
                 revision: 7,
                 title: "Test Guide".into(),
@@ -7852,10 +7857,12 @@ key_source = { Env = "OPENAI_API_KEY" }
                     nearby: vec![1],
                     annotations: None,
                 }],
+                import_warnings: Vec::new(),
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root: root.clone(),
                 manifest: manifest.into(),
+                motion: rollshot_action::project::MotionAssetLoad::None,
             };
             let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
             let mut ws = crate::timeline_workspace::project::from_loaded_project(
@@ -7961,11 +7968,11 @@ key_source = { Env = "OPENAI_API_KEY" }
         #[test]
         fn retry_rejects_when_read_only() {
             use rollshot_action::project::{
-                ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
+                ProjectFrame, ProjectManifestV2, ProjectStep, ProjectStepId,
             };
             use rollshot_action::{CandidateKind, DetectReason, InputCapability, InputSourceKind};
 
-            let manifest = ProjectManifestV1 {
+            let manifest = ProjectManifestV2 {
                 schema_version: 1,
                 revision: 7,
                 title: "Test Guide".into(),
@@ -7997,10 +8004,12 @@ key_source = { Env = "OPENAI_API_KEY" }
                     nearby: vec![1],
                     annotations: None,
                 }],
+                import_warnings: Vec::new(),
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root: std::path::PathBuf::from("/tmp/test-project"),
                 manifest: manifest.into(),
+                motion: rollshot_action::project::MotionAssetLoad::None,
             };
             let mut ws = crate::timeline_workspace::project::from_loaded_project(
                 loaded,
@@ -8111,11 +8120,11 @@ key_source = { Env = "OPENAI_API_KEY" }
         #[test]
         fn share_editable_rejected_when_read_only() {
             use rollshot_action::project::{
-                ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
+                ProjectFrame, ProjectManifestV2, ProjectStep, ProjectStepId,
             };
             use rollshot_action::{CandidateKind, DetectReason, InputCapability, InputSourceKind};
 
-            let manifest = ProjectManifestV1 {
+            let manifest = ProjectManifestV2 {
                 schema_version: 1,
                 revision: 7,
                 title: "Test Guide".into(),
@@ -8147,10 +8156,12 @@ key_source = { Env = "OPENAI_API_KEY" }
                     nearby: vec![1],
                     annotations: None,
                 }],
+                import_warnings: Vec::new(),
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root: std::path::PathBuf::from("/tmp/test-project"),
                 manifest: manifest.into(),
+                motion: rollshot_action::project::MotionAssetLoad::None,
             };
             let mut ws = crate::timeline_workspace::project::from_loaded_project(
                 loaded,
@@ -8396,7 +8407,7 @@ key_source = { Env = "OPENAI_API_KEY" }
         };
         use image::{Rgba, RgbaImage};
         use rollshot_action::project::{
-            EnabledOutputs, ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
+            EnabledOutputs, ProjectFrame, ProjectManifestV2, ProjectStep, ProjectStepId,
         };
         use rollshot_action::{
             CandidateKind, DetectReason, InputCapability, InputSourceKind, LoadedStepFrame,
@@ -8437,7 +8448,7 @@ key_source = { Env = "OPENAI_API_KEY" }
             });
         }
 
-        let manifest = ProjectManifestV1 {
+        let manifest = ProjectManifestV2 {
             schema_version: 1,
             revision: 3,
             title: "Test Guide".into(),
@@ -8463,10 +8474,12 @@ key_source = { Env = "OPENAI_API_KEY" }
                 nearby: vec![1, 2, 3],
                 annotations: None,
             }],
+            import_warnings: Vec::new(),
         };
         let loaded = rollshot_action::project::LoadedProject {
             root: root.clone(),
             manifest: manifest.into(),
+            motion: rollshot_action::project::MotionAssetLoad::None,
         };
 
         // Write manifest to disk so load_project() can read it.
