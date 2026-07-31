@@ -389,8 +389,10 @@ fn worker_loop(
                         cleanup_process(&mut child, part_path);
                         return MotionRecordingOutcome::Failure(MotionFailureCategory::BrokenPipe);
                     }
-                    last_image = Some(frame.image);
                 }
+                // Always update last_image so duplicate/late frames
+                // still replace the current visual state for future holds.
+                last_image = Some(frame.image);
             }
             None => {
                 // No frame available. Check if the sender disconnected.
@@ -420,8 +422,10 @@ fn worker_loop(
                 cleanup_process(&mut child, part_path);
                 return MotionRecordingOutcome::Failure(MotionFailureCategory::BrokenPipe);
             }
-            last_image = Some(frame.image);
         }
+        // Always update last_image so duplicate/late frames
+        // still replace the current visual state for future holds.
+        last_image = Some(frame.image);
     }
 
     // Phase 3: finalize — fill hold frames to the session duration.
