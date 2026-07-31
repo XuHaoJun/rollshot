@@ -2460,4 +2460,168 @@ mod tests {
             "Rollshot will send this one reviewed keyframe to openai using gpt-test to suggest callouts, notes, or redactions. Review every suggestion before it changes your guide. Original keyframes and Issue Packs may still contain unredacted evidence.",
         );
     }
+
+    /// Deterministic iced UI scenario tests for workspace motion states.
+    ///
+    /// Covers Ready, Failed, and Unavailable motion states at default (1100×760)
+    /// and minimum (640×420) viewports. Each scenario runs structural assertions
+    /// first, then emits a PNG artifact for semantic inspection.
+    #[cfg(feature = "action-guide")]
+    #[test]
+    #[ignore = "writes visual scenario artifacts"]
+    fn action_guide_motion_workspace_ui_scenarios() {
+        use crate::timeline_workspace::motion::WorkspaceMotion;
+        use iced::Size as IcedSize;
+        use iced_test::Simulator;
+        use rollshot_action::motion::{
+            MotionAudio, MotionCodec, MotionFailureCategory, MotionMetadata, ValidatedMotionAsset,
+        };
+        use serde_json::json;
+
+        fn dummy_asset() -> ValidatedMotionAsset {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("recording.mp4");
+            std::fs::write(&path, b"fake mp4").unwrap();
+            ValidatedMotionAsset::new_for_test(
+                MotionMetadata {
+                    sha256: "a".repeat(64),
+                    duration_ms: 12_300,
+                    width: 1920,
+                    height: 1080,
+                    fps_numerator: 30,
+                    fps_denominator: 1,
+                    codec: MotionCodec::H264,
+                    audio: MotionAudio::None,
+                },
+                path,
+                dir.into_path(),
+            )
+        }
+
+        let artifact_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/ui-artifacts/action-guide-motion");
+        std::fs::create_dir_all(&artifact_dir).ok();
+
+        // Define scenarios: (name, viewport, motion_state, expected_texts)
+        let ready_metadata = "0:12.3 · 1920×1080 · 30 fps · Silent H.264";
+        let failed_copy = "Guide created; Screen recording could not be saved: recording validation failed.";
+        let unavailable_copy = "Guide created; Screen recording could not be saved: FFmpeg is not available.";
+
+        let scenarios: Vec<(&str, IcedSize, &str, Vec<&str>)> = vec![
+            (
+                "workspace-ready-1100x760",
+                IcedSize::new(1100.0, 760.0),
+                "ready",
+                vec![ready_metadata, "Save recording…"],
+            ),
+            (
+                "workspace-ready-640x420",
+                IcedSize::new(640.0, 420.0),
+                "ready",
+                vec![ready_metadata, "Save recording…"],
+            ),
+            (
+                "workspace-failed-1100x760",
+                IcedSize::new(1100.0, 760.0),
+                "failed",
+                vec![failed_copy],
+            ),
+            (
+                "workspace-failed-640x420",
+                IcedSize::new(640.0, 420.0),
+                "failed",
+                vec![failed_copy],
+            ),
+            (
+                "workspace-unavailable-1100x760",
+                IcedSize::new(1100.0, 760.0),
+                "unavailable",
+                vec![unavailable_copy],
+            ),
+            (
+                "workspace-unavailable-640x420",
+                IcedSize::new(640.0, 420.0),
+                "unavailable",
+                vec![unavailable_copy],
+            ),
+        ];
+
+        let mut manifest_rows: Vec<serde_json::Value> = Vec::new();
+
+        for (name, size, motion_kind, expected_texts) in &scenarios {
+            let mut state = ws(recording_from_frames(), InputCapability::SemanticEvents);
+
+            // Set the motion state.
+            match *motion_kind {
+                "ready" => {
+                    state.motion = WorkspaceMotion::Ready(dummy_asset());
+                }
+                "failed" => {
+                    state.motion =
+                        WorkspaceMotion::Failed(MotionFailureCategory::Probe);
+                }
+                "unavailable" => {
+                    state.motion =
+                        WorkspaceMotion::Unavailable(MotionFailureCategory::ToolUnavailable);
+                }
+                _ => unreachable!(),
+            }
+
+            let mut ui = Simulator::with_size(
+                iced::Settings::default(),
+                *size,
+                view(&state),
+            );
+
+            // Structural assertions.
+            for label in expected_texts {
+                let target = ui
+                    .find(*label)
+                    .unwrap_or_else(|e| panic!("{label:?} missing in {name}: {e}"));
+                assert!(
+                    target.visible_bounds().is_some(),
+                    "{label:?} not visible in {name}"
+                );
+            }
+
+            // Emit PNG artifact.
+            let snapshot = ui
+                .snapshot(&iced::Theme::Dark)
+                .unwrap_or_else(|e| panic!("snapshot failed for {name}: {e}"));
+            let base = artifact_dir.join(name);
+            let written = snapshot
+                .matches_image(&base)
+                .unwrap_or_else(|e| panic!("matches_image failed for {name}: {e}"));
+            assert!(written, "{name}: baseline PNG was not written");
+
+            manifest_rows.push(json!({
+                "scenario": name,
+                "viewport": format!("{}x{}", size.width as u32, size.height as u32),
+                "motion_state": motion_kind,
+                "expected_key_texts": expected_texts,
+                "baseline": format!("{name}"),
+                "actual": format!("{name}"),
+                "diff": serde_json::Value::Null,
+                "structural_pass": true,
+            }));
+        }
+
+        // Append to manifest (shared with action_guide_home scenarios).
+        let manifest_path = artifact_dir.join("manifest.json");
+        let mut manifest: serde_json::Value = if manifest_path.exists() {
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap()
+        } else {
+            json!({
+                "suite": "action-guide-motion",
+                "crate": "rollshot-app",
+                "theme": "Dark",
+                "scenarios": [],
+            })
+        };
+        if let Some(scenarios_arr) = manifest.get_mut("scenarios").and_then(|v| v.as_array_mut()) {
+            scenarios_arr.extend(manifest_rows);
+        }
+        std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap())
+            .expect("write manifest");
+    }
 }

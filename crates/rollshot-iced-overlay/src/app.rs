@@ -1583,4 +1583,101 @@ mod tests {
         // Once failed, it stays failed (no automatic recovery to On).
         assert!(matches!(state.motion_status, super::MotionIndicatorStatus::Failed(_)));
     }
+
+    /// Deterministic iced UI scenario tests for overlay motion indicators.
+    ///
+    /// Covers MotionIndicatorStatus::On and Failed at the default overlay
+    /// viewport. Each scenario runs structural assertions first, then emits
+    /// a PNG artifact for semantic inspection.
+    #[cfg(feature = "action-guide")]
+    #[test]
+    #[ignore = "writes visual scenario artifacts"]
+    fn motion_indicator_ui_scenarios() {
+        use iced::Size as IcedSize;
+        use iced_test::Simulator;
+        use rollshot_action::motion::MotionFailureCategory;
+        use serde_json::json;
+
+        let artifact_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/ui-artifacts/action-guide-motion");
+        std::fs::create_dir_all(&artifact_dir).ok();
+
+        let scenarios: Vec<(&str, IcedSize, super::MotionIndicatorStatus, Vec<&str>)> = vec![
+            (
+                "motion-on-1100x760",
+                IcedSize::new(1100.0, 760.0),
+                super::MotionIndicatorStatus::On,
+                vec!["Motion recording on"],
+            ),
+            (
+                "motion-failed-1100x760",
+                IcedSize::new(1100.0, 760.0),
+                super::MotionIndicatorStatus::Failed(MotionFailureCategory::BrokenPipe),
+                vec!["Screen recording failed; Action Guide is still recording."],
+            ),
+        ];
+
+        let mut manifest_rows: Vec<serde_json::Value> = Vec::new();
+
+        for (name, size, status, expected_texts) in &scenarios {
+            let mut state = super::OverlayState {
+                motion_status: *status,
+                recording_started: Some(std::time::Instant::now()),
+                window_size: Some(iced::Size::new(size.width, size.height)),
+                ..super::OverlayState::default()
+            };
+            state.workspace.begin_recording();
+            let mut ui = Simulator::with_size(iced::Settings::default(), *size, super::view(&state));
+
+            // Structural assertions.
+            for label in expected_texts {
+                let target = ui
+                    .find(*label)
+                    .unwrap_or_else(|e| panic!("{label:?} missing in {name}: {e}"));
+                assert!(
+                    target.visible_bounds().is_some(),
+                    "{label:?} not visible in {name}"
+                );
+            }
+
+            // Emit PNG artifact.
+            let snapshot = ui
+                .snapshot(&iced::Theme::Dark)
+                .unwrap_or_else(|e| panic!("snapshot failed for {name}: {e}"));
+            let base = artifact_dir.join(name);
+            let written = snapshot
+                .matches_image(&base)
+                .unwrap_or_else(|e| panic!("matches_image failed for {name}: {e}"));
+            assert!(written, "{name}: baseline PNG was not written");
+
+            manifest_rows.push(json!({
+                "scenario": name,
+                "viewport": format!("{}x{}", size.width as u32, size.height as u32),
+                "motion_indicator": format!("{status:?}"),
+                "expected_key_texts": expected_texts,
+                "baseline": format!("{name}"),
+                "actual": format!("{name}"),
+                "diff": serde_json::Value::Null,
+                "structural_pass": true,
+            }));
+        }
+
+        // Append to manifest.
+        let manifest_path = artifact_dir.join("manifest.json");
+        let mut manifest: serde_json::Value = if manifest_path.exists() {
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap()
+        } else {
+            json!({
+                "suite": "action-guide-motion",
+                "crate": "rollshot-iced-overlay",
+                "theme": "Dark",
+                "scenarios": [],
+            })
+        };
+        if let Some(scenarios_arr) = manifest.get_mut("scenarios").and_then(|v| v.as_array_mut()) {
+            scenarios_arr.extend(manifest_rows);
+        }
+        std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap())
+            .expect("write manifest");
+    }
 }
