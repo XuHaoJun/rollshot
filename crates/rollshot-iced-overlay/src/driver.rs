@@ -644,11 +644,13 @@ impl ActionRecording {
         options: &ActionGuideRecordingOptions,
     ) -> Self {
         use rollshot_action::{DetectorConfig, StoreConfig};
+        let mut motion_failure = None;
         let motion = options.motion_toolchain.as_ref().and_then(|toolchain| {
             match MotionRecorder::start(toolchain, region.width, region.height) {
                 Ok(recorder) => Some(recorder),
                 Err(e) => {
                     tracing::warn!(target: TARGET_CAPTURE, %e, "motion recorder start failed");
+                    motion_failure = Some(e);
                     None
                 }
             }
@@ -664,7 +666,7 @@ impl ActionRecording {
             // reason (see `rollshot_action::StartedSemanticInput`).
             input: rollshot_action::StartedSemanticInput::start(source, region),
             motion,
-            motion_failure: None,
+            motion_failure,
         }
     }
 
