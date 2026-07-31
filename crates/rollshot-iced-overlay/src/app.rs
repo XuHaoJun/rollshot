@@ -65,23 +65,17 @@ pub(crate) enum OverlayMessage {
     DragEnd,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg(feature = "action-guide")]
 #[allow(dead_code)] // On and Failed constructed in tests and future integration
 pub(crate) enum MotionIndicatorStatus {
     /// Motion recording was not requested.
+    #[default]
     Disabled,
     /// Motion encoder is running.
     On,
     /// Motion encoder failed.
     Failed(rollshot_action::motion::MotionFailureCategory),
-}
-
-#[cfg(feature = "action-guide")]
-impl Default for MotionIndicatorStatus {
-    fn default() -> Self {
-        Self::Disabled
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
