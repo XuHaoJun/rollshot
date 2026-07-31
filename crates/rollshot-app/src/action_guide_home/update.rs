@@ -94,6 +94,8 @@ pub enum Message {
     CancelRecordPreflight,
     PreflightToolchainResolved(crate::managed_ffmpeg::VideoImportToolchainResolution),
     PreflightSetupFinished(Result<(), String>),
+    PreflightRetrySetup,
+    PreflightContinueGuideOnly,
 }
 
 pub enum Effect {
@@ -595,6 +597,25 @@ impl ActionGuideHome {
                         self.message = Some(err);
                         Update::none()
                     }
+                }
+            }
+            Message::PreflightRetrySetup => {
+                let Some(ref mut preflight) = self.preflight else {
+                    return Update::none();
+                };
+                preflight.phase = RecordPreflightPhase::Resolving;
+                Update {
+                    task: setup_recording_toolchain_task(),
+                    effect: Effect::None,
+                }
+            }
+            Message::PreflightContinueGuideOnly => {
+                self.preflight = None;
+                Update {
+                    task: Task::none(),
+                    effect: Effect::StartRecording {
+                        motion_toolchain: None,
+                    },
                 }
             }
         }

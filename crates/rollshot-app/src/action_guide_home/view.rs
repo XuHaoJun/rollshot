@@ -101,10 +101,10 @@ fn preflight_view<'a>(state: &'a ActionGuideHome) -> Element<'a, Message> {
 
     if let RecordPreflightPhase::NeedsSetup(_) = &preflight.phase {
         let retry_btn = button(text("Retry/setup").size(16))
-            .on_press(Message::ConfirmRecordPreflight)
+            .on_press(Message::PreflightRetrySetup)
             .padding([10, 20]);
         let guide_only_btn = button(text("Continue Guide only").size(16))
-            .on_press(Message::ToggleMotion)
+            .on_press(Message::PreflightContinueGuideOnly)
             .padding([10, 20]);
         let setup_actions = row![retry_btn, guide_only_btn].spacing(12);
         body = body.push(setup_actions);
