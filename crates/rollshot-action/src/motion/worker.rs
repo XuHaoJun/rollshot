@@ -129,7 +129,7 @@ impl MotionRecorder {
         sink_factory: SinkFactory,
     ) -> Result<Self, MotionFailureCategory> {
         // Validate dimensions.
-        if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
+        if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
             return Err(MotionFailureCategory::Filesystem);
         }
 
@@ -316,6 +316,7 @@ impl Drop for MotionRecorder {
 
 // ─── Worker thread ───────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn worker_loop(
     mut child: Child,
     mut sink: Box<dyn MotionSink>,
@@ -363,13 +364,11 @@ fn worker_loop(
                 if let Some(ref img) = last_image {
                     for _ in 0..emission.repeat_previous {
                         let rgba = img.as_raw();
-                        if rgba.len() == frame_size {
-                            if sink.write(rgba).is_err() {
-                                cleanup_process(&mut child, part_path);
-                                return MotionRecordingOutcome::Failure(
-                                    MotionFailureCategory::BrokenPipe,
-                                );
-                            }
+                        if rgba.len() == frame_size && sink.write(rgba).is_err() {
+                            cleanup_process(&mut child, part_path);
+                            return MotionRecordingOutcome::Failure(
+                                MotionFailureCategory::BrokenPipe,
+                            );
                         }
                     }
                 }
@@ -377,13 +376,9 @@ fn worker_loop(
                 // Write the new frame.
                 if emission.write_new {
                     let rgba = frame.image.as_raw();
-                    if rgba.len() == frame_size {
-                        if sink.write(rgba).is_err() {
-                            cleanup_process(&mut child, part_path);
-                            return MotionRecordingOutcome::Failure(
-                                MotionFailureCategory::BrokenPipe,
-                            );
-                        }
+                    if rgba.len() == frame_size && sink.write(rgba).is_err() {
+                        cleanup_process(&mut child, part_path);
+                        return MotionRecordingOutcome::Failure(MotionFailureCategory::BrokenPipe);
                     }
                     last_image = Some(frame.image);
                 }
@@ -404,21 +399,17 @@ fn worker_loop(
         if let Some(ref img) = last_image {
             for _ in 0..emission.repeat_previous {
                 let rgba = img.as_raw();
-                if rgba.len() == frame_size {
-                    if sink.write(rgba).is_err() {
-                        cleanup_process(&mut child, part_path);
-                        return MotionRecordingOutcome::Failure(MotionFailureCategory::BrokenPipe);
-                    }
+                if rgba.len() == frame_size && sink.write(rgba).is_err() {
+                    cleanup_process(&mut child, part_path);
+                    return MotionRecordingOutcome::Failure(MotionFailureCategory::BrokenPipe);
                 }
             }
         }
         if emission.write_new {
             let rgba = frame.image.as_raw();
-            if rgba.len() == frame_size {
-                if sink.write(rgba).is_err() {
-                    cleanup_process(&mut child, part_path);
-                    return MotionRecordingOutcome::Failure(MotionFailureCategory::BrokenPipe);
-                }
+            if rgba.len() == frame_size && sink.write(rgba).is_err() {
+                cleanup_process(&mut child, part_path);
+                return MotionRecordingOutcome::Failure(MotionFailureCategory::BrokenPipe);
             }
             last_image = Some(frame.image);
         }
@@ -540,6 +531,7 @@ pub(crate) mod tests {
     }
 
     impl TestSink {
+        #[allow(dead_code)]
         pub fn new() -> Self {
             Self { frames: Vec::new() }
         }
@@ -614,6 +606,7 @@ pub(crate) mod tests {
 
     #[test]
     fn valid_h264_fixture_parses() {
+        #[allow(clippy::useless_format)]
         let raw = format!(
             r#"{{
                 "streams": [{{
@@ -640,6 +633,7 @@ pub(crate) mod tests {
 
     #[test]
     fn duration_within_34ms_tolerance() {
+        #[allow(clippy::useless_format)]
         let raw = format!(
             r#"{{
                 "streams": [{{
@@ -985,7 +979,7 @@ pub(crate) mod tests {
                 // Duration within 34ms of 2000ms.
                 let dur = asset.duration_ms();
                 assert!(
-                    dur >= 1966 && dur <= 2034,
+                    (1966..=2034).contains(&dur),
                     "duration {dur}ms not within 34ms of 2000ms"
                 );
                 assert!(!asset.sha256().is_empty());

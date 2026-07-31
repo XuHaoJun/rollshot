@@ -5,6 +5,8 @@ use rollshot_overlay_core::capture_miss::{
     StitchProgressSignal,
 };
 
+#[cfg(feature = "action-guide")]
+use std::sync::atomic::AtomicU8;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;

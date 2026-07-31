@@ -4,8 +4,6 @@
 //! blocks — the store absorbs and bounds bursts (see `FrameStore`). `finish`
 //! returns the candidates plus the store so export can read keyframe pixels.
 
-use image::RgbaImage;
-
 use crate::detector::{CandidateMarker, Detector, DetectorConfig};
 use crate::diagnostics::TARGET_ACTION;
 use crate::frame_store::{FrameStore, SharedActionFrame, StoreConfig};

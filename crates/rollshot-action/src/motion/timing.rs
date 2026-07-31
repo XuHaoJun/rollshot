@@ -33,7 +33,7 @@ impl CfrScheduler {
         let total_ticks = if duration_ms == 0 {
             0
         } else {
-            ((duration_ms as u128 * 30 + 999) / 1000) as u64
+            (duration_ms as u128 * 30).div_ceil(1000) as u64
         };
         Self {
             total_ticks,
@@ -87,7 +87,7 @@ impl CfrScheduler {
         let total_ticks = if duration_ms == 0 {
             0
         } else {
-            ((duration_ms as u128 * 30 + 999) / 1000) as u64
+            (duration_ms as u128 * 30).div_ceil(1000) as u64
         };
         self.total_ticks = total_ticks;
 

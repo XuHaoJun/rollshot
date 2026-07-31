@@ -1239,7 +1239,7 @@ mod tests {
 
     // ---- Schema v3 migration RED tests ----
 
-    use super::super::model::{MotionAsset, MotionAssetLoad, ProjectManifestV3};
+    use super::super::model::{MotionAssetLoad, ProjectManifestV3};
 
     fn motion_asset_json() -> serde_json::Value {
         serde_json::json!({

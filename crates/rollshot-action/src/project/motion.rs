@@ -254,8 +254,9 @@ mod tests {
             SnapshotFramePayload,
         };
         use super::super::store::create_project;
-        use crate::models::{CandidateKind, DetectReason};
-        use crate::models::{CaptureRegion, InputCapability, InputSourceKind};
+        use crate::models::{
+            CandidateKind, CaptureRegion, DetectReason, InputCapability, InputSourceKind,
+        };
         use image::{Rgba, RgbaImage};
         use std::sync::Arc;
 
@@ -454,8 +455,9 @@ mod tests {
             SnapshotFramePayload,
         };
         use super::super::store::create_project;
-        use crate::models::{CandidateKind, DetectReason};
-        use crate::models::{CaptureRegion, InputCapability, InputSourceKind};
+        use crate::models::{
+            CandidateKind, CaptureRegion, DetectReason, InputCapability, InputSourceKind,
+        };
         use image::{Rgba, RgbaImage};
         use std::sync::Arc;
 
@@ -523,11 +525,9 @@ mod tests {
         // We test this by ensuring the source file still exists after a
         // simulated failure (incomplete manifest data).
         use super::super::model::{
-            EnabledOutputs, ProjectSnapshot, ProjectStep, ProjectStepId, SnapshotFrame,
-            SnapshotFramePayload,
+            EnabledOutputs, ProjectSnapshot, SnapshotFrame, SnapshotFramePayload,
         };
         use super::super::store::create_project;
-        use crate::models::{CandidateKind, DetectReason};
         use crate::models::{CaptureRegion, InputCapability, InputSourceKind};
         use image::{Rgba, RgbaImage};
         use std::sync::Arc;
@@ -593,8 +593,9 @@ mod tests {
             SnapshotFramePayload,
         };
         use super::super::store::create_project;
-        use crate::models::{CandidateKind, DetectReason};
-        use crate::models::{CaptureRegion, InputCapability, InputSourceKind};
+        use crate::models::{
+            CandidateKind, CaptureRegion, DetectReason, InputCapability, InputSourceKind,
+        };
         use image::{Rgba, RgbaImage};
         use std::sync::Arc;
 
@@ -726,8 +727,9 @@ mod tests {
             SnapshotFramePayload,
         };
         use super::super::store::create_project;
-        use crate::models::{CandidateKind, DetectReason};
-        use crate::models::{CaptureRegion, InputCapability, InputSourceKind};
+        use crate::models::{
+            CandidateKind, CaptureRegion, DetectReason, InputCapability, InputSourceKind,
+        };
         use image::{Rgba, RgbaImage};
         use std::sync::Arc;
 

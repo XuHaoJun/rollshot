@@ -147,7 +147,7 @@ mod tests {
         let mp4 = dir.path().join("recording.mp4");
         std::fs::write(&mp4, b"fake").unwrap();
 
-        let asset = ValidatedMotionAsset::new(dummy_metadata(), mp4.clone(), dir.into_path());
+        let asset = ValidatedMotionAsset::new(dummy_metadata(), mp4.clone(), dir.keep());
         assert_eq!(asset.sha256(), "abcdef1234567890");
         assert_eq!(asset.duration_ms(), 1000);
         assert_eq!(asset.width(), 640);

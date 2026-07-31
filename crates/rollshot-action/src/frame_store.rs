@@ -195,7 +195,6 @@ mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
     use std::sync::Arc;
-    use std::sync::Weak;
 
     fn frame(v: u8) -> SharedActionFrame {
         Arc::new(RgbaImage::from_pixel(8, 8, Rgba([v, v, v, 255])))
