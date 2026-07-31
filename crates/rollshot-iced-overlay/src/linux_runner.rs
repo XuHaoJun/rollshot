@@ -324,7 +324,9 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                         Some(rollshot_action::motion::MotionRuntimeStatus::On) => {
                             state.motion_status = app::MotionIndicatorStatus::On;
                         }
-                        Some(rollshot_action::motion::MotionRuntimeStatus::Off) if state.motion_status == app::MotionIndicatorStatus::On => {
+                        Some(rollshot_action::motion::MotionRuntimeStatus::Off)
+                            if state.motion_status == app::MotionIndicatorStatus::On =>
+                        {
                             state.motion_status = app::MotionIndicatorStatus::Failed(
                                 rollshot_action::motion::MotionFailureCategory::BrokenPipe,
                             );
