@@ -324,18 +324,12 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                         Some(rollshot_action::motion::MotionRuntimeStatus::On) => {
                             state.motion_status = app::MotionIndicatorStatus::On;
                         }
-                        Some(rollshot_action::motion::MotionRuntimeStatus::Off) => {
-                            // Motion recorder stopped; check if it was a failure.
-                            // If we have a driver, try to read from it.
-                            // For now, Off after On means the encoder stopped (could be failure).
-                            // We keep the current status unless it was On.
-                            if state.motion_status == app::MotionIndicatorStatus::On {
-                                state.motion_status = app::MotionIndicatorStatus::Failed(
-                                    rollshot_action::motion::MotionFailureCategory::BrokenPipe,
-                                );
-                            }
+                        Some(rollshot_action::motion::MotionRuntimeStatus::Off) if state.motion_status == app::MotionIndicatorStatus::On => {
+                            state.motion_status = app::MotionIndicatorStatus::Failed(
+                                rollshot_action::motion::MotionFailureCategory::BrokenPipe,
+                            );
                         }
-                        None => {}
+                        Some(rollshot_action::motion::MotionRuntimeStatus::Off) | None => {}
                     }
                 }
             }

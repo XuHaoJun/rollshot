@@ -67,6 +67,7 @@ pub(crate) enum OverlayMessage {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg(feature = "action-guide")]
+#[allow(dead_code)] // On and Failed constructed in tests and future integration
 pub(crate) enum MotionIndicatorStatus {
     /// Motion recording was not requested.
     Disabled,
