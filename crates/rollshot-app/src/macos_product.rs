@@ -927,9 +927,9 @@ fn complete_capture(product: &mut MacosProduct, result: CaptureResult) -> Task<M
 #[cfg(feature = "action-guide")]
 fn complete_action_recording(
     product: &mut MacosProduct,
-    result: rollshot_iced_overlay::driver::ActionGuideCaptureResult,
+    result: rollshot_iced_overlay::ActionGuideCaptureResult,
 ) -> Task<Message> {
-    let rollshot_iced_overlay::driver::ActionGuideCaptureResult {
+    let rollshot_iced_overlay::ActionGuideCaptureResult {
         recording,
         capability,
         region,
@@ -1737,7 +1737,7 @@ mod tests {
         let recording = rec.finish();
 
         let mut product = product_in_capture_phase();
-        let result = rollshot_iced_overlay::driver::ActionGuideCaptureResult {
+        let result = rollshot_iced_overlay::ActionGuideCaptureResult {
             recording,
             capability: rollshot_action::InputCapability::SemanticEvents,
             region,
@@ -2124,7 +2124,7 @@ mod tests {
                 height: 32,
             };
             let mut product = super::product_in_capture_phase();
-            let result = rollshot_iced_overlay::driver::ActionGuideCaptureResult {
+            let result = rollshot_iced_overlay::ActionGuideCaptureResult {
                 recording,
                 capability: rollshot_action::InputCapability::SemanticEvents,
                 region,
@@ -2267,7 +2267,7 @@ mod tests {
             let motion = rollshot_action::motion::MotionRecordingOutcome::Failure(
                 rollshot_action::motion::MotionFailureCategory::ToolUnavailable,
             );
-            let result = rollshot_iced_overlay::driver::ActionGuideCaptureResult {
+            let result = rollshot_iced_overlay::ActionGuideCaptureResult {
                 recording,
                 capability: rollshot_action::InputCapability::SemanticEvents,
                 region,
@@ -2311,7 +2311,7 @@ mod tests {
                 height: 32,
             };
             let mut product = super::product_in_capture_phase();
-            let result = rollshot_iced_overlay::driver::ActionGuideCaptureResult {
+            let result = rollshot_iced_overlay::ActionGuideCaptureResult {
                 recording,
                 capability: rollshot_action::InputCapability::SemanticEvents,
                 region,
