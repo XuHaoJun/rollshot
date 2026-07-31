@@ -98,14 +98,16 @@ pub fn run_overlay(config: OverlayConfig) -> Result<Option<CaptureResult>, Overl
 pub fn run_action_guide(
     config: OverlayConfig,
     input_source: Box<dyn rollshot_action::SemanticInputSource>,
+    motion_toolchain: Option<rollshot_action::VideoToolchain>,
 ) -> Result<Option<ActionGuideCaptureResult>, OverlayError> {
-    linux_runner::run_action_guide(config, input_source)
+    linux_runner::run_action_guide(config, input_source, motion_toolchain)
 }
 
 #[cfg(all(target_os = "linux", feature = "action-guide"))]
 pub fn run_action_guide_fullscreen(
     config: OverlayConfig,
     input_source: Box<dyn rollshot_action::SemanticInputSource>,
+    motion_toolchain: Option<rollshot_action::VideoToolchain>,
 ) -> Result<Option<ActionGuideCaptureResult>, OverlayError> {
-    linux_runner::run_action_guide_fullscreen(config, input_source)
+    linux_runner::run_action_guide_fullscreen(config, input_source, motion_toolchain)
 }

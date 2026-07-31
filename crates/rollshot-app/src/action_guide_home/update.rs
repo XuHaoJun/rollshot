@@ -8,17 +8,17 @@ use super::video_import::{ImportCoordinator, ImportOperationId, VideoImportJobRe
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionGuideIntent {
     Home,
-    Record { fullscreen: bool },
+    Record { fullscreen: bool, keep_motion: bool },
     Open { path: Option<PathBuf> },
 }
 
 impl ActionGuideIntent {
     pub fn capture_request(&self) -> Option<rollshot_capture::CaptureRequest> {
         match self {
-            Self::Record { fullscreen: true } => {
+            Self::Record { fullscreen: true, .. } => {
                 Some(rollshot_capture::CaptureRequest::action_guide_fullscreen())
             }
-            Self::Record { fullscreen: false } => {
+            Self::Record { fullscreen: false, .. } => {
                 Some(rollshot_capture::CaptureRequest::action_guide_region())
             }
             Self::Home | Self::Open { .. } => None,
@@ -1495,8 +1495,17 @@ mod tests {
 
     #[test]
     fn action_guide_intent_record() {
-        let intent = ActionGuideIntent::Record { fullscreen: true };
-        assert_eq!(intent, ActionGuideIntent::Record { fullscreen: true });
+        let intent = ActionGuideIntent::Record {
+            fullscreen: true,
+            keep_motion: false,
+        };
+        assert_eq!(
+            intent,
+            ActionGuideIntent::Record {
+                fullscreen: true,
+                keep_motion: false,
+            }
+        );
     }
 
     #[test]
@@ -1521,11 +1530,11 @@ mod tests {
     #[test]
     fn record_intent_builds_region_or_fullscreen_request() {
         assert_eq!(
-            ActionGuideIntent::Record { fullscreen: false }.capture_request(),
+            ActionGuideIntent::Record { fullscreen: false, keep_motion: false }.capture_request(),
             Some(rollshot_capture::CaptureRequest::action_guide_region())
         );
         assert_eq!(
-            ActionGuideIntent::Record { fullscreen: true }.capture_request(),
+            ActionGuideIntent::Record { fullscreen: true, keep_motion: false }.capture_request(),
             Some(rollshot_capture::CaptureRequest::action_guide_fullscreen())
         );
         assert_eq!(ActionGuideIntent::Home.capture_request(), None);

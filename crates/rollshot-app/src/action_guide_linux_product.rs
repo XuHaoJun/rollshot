@@ -112,9 +112,10 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
                     iced::Task::perform(inspect_and_open(path), |msg| msg)
                 }
                 action_guide_home::Effect::StartRecording {
-                    motion_toolchain: _,
+                    motion_toolchain,
                 } => {
-                    let _ = crate::platform_actions::spawn_action_guide_record(false);
+                    let keep_motion = motion_toolchain.is_some();
+                    let _ = crate::platform_actions::spawn_action_guide_record(false, keep_motion);
                     iced::Task::none()
                 }
                 action_guide_home::Effect::OpenProject(path) => {
@@ -426,8 +427,8 @@ pub(crate) fn run(initial: ActionGuideIntent) -> Result<(), String> {
 
         match boot_initial {
             ActionGuideIntent::Home => {}
-            ActionGuideIntent::Record { fullscreen } => {
-                let _ = crate::platform_actions::spawn_action_guide_record(fullscreen);
+            ActionGuideIntent::Record { fullscreen, keep_motion } => {
+                let _ = crate::platform_actions::spawn_action_guide_record(fullscreen, keep_motion);
             }
             ActionGuideIntent::Open { path: Some(path) } => {
                 state.phase = Phase::Opening;

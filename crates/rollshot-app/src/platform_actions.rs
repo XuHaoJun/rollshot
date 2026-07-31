@@ -121,6 +121,7 @@ fn reveal_with_xdg_open(path: &Path) -> Result<(), String> {
 #[allow(dead_code)]
 pub(crate) fn action_guide_record_command(
     fullscreen: bool,
+    keep_motion: bool,
 ) -> Result<(std::ffi::OsString, Vec<std::ffi::OsString>), String> {
     let exe = std::env::current_exe().map_err(|e| {
         tracing::error!(target: "rollshot::platform_actions", error = %e, "failed to resolve current executable");
@@ -130,6 +131,9 @@ pub(crate) fn action_guide_record_command(
     let mut args: Vec<std::ffi::OsString> = vec!["action-guide".into(), "--record".into()];
     if fullscreen {
         args.push("--fullscreen".into());
+    }
+    if keep_motion {
+        args.push("--keep-motion".into());
     }
 
     Ok((exe.into_os_string(), args))
@@ -143,8 +147,8 @@ pub(crate) fn action_guide_record_command(
 /// privacy-safe tracing category.
 #[cfg(target_os = "linux")]
 #[allow(dead_code)]
-pub(crate) fn spawn_action_guide_record(fullscreen: bool) -> Result<(), String> {
-    let (program, args) = action_guide_record_command(fullscreen)?;
+pub(crate) fn spawn_action_guide_record(fullscreen: bool, keep_motion: bool) -> Result<(), String> {
+    let (program, args) = action_guide_record_command(fullscreen, keep_motion)?;
 
     let mut child = std::process::Command::new(&program)
         .args(&args)
@@ -254,7 +258,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn action_guide_record_command_without_fullscreen() {
-        let (program, args) = super::action_guide_record_command(false).unwrap();
+        let (program, args) = super::action_guide_record_command(false, false).unwrap();
         assert!(!program.is_empty());
         assert_eq!(args.len(), 2);
         assert_eq!(args[0].to_str().unwrap(), "action-guide");
@@ -264,7 +268,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn action_guide_record_command_with_fullscreen() {
-        let (program, args) = super::action_guide_record_command(true).unwrap();
+        let (program, args) = super::action_guide_record_command(true, false).unwrap();
         assert!(!program.is_empty());
         assert_eq!(args.len(), 3);
         assert_eq!(args[0].to_str().unwrap(), "action-guide");
@@ -275,7 +279,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn action_guide_record_command_uses_current_exe() {
-        let (program, _args) = super::action_guide_record_command(false).unwrap();
+        let (program, _args) = super::action_guide_record_command(false, false).unwrap();
         let current = std::env::current_exe().unwrap();
         assert_eq!(program.to_str().unwrap(), current.to_str().unwrap());
     }
@@ -284,7 +288,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn action_guide_record_command_no_lossy_conversion() {
         // The program path is an OsString, not a String — no lossy conversion
-        let (program, args) = super::action_guide_record_command(false).unwrap();
+        let (program, args) = super::action_guide_record_command(false, false).unwrap();
         // Verify OsString type by checking it can contain non-UTF8
         let os_str: &std::ffi::OsStr = program.as_ref();
         assert!(!os_str.is_empty());
@@ -294,6 +298,28 @@ mod tests {
         }
     }
 
+    // ---- --keep-motion detached command RED tests ----
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn keep_motion_opt_out_child_command_never_includes_flag() {
+        let (_program, args) = super::action_guide_record_command(false, false).unwrap();
+        assert!(
+            !args.iter().any(|a| a.to_str() == Some("--keep-motion")),
+            "opt-out child must not pass --keep-motion"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn keep_motion_opt_in_child_command_includes_flag() {
+        let (_program, args) = super::action_guide_record_command(false, true).unwrap();
+        assert!(
+            args.iter().any(|a| a.to_str() == Some("--keep-motion")),
+            "opt-in child must pass --keep-motion"
+        );
+    }
+
     // ---- spawn_action_guide_record ----
 
     #[test]
@@ -301,7 +327,7 @@ mod tests {
     fn spawn_action_guide_record_spawns_reaper_thread() {
         // We test that spawn_action_guide_record returns promptly and doesn't hang.
         // The child will exit immediately (the current exe is a test binary).
-        let result = super::spawn_action_guide_record(false);
+        let result = super::spawn_action_guide_record(false, false);
         // It may fail to spawn if the binary doesn't support the subcommand,
         // but the function should return (not hang).
         // We just verify it returns without panicking.

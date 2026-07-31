@@ -1300,7 +1300,7 @@ pub fn run_action_guide(initial: ActionGuideIntent) -> Result<(), String> {
 
         match boot_initial {
             ActionGuideIntent::Home => {}
-            ActionGuideIntent::Record { fullscreen } => {
+            ActionGuideIntent::Record { fullscreen, keep_motion: _ } => {
                 tasks.push(start_action_guide_recording(&mut product, fullscreen));
             }
             ActionGuideIntent::Open { path: Some(path) } => {
@@ -1337,7 +1337,7 @@ pub fn run_action_guide(initial: ActionGuideIntent) -> Result<(), String> {
 
 #[cfg(feature = "action-guide")]
 fn action_guide_record_config(fullscreen: bool) -> OverlayConfig {
-    let intent = ActionGuideIntent::Record { fullscreen };
+    let intent = ActionGuideIntent::Record { fullscreen, keep_motion: false };
     OverlayConfig {
         backend: "auto".to_string(),
         fps: 5,

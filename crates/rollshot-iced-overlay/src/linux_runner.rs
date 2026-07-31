@@ -210,6 +210,12 @@ static ACTION_REGION_SLOT: Mutex<Option<rollshot_action::CaptureRegion>> = Mutex
 #[cfg(feature = "action-guide")]
 static ACTION_INPUT_SLOT: Mutex<Option<Box<dyn rollshot_action::SemanticInputSource>>> =
     Mutex::new(None);
+#[cfg(feature = "action-guide")]
+static ACTION_TOOLCHAIN_SLOT: Mutex<Option<rollshot_action::VideoToolchain>> = Mutex::new(None);
+/// Current motion runtime status, read by the app on 250ms ticks.
+#[cfg(feature = "action-guide")]
+static MOTION_STATUS_SLOT: Mutex<Option<rollshot_action::motion::MotionRuntimeStatus>> =
+    Mutex::new(None);
 
 // Capture starts in `run()` before the overlay surface exists, so the portal
 // screen-share picker dialog appears + dismisses on a clean desktop and never
@@ -309,6 +315,31 @@ fn validate_region_surface_or_exit(state: &Overlay) -> Option<Task<Message>> {
 fn update(state: &mut Overlay, message: Message) -> Task<Message> {
     match message {
         Message::Overlay(msg) => {
+            // On Tick, poll the motion status from the driver.
+            if matches!(msg, app::OverlayMessage::Tick) {
+                #[cfg(feature = "action-guide")]
+                {
+                    let motion_status = MOTION_STATUS_SLOT.lock().unwrap();
+                    match *motion_status {
+                        Some(rollshot_action::motion::MotionRuntimeStatus::On) => {
+                            state.motion_status = app::MotionIndicatorStatus::On;
+                        }
+                        Some(rollshot_action::motion::MotionRuntimeStatus::Off) => {
+                            // Motion recorder stopped; check if it was a failure.
+                            // If we have a driver, try to read from it.
+                            // For now, Off after On means the encoder stopped (could be failure).
+                            // We keep the current status unless it was On.
+                            if state.motion_status == app::MotionIndicatorStatus::On {
+                                state.motion_status = app::MotionIndicatorStatus::Failed(
+                                    rollshot_action::motion::MotionFailureCategory::BrokenPipe,
+                                );
+                            }
+                        }
+                        None => {}
+                    }
+                }
+            }
+
             let opened = matches!(
                 &msg,
                 app::OverlayMessage::IcedEvent(iced::Event::Window(
@@ -541,14 +572,21 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                                     rollshot_action::DegradedReason::SourceStartFailed,
                                 ))
                             });
+                        let tc = ACTION_TOOLCHAIN_SLOT.lock().unwrap().take();
+                        let has_motion = tc.is_some();
                         let options = crate::driver::ActionGuideRecordingOptions {
-                            motion_toolchain: None,
+                            motion_toolchain: tc,
                         };
                         let start = driver.begin_action_recording(action_region, source, options);
                         capability = Some(start.capability);
+                        if has_motion {
+                            *MOTION_STATUS_SLOT.lock().unwrap() =
+                                Some(rollshot_action::motion::MotionRuntimeStatus::On);
+                        }
                     }
                     state.recording_started = Some(std::time::Instant::now());
                     state.recording_capability = capability.map(crate::app::capability_label);
+                    state.motion_status = app::MotionIndicatorStatus::Disabled;
                     Task::none()
                 }
                 #[cfg(feature = "action-guide")]
@@ -559,8 +597,10 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                         None => Err("no driver for action recording".to_string()),
                     };
                     *ACTION_RESULT_SLOT.lock().unwrap() = Some(outcome);
+                    *MOTION_STATUS_SLOT.lock().unwrap() = None;
                     state.recording_started = None;
                     state.recording_capability = None;
+                    state.motion_status = app::MotionIndicatorStatus::Disabled;
                     iced::exit()
                 }
                 #[cfg(not(feature = "action-guide"))]
@@ -724,6 +764,7 @@ fn orchestrate_fullscreen<R>(
 pub fn run_action_guide_fullscreen(
     config: OverlayConfig,
     input_source: Box<dyn rollshot_action::SemanticInputSource>,
+    motion_toolchain: Option<rollshot_action::VideoToolchain>,
 ) -> Result<Option<crate::driver::ActionGuideCaptureResult>, OverlayError> {
     if !config.request.is_supported() {
         return Err(OverlayError::Capture(
@@ -778,16 +819,35 @@ pub fn run_action_guide_fullscreen(
                 "recording full display"
             );
 
+            let has_motion = motion_toolchain.is_some();
             let _capability = driver.begin_action_recording(
                 region,
                 input_source,
                 crate::driver::ActionGuideRecordingOptions {
-                    motion_toolchain: None,
+                    motion_toolchain,
                 },
             );
 
+            // Update motion status for tray display.
+            if has_motion {
+                *MOTION_STATUS_SLOT.lock().unwrap() =
+                    Some(rollshot_action::motion::MotionRuntimeStatus::On);
+            }
+
+            // Update tray title if motion recording is active.
+            if has_motion {
+                _tray.update_title("Rollshot is recording (motion)".into());
+                _tray.update_tooltip(
+                    "Motion recording on \u{2014} click to finish".into(),
+                    String::new(),
+                );
+            }
+
             // Block until the user clicks the tray icon.
             _tray.wait_for_finish();
+
+            // Clear motion status before finalizing.
+            *MOTION_STATUS_SLOT.lock().unwrap() = None;
 
             let result =
                 driver.finalize_action().map_err(OverlayError::Capture)?;
@@ -800,10 +860,13 @@ pub fn run_action_guide_fullscreen(
 pub fn run_action_guide(
     config: OverlayConfig,
     input_source: Box<dyn rollshot_action::SemanticInputSource>,
+    motion_toolchain: Option<rollshot_action::VideoToolchain>,
 ) -> Result<Option<crate::driver::ActionGuideCaptureResult>, OverlayError> {
     *ACTION_INPUT_SLOT.lock().unwrap() = Some(input_source);
+    *ACTION_TOOLCHAIN_SLOT.lock().unwrap() = motion_toolchain;
     *ACTION_REGION_SLOT.lock().unwrap() = None;
     *ACTION_RESULT_SLOT.lock().unwrap() = None;
+    *MOTION_STATUS_SLOT.lock().unwrap() = None;
     run(config)?;
     let result = ACTION_RESULT_SLOT
         .lock()
