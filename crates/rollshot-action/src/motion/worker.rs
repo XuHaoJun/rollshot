@@ -196,7 +196,7 @@ impl MotionRecorder {
 
         let sink = sink_factory(&mut child);
 
-        let (frame_tx, frame_rx) = motion_frame_mailbox(8);
+        let (frame_tx, frame_rx) = motion_frame_mailbox(2);
         let (session_tx, session_rx) = crossbeam_channel::bounded::<Millis>(1);
 
         let status = Arc::new(AtomicU8::new(MotionRuntimeStatus::On as u8));
