@@ -102,6 +102,16 @@ impl ValidatedMotionAsset {
     pub(crate) fn source_path(&self) -> &Path {
         &self.inner.source_path
     }
+
+    /// Test-only constructor visible to downstream crates.
+    #[doc(hidden)]
+    pub fn new_for_test(
+        metadata: MotionMetadata,
+        source_path: PathBuf,
+        scratch_dir: PathBuf,
+    ) -> Self {
+        Self::new(metadata, source_path, scratch_dir)
+    }
 }
 
 impl std::fmt::Debug for ValidatedMotionAsset {

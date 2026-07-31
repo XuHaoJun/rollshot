@@ -223,6 +223,18 @@ pub enum Message {
         operation_id: u64,
         result: super::share::ShareOutcome,
     },
+    /// User clicked "Save recording…" in the motion metadata panel.
+    #[cfg(feature = "action-guide")]
+    SaveRecordingRequested,
+    /// The MP4 file picker returned (None = cancelled).
+    #[cfg(feature = "action-guide")]
+    SaveRecordingPickerChosen(Option<PathBuf>),
+    /// Background save-recording export completed.
+    #[cfg(feature = "action-guide")]
+    SaveRecordingWorkerFinished {
+        operation_id: u64,
+        result: Result<(), String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -2575,6 +2587,17 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             operation_id,
             result,
         } => handle_share_worker_finished(state, operation_id, result),
+        #[cfg(feature = "action-guide")]
+        Message::SaveRecordingRequested => handle_save_recording_requested(state),
+        #[cfg(feature = "action-guide")]
+        Message::SaveRecordingPickerChosen(path) => {
+            handle_save_recording_picker_chosen(state, path)
+        }
+        #[cfg(feature = "action-guide")]
+        Message::SaveRecordingWorkerFinished {
+            operation_id,
+            result,
+        } => handle_save_recording_worker_finished(state, operation_id, result),
     }
 }
 
@@ -3372,6 +3395,98 @@ fn handle_share_worker_finished(
     Update::none()
 }
 
+// ---------------------------------------------------------------------------
+// Save recording (raw MP4 export)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "action-guide")]
+fn handle_save_recording_requested(state: &mut TimelineWorkspace) -> Update {
+    if !state.motion.is_ready() {
+        return Update::none();
+    }
+    state.next_save_recording_operation_id += 1;
+    let op_id = state.next_save_recording_operation_id;
+    state.save_recording_state =
+        super::motion::SaveRecordingState::PickingDestination { operation_id: op_id };
+    Update::task(iced::Task::perform(
+        pick_mp4_save_path(picker_default_dir()),
+        move |path| Message::SaveRecordingPickerChosen(path),
+    ))
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_save_recording_picker_chosen(
+    state: &mut TimelineWorkspace,
+    path: Option<PathBuf>,
+) -> Update {
+    let destination = match path {
+        Some(p) => p,
+        None => {
+            state.save_recording_state = super::motion::SaveRecordingState::Idle;
+            return Update::none();
+        }
+    };
+    let op_id = match &state.save_recording_state {
+        super::motion::SaveRecordingState::PickingDestination { operation_id } => *operation_id,
+        _ => return Update::none(),
+    };
+    let asset = match state.motion.as_ready() {
+        Some(a) => a.clone(),
+        None => {
+            state.save_recording_state = super::motion::SaveRecordingState::Idle;
+            return Update::none();
+        }
+    };
+    state.save_recording_state = super::motion::SaveRecordingState::Exporting {
+        operation_id: op_id,
+        destination: destination.clone(),
+    };
+    Update::task(iced::Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || {
+                rollshot_action::project::export_motion_asset(&asset, &destination)
+                    .map_err(|e| e.to_string())
+            })
+            .await
+            .map_err(|_| "Export task crashed.".to_string())?
+        },
+        move |result: Result<(), String>| Message::SaveRecordingWorkerFinished {
+            operation_id: op_id,
+            result,
+        },
+    ))
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_save_recording_worker_finished(
+    state: &mut TimelineWorkspace,
+    operation_id: u64,
+    result: Result<(), String>,
+) -> Update {
+    let current_id = match &state.save_recording_state {
+        super::motion::SaveRecordingState::Exporting {
+            operation_id: id,
+            ..
+        } => *id,
+        _ => return Update::none(),
+    };
+    if current_id != operation_id {
+        // Stale result from a superseded export.
+        return Update::none();
+    }
+    state.save_recording_state = super::motion::SaveRecordingState::Idle;
+    match result {
+        Ok(()) => {
+            state.message = Some("Recording saved.".to_string());
+        }
+        Err(error) => {
+            state.message = Some(format!("Save recording failed: {error}"));
+        }
+    }
+    // Success/failure never changes save_state, base_revision, or dirty status.
+    Update::none()
+}
+
 async fn pick_share_destination(default_dir: PathBuf) -> Option<PathBuf> {
     rfd::AsyncFileDialog::new()
         .set_directory(default_dir)
@@ -4123,6 +4238,8 @@ fn handle_save_worker_finished(
         super::update::SaveWorkerOutcome::ExistingSaved { revision } => {
             state.save_state = super::ProjectSaveState::Clean;
             state.last_save_error = None;
+            // Motion was promoted into the project tree; drop the session clone.
+            let _ = state.motion.take_ready();
             if let Some(ProjectSession::Saved { base_revision, .. }) = &mut state.project_session {
                 *base_revision = revision;
             }
@@ -4140,6 +4257,8 @@ fn handle_save_worker_finished(
         } => {
             state.save_state = super::ProjectSaveState::Clean;
             state.last_save_error = None;
+            // Motion was promoted into the project tree; drop the session clone.
+            let _ = state.motion.take_ready();
             let guard = state
                 .pending_writer_guard
                 .lock()
@@ -4185,6 +4304,8 @@ fn handle_save_worker_finished(
         } => {
             state.save_state = super::ProjectSaveState::Clean;
             state.last_save_error = None;
+            // Motion was promoted into the project tree; drop the session clone.
+            let _ = state.motion.take_ready();
             // Rebuild frame source from saved manifest.
             let loaded = rollshot_action::project::LoadedProject {
                 root: root.clone(),

@@ -364,6 +364,7 @@ pub(crate) fn from_loaded_project(
     }
 
     let store = rollshot_action::FrameStore::new(Default::default());
+    let ws_motion = super::motion::WorkspaceMotion::from_loaded(loaded.motion);
 
     let mut ws = TimelineWorkspace {
         guide,
@@ -422,7 +423,9 @@ pub(crate) fn from_loaded_project(
         share_operation_id: 0,
         import_warnings: manifest.import_warnings.clone(),
         imported_scratch: None,
-        motion_outcome: None,
+        motion: ws_motion,
+        save_recording_state: super::motion::SaveRecordingState::Idle,
+        next_save_recording_operation_id: 0,
     };
 
     ws.rebuild_selection_handles();
@@ -513,7 +516,7 @@ pub(crate) fn build_project_snapshot(
         import_warnings: ws.import_warnings.clone(),
         #[cfg(not(feature = "action-guide"))]
         import_warnings: Vec::new(),
-        motion: None,
+        motion: ws.motion.as_ready().cloned(),
     })
 }
 

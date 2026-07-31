@@ -54,11 +54,20 @@ pub fn view(state: &TimelineWorkspace) -> Element<'_, Message> {
         .height(Length::Fixed(0.0))
         .into();
 
+    #[cfg(feature = "action-guide")]
+    let motion_info: Element<Message> = motion_panel(state);
+    #[cfg(not(feature = "action-guide"))]
+    let motion_info: Element<Message> = Space::new()
+        .width(Length::Fill)
+        .height(Length::Fixed(0.0))
+        .into();
+
     let body: Element<Message> = column![
         header(state),
         read_only_banner,
         message_row(state),
         publish_details,
+        motion_info,
         main_area(state),
         strip_row(state),
     ]
@@ -1550,6 +1559,62 @@ fn close_confirm_modal<'a>(
     );
 
     stack![base, scrim].into()
+}
+
+/// Motion metadata panel: shows recording info and "Save recording…" button
+/// when motion is Ready, failure copy when Failed/Unavailable, and nothing
+/// when None.
+#[cfg(feature = "action-guide")]
+fn motion_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
+    use super::motion;
+
+    match &state.motion {
+        motion::WorkspaceMotion::Ready(asset) => {
+            let meta_line = motion::motion_metadata_line(asset);
+            let btn = button(text("Save recording…"))
+                .on_press(Message::SaveRecordingRequested)
+                .style(button::secondary);
+            container(
+                row![text(meta_line).size(13), btn]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+            )
+            .padding(8)
+            .into()
+        }
+        motion::WorkspaceMotion::Failed(cat) => {
+            let copy = motion::failure_category_copy(*cat);
+            container(
+                text(format!(
+                    "Guide created; {copy}"
+                ))
+                .size(13),
+            )
+            .padding(8)
+            .into()
+        }
+        motion::WorkspaceMotion::Unavailable(cat) => {
+            let copy = motion::failure_category_copy(*cat);
+            container(
+                row![
+                    text(format!(
+                        "Guide created; {copy}"
+                    ))
+                    .size(13),
+                    button(text("Save recording…"))
+                        .style(button::secondary),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            )
+            .padding(8)
+            .into()
+        }
+        motion::WorkspaceMotion::None => Space::new()
+            .width(Length::Fill)
+            .height(Length::Fixed(0.0))
+            .into(),
+    }
 }
 
 #[cfg(test)]

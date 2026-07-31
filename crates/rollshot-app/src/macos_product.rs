@@ -2272,8 +2272,8 @@ mod tests {
                 unreachable!();
             };
             assert!(
-                ws.motion_outcome.is_some(),
-                "motion outcome should be stored in workspace"
+                ws.motion.is_failed_or_unavailable(),
+                "motion state should reflect the failure"
             );
         }
 
@@ -2316,11 +2316,11 @@ mod tests {
             let Phase::Timeline(ref ws) = product.phase else {
                 unreachable!();
             };
-            match ws.motion_outcome.as_ref().unwrap() {
-                rollshot_action::motion::MotionRecordingOutcome::Failure(cat) => {
+            match &ws.motion {
+                crate::timeline_workspace::motion::WorkspaceMotion::Failed(cat) => {
                     assert_eq!(*cat, rollshot_action::motion::MotionFailureCategory::BrokenPipe);
                 }
-                other => panic!("expected Failure, got {other:?}"),
+                other => panic!("expected Failed, got {other:?}"),
             }
         }
     }

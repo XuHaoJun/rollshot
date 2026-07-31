@@ -19,6 +19,7 @@
 pub(crate) mod annotation;
 mod caption_agent;
 pub(crate) mod guide_export;
+pub(crate) mod motion;
 mod storyboard_copy;
 mod update;
 mod view;
@@ -417,10 +418,15 @@ pub struct TimelineWorkspace {
     pub(crate) import_warnings: Vec<rollshot_action::ImportWarning>,
     #[cfg(feature = "action-guide")]
     pub(crate) imported_scratch: Option<rollshot_action::ImportedScratch>,
-    /// Motion recording outcome from the capture session.
+    /// Workspace motion state: session-owned recording, failure, or none.
     #[cfg(feature = "action-guide")]
-    #[allow(dead_code)]
-    pub(crate) motion_outcome: Option<rollshot_action::motion::MotionRecordingOutcome>,
+    pub(crate) motion: motion::WorkspaceMotion,
+    /// Save recording (raw MP4 export) state machine.
+    #[cfg(feature = "action-guide")]
+    pub(crate) save_recording_state: motion::SaveRecordingState,
+    /// Monotonic operation id for save-recording export provenance.
+    #[cfg(feature = "action-guide")]
+    pub(crate) next_save_recording_operation_id: u64,
 }
 
 impl TimelineWorkspace {
@@ -509,7 +515,11 @@ impl TimelineWorkspace {
             #[cfg(feature = "action-guide")]
             imported_scratch: None,
             #[cfg(feature = "action-guide")]
-            motion_outcome,
+            motion: motion::WorkspaceMotion::from_outcome(motion_outcome),
+            #[cfg(feature = "action-guide")]
+            save_recording_state: motion::SaveRecordingState::Idle,
+            #[cfg(feature = "action-guide")]
+            next_save_recording_operation_id: 0,
         };
         ws.rebuild_selection_handles();
         ws
@@ -586,7 +596,9 @@ impl TimelineWorkspace {
             share_operation_id: 0,
             import_warnings: seed.import_warnings,
             imported_scratch: Some(seed.scratch),
-            motion_outcome: None,
+            motion: motion::WorkspaceMotion::None,
+            save_recording_state: motion::SaveRecordingState::Idle,
+            next_save_recording_operation_id: 0,
         };
         ws.rebuild_selection_handles();
         ws
