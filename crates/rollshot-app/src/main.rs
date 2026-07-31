@@ -216,6 +216,7 @@ fn run_action_guide_record(fullscreen: bool, keep_motion: bool) -> Result<(), St
                 result.region,
                 result.capability,
                 source_kind,
+                Some(result.motion),
             )
         }
         None => Ok(()),

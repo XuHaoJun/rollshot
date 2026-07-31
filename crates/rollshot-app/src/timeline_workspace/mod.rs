@@ -972,6 +972,7 @@ pub fn run(
     region: CaptureRegion,
     capability: InputCapability,
     source_kind: InputSourceKind,
+    motion_outcome: Option<rollshot_action::motion::MotionRecordingOutcome>,
 ) -> Result<(), String> {
     use std::sync::{Arc, Mutex};
 
@@ -980,14 +981,15 @@ pub fn run(
         region,
         capability,
         source_kind,
+        motion_outcome,
     ))));
     let boot = move || {
-        let (recording, region, capability, source_kind) = boot_data
+        let (recording, region, capability, source_kind, motion) = boot_data
             .lock()
             .unwrap()
             .take()
             .expect("timeline workspace boot data already consumed");
-        let mut ws = TimelineWorkspace::new(recording, region, capability, source_kind, None);
+        let mut ws = TimelineWorkspace::new(recording, region, capability, source_kind, motion);
         // Open the process-wide task store once at workspace boot.
         if let Ok(config_dir) = crate::daemon::config::rollshot_config_dir() {
             match crate::agent_store::open_process_store(&config_dir) {
