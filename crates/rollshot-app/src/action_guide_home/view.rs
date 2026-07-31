@@ -1,11 +1,14 @@
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, checkbox, column, container, row, scrollable, text};
 use iced::{Element, Length};
 
 use super::recent::RecentEntry;
-use super::update::{ActionGuideHome, Message};
+use super::update::{ActionGuideHome, Message, RecordPreflightPhase};
 use super::video_import::ImportState;
 
 pub fn view<'a>(state: &'a ActionGuideHome) -> Element<'a, Message> {
+    if state.preflight.is_some() {
+        return preflight_view(state);
+    }
     match state.import_coordinator().state() {
         ImportState::Idle => home_view(state),
         _ => import_processing_view(state),
@@ -45,6 +48,76 @@ fn home_view<'a>(state: &'a ActionGuideHome) -> Element<'a, Message> {
         .spacing(16)
         .padding(20)
         .width(Length::Fill);
+
+    container(scrollable(body))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .into()
+}
+
+fn preflight_view<'a>(state: &'a ActionGuideHome) -> Element<'a, Message> {
+    let preflight = match &state.preflight {
+        Some(p) => p,
+        None => return home_view(state),
+    };
+
+    let title = text("Record New").size(24);
+
+    let description = text(
+        "Saves the complete motion inside the Action Guide capture region with the project. No system audio or microphone.",
+    )
+    .size(14);
+
+    let no_limit = text("No duration or file-size limit. Disk use is shown before saving.").size(12);
+
+    let motion_checkbox = checkbox(preflight.keep_motion)
+        .label("Keep a silent screen recording")
+        .on_toggle(|_| Message::ToggleMotion);
+
+    let confirm_enabled = !matches!(preflight.phase, RecordPreflightPhase::Resolving);
+
+    let confirm_btn = {
+        let btn = button(text("Start recording").size(16)).padding([10, 20]);
+        if confirm_enabled {
+            btn.on_press(Message::ConfirmRecordPreflight)
+        } else {
+            btn
+        }
+    };
+
+    let cancel_btn = button(text("Cancel").size(16))
+        .on_press(Message::CancelRecordPreflight)
+        .padding([10, 20]);
+
+    let actions = row![confirm_btn, cancel_btn].spacing(12);
+
+    let mut body = column![title, description, no_limit, motion_checkbox, actions]
+        .spacing(16)
+        .padding(20)
+        .width(Length::Fill);
+
+    if let RecordPreflightPhase::NeedsSetup(_) = &preflight.phase {
+        let retry_btn = button(text("Retry/setup").size(16))
+            .on_press(Message::ConfirmRecordPreflight)
+            .padding([10, 20]);
+        let guide_only_btn = button(text("Continue Guide only").size(16))
+            .on_press(Message::ToggleMotion)
+            .padding([10, 20]);
+        let setup_actions = row![retry_btn, guide_only_btn].spacing(12);
+        body = body.push(setup_actions);
+    }
+
+    if let Some(ref msg) = state.message {
+        body = body.push(
+            row![
+                text(msg.as_str()).size(14),
+                button(text("Dismiss").size(12)).on_press(Message::Clear)
+            ]
+            .spacing(8),
+        );
+    }
 
     container(scrollable(body))
         .width(Length::Fill)
@@ -194,5 +267,116 @@ fn format_timestamp(ms: u64) -> String {
         format!("{}h ago", diff_s / 3600)
     } else {
         format!("{}d ago", diff_s / 86400)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::action_guide_home::update::{
+        ActionGuideHome, RecordPreflight, RecordPreflightPhase,
+    };
+    use iced::Size as IcedSize;
+    use iced_test::Simulator;
+
+    fn home_with_preflight(keep_motion: bool, phase: RecordPreflightPhase) -> ActionGuideHome {
+        let mut home = ActionGuideHome::new_empty();
+        home.preflight = Some(RecordPreflight {
+            keep_motion,
+            phase,
+        });
+        home
+    }
+
+    fn simulator_at<'a>(
+        state: &'a ActionGuideHome,
+        size: IcedSize,
+    ) -> Simulator<'a, Message> {
+        Simulator::with_size(iced::Settings::default(), size, view(state))
+    }
+
+    #[test]
+    fn preflight_visible_at_1100x760() {
+        let state = home_with_preflight(false, RecordPreflightPhase::Confirm);
+        let mut ui = simulator_at(&state, IcedSize::new(1100.0, 760.0));
+
+        for label in [
+            "Keep a silent screen recording",
+            "Saves the complete motion inside the Action Guide capture region with the project. No system audio or microphone.",
+            "Start recording",
+            "Cancel",
+        ] {
+            let target = ui
+                .find(label)
+                .unwrap_or_else(|e| panic!("{label:?} missing at 1100x760: {e}"));
+            assert!(
+                target.visible_bounds().is_some(),
+                "{label:?} not visible at 1100x760"
+            );
+        }
+    }
+
+    #[test]
+    fn preflight_visible_at_640x420() {
+        let state = home_with_preflight(false, RecordPreflightPhase::Confirm);
+        let mut ui = simulator_at(&state, IcedSize::new(640.0, 420.0));
+
+        for label in [
+            "Keep a silent screen recording",
+            "Saves the complete motion inside the Action Guide capture region with the project. No system audio or microphone.",
+            "Start recording",
+            "Cancel",
+        ] {
+            let target = ui
+                .find(label)
+                .unwrap_or_else(|e| panic!("{label:?} missing at 640x420: {e}"));
+            assert!(
+                target.visible_bounds().is_some(),
+                "{label:?} not visible at 640x420"
+            );
+        }
+    }
+
+    #[test]
+    fn preflight_default_unchecked_checkbox() {
+        let state = home_with_preflight(false, RecordPreflightPhase::Confirm);
+        let mut ui = simulator_at(&state, IcedSize::new(1100.0, 760.0));
+
+        let checkbox = ui
+            .find("Keep a silent screen recording")
+            .expect("checkbox must exist");
+        assert!(checkbox.visible_bounds().is_some());
+    }
+
+    #[test]
+    fn preflight_setup_failure_shows_retry_and_guide_only() {
+        let info = crate::managed_ffmpeg::FfmpegSetupInfo {
+            managed_download: None,
+            install_location: std::path::PathBuf::new(),
+        };
+        let state = home_with_preflight(true, RecordPreflightPhase::NeedsSetup(info));
+        let mut ui = simulator_at(&state, IcedSize::new(1100.0, 760.0));
+
+        for label in ["Retry/setup", "Continue Guide only"] {
+            let target = ui
+                .find(label)
+                .unwrap_or_else(|e| panic!("{label:?} missing at setup failure: {e}"));
+            assert!(
+                target.visible_bounds().is_some(),
+                "{label:?} not visible at setup failure"
+            );
+        }
+    }
+
+    #[test]
+    fn preflight_no_duration_or_disk_warning() {
+        let state = home_with_preflight(false, RecordPreflightPhase::Confirm);
+        let mut ui = simulator_at(&state, IcedSize::new(1100.0, 760.0));
+
+        let label = "No duration or file-size limit. Disk use is shown before saving.";
+        let target = ui
+            .find(label)
+            .unwrap_or_else(|e| panic!("{label:?} missing: {e}"));
+        assert!(target.visible_bounds().is_some());
     }
 }

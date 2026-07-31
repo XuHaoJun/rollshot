@@ -33,6 +33,20 @@ pub enum SelectedDirectoryKind {
     Invalid,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordPreflightPhase {
+    Confirm,
+    Resolving,
+    Available(rollshot_action::VideoToolchain),
+    NeedsSetup(crate::managed_ffmpeg::FfmpegSetupInfo),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordPreflight {
+    pub keep_motion: bool,
+    pub phase: RecordPreflightPhase,
+}
+
 pub struct ActionGuideHome {
     pub recent: RecentProjects,
     pub opening: bool,
@@ -40,6 +54,7 @@ pub struct ActionGuideHome {
     pub import: ImportCoordinator,
     import_jobs: VideoImportJobRegistry,
     import_job_watch: rollshot_agent::jobs::JobWatch,
+    pub(crate) preflight: Option<RecordPreflight>,
 }
 
 #[derive(Debug, Clone)]
@@ -74,13 +89,20 @@ pub enum Message {
     RetryImportSetup,
     ImportJobsChanged,
     CancelImport,
+    ToggleMotion,
+    ConfirmRecordPreflight,
+    CancelRecordPreflight,
+    PreflightToolchainResolved(crate::managed_ffmpeg::VideoImportToolchainResolution),
+    PreflightSetupFinished(Result<(), String>),
 }
 
 pub enum Effect {
     None,
     PickProject,
     InspectSelection(PathBuf),
-    RecordNew,
+    StartRecording {
+        motion_toolchain: Option<rollshot_action::VideoToolchain>,
+    },
     OpenProject(PathBuf),
     OpenLegacyReader(PathBuf),
     PickRecording,
@@ -118,7 +140,10 @@ impl std::fmt::Debug for Effect {
             Self::None => write!(f, "None"),
             Self::PickProject => write!(f, "PickProject"),
             Self::InspectSelection(p) => write!(f, "InspectSelection({})", truncate_path(p)),
-            Self::RecordNew => write!(f, "RecordNew"),
+            Self::StartRecording { motion_toolchain } => f
+                .debug_struct("StartRecording")
+                .field("has_toolchain", &motion_toolchain.is_some())
+                .finish(),
             Self::OpenProject(p) => write!(f, "OpenProject({})", truncate_path(p)),
             Self::OpenLegacyReader(p) => write!(f, "OpenLegacyReader({})", truncate_path(p)),
             Self::PickRecording => write!(f, "PickRecording"),
@@ -164,6 +189,7 @@ impl ActionGuideHome {
             import: ImportCoordinator::default(),
             import_jobs,
             import_job_watch,
+            preflight: None,
         }
     }
 
@@ -279,10 +305,13 @@ impl ActionGuideHome {
 
     pub fn update(&mut self, message: Message) -> Update {
         match message {
-            Message::RecordNew => Update {
-                task: Task::none(),
-                effect: Effect::RecordNew,
-            },
+            Message::RecordNew => {
+                self.preflight = Some(RecordPreflight {
+                    keep_motion: false,
+                    phase: RecordPreflightPhase::Confirm,
+                });
+                Update::none()
+            }
             Message::OpenPicker => Update {
                 task: Task::none(),
                 effect: Effect::PickProject,
@@ -495,6 +524,79 @@ impl ActionGuideHome {
                 }
                 Update::none()
             }
+            Message::ToggleMotion => {
+                if let Some(ref mut preflight) = self.preflight {
+                    preflight.keep_motion = !preflight.keep_motion;
+                }
+                Update::none()
+            }
+            Message::ConfirmRecordPreflight => {
+                let Some(ref preflight) = self.preflight else {
+                    return Update::none();
+                };
+                if !preflight.keep_motion {
+                    // Opt-out: skip resolution entirely, start without motion.
+                    self.preflight = None;
+                    return Update {
+                        task: Task::none(),
+                        effect: Effect::StartRecording {
+                            motion_toolchain: None,
+                        },
+                    };
+                }
+                // Opt-in: resolve toolchain.
+                self.preflight = Some(RecordPreflight {
+                    keep_motion: true,
+                    phase: RecordPreflightPhase::Resolving,
+                });
+                Update {
+                    task: resolve_recording_toolchain_task(),
+                    effect: Effect::None,
+                }
+            }
+            Message::CancelRecordPreflight => {
+                self.preflight = None;
+                Update::none()
+            }
+            Message::PreflightToolchainResolved(resolution) => {
+                let Some(ref mut preflight) = self.preflight else {
+                    return Update::none();
+                };
+                match resolution {
+                    crate::managed_ffmpeg::VideoImportToolchainResolution::Available(toolchain) => {
+                        self.preflight = None;
+                        Update {
+                            task: Task::none(),
+                            effect: Effect::StartRecording {
+                                motion_toolchain: Some(toolchain),
+                            },
+                        }
+                    }
+                    crate::managed_ffmpeg::VideoImportToolchainResolution::NeedsSetup(info) => {
+                        preflight.phase = RecordPreflightPhase::NeedsSetup(info);
+                        Update::none()
+                    }
+                }
+            }
+            Message::PreflightSetupFinished(result) => {
+                let Some(ref mut preflight) = self.preflight else {
+                    return Update::none();
+                };
+                match result {
+                    Ok(()) => {
+                        // Re-resolve after successful setup.
+                        preflight.phase = RecordPreflightPhase::Resolving;
+                        Update {
+                            task: resolve_recording_toolchain_task(),
+                            effect: Effect::None,
+                        }
+                    }
+                    Err(err) => {
+                        self.message = Some(err);
+                        Update::none()
+                    }
+                }
+            }
         }
     }
 
@@ -637,6 +739,44 @@ fn import_admission_message(error: rollshot_agent::jobs::JobAdmissionError) -> S
             "Import could not start because authorization was rejected.".to_string()
         }
     }
+}
+
+/// Build an iced task that resolves the recording toolchain in a blocking thread.
+fn resolve_recording_toolchain_task() -> Task<Message> {
+    Task::perform(
+        async {
+            let resolution = tokio::task::spawn_blocking(
+                crate::managed_ffmpeg::resolve_video_import_toolchain,
+            )
+            .await
+            .unwrap_or(
+                crate::managed_ffmpeg::VideoImportToolchainResolution::NeedsSetup(
+                    crate::managed_ffmpeg::FfmpegSetupInfo {
+                        managed_download: None,
+                        install_location: std::path::PathBuf::new(),
+                    },
+                ),
+            );
+            Message::PreflightToolchainResolved(resolution)
+        },
+        |msg| msg,
+    )
+}
+
+/// Build an iced task that downloads the managed FFmpeg in a blocking thread.
+fn setup_recording_toolchain_task() -> Task<Message> {
+    Task::perform(
+        async {
+            let result = tokio::task::spawn_blocking(
+                crate::managed_ffmpeg::download_managed_ffmpeg,
+            )
+            .await
+            .map_err(|e| format!("Setup worker panicked: {e}"))
+            .and_then(|r| r);
+            Message::PreflightSetupFinished(result.map(|_| ()))
+        },
+        |msg| msg,
+    )
 }
 
 /// Build an iced stream that emits `ImportJobsChanged` on every watch revision.
@@ -856,13 +996,158 @@ mod tests {
         }
     }
 
-    // ---- Record New ----
+    // ---- Record New / Preflight ----
 
     #[test]
-    fn record_new_emits_record_effect() {
+    fn record_new_opens_preflight_with_unchecked_motion() {
         let (_dir, mut home) = setup_home();
         let update = home.update(Message::RecordNew);
-        assert!(matches!(update.effect, Effect::RecordNew));
+        assert!(matches!(update.effect, Effect::None));
+        let preflight = home.preflight.as_ref().expect("preflight should be set");
+        assert!(!preflight.keep_motion);
+        assert!(matches!(preflight.phase, RecordPreflightPhase::Confirm));
+    }
+
+    #[test]
+    fn confirm_unchecked_emits_start_recording_none_without_resolution() {
+        let (_dir, mut home) = setup_home();
+        home.update(Message::RecordNew);
+        let update = home.update(Message::ConfirmRecordPreflight);
+        assert!(matches!(
+            update.effect,
+            Effect::StartRecording {
+                motion_toolchain: None
+            }
+        ));
+        assert!(home.preflight.is_none());
+    }
+
+    #[test]
+    fn toggle_on_then_confirm_emits_resolve_effect() {
+        let (_dir, mut home) = setup_home();
+        home.update(Message::RecordNew);
+        home.update(Message::ToggleMotion);
+        let preflight = home.preflight.as_ref().unwrap();
+        assert!(preflight.keep_motion);
+        let update = home.update(Message::ConfirmRecordPreflight);
+        assert!(matches!(update.effect, Effect::None));
+        assert!(matches!(
+            home.preflight.as_ref().unwrap().phase,
+            RecordPreflightPhase::Resolving
+        ));
+    }
+
+    #[test]
+    fn available_toolchain_emits_start_with_toolchain() {
+        let (_dir, mut home) = setup_home();
+        home.update(Message::RecordNew);
+        home.update(Message::ToggleMotion);
+        home.update(Message::ConfirmRecordPreflight);
+        let toolchain = toolchain_fixture();
+        let update = home.update(Message::PreflightToolchainResolved(
+            crate::managed_ffmpeg::VideoImportToolchainResolution::Available(
+                toolchain.clone(),
+            ),
+        ));
+        assert!(matches!(
+            update.effect,
+            Effect::StartRecording {
+                motion_toolchain: Some(ref tc)
+            } if tc == &toolchain
+        ));
+        assert!(home.preflight.is_none());
+    }
+
+    #[test]
+    fn needs_setup_shows_retry_and_no_recording_state() {
+        let (_dir, mut home) = setup_home();
+        home.update(Message::RecordNew);
+        home.update(Message::ToggleMotion);
+        home.update(Message::ConfirmRecordPreflight);
+        let info = crate::managed_ffmpeg::FfmpegSetupInfo {
+            managed_download: None,
+            install_location: std::path::PathBuf::new(),
+        };
+        let update = home.update(Message::PreflightToolchainResolved(
+            crate::managed_ffmpeg::VideoImportToolchainResolution::NeedsSetup(info),
+        ));
+        assert!(matches!(update.effect, Effect::None));
+        let preflight = home.preflight.as_ref().unwrap();
+        assert!(matches!(
+            preflight.phase,
+            RecordPreflightPhase::NeedsSetup(_)
+        ));
+    }
+
+    #[test]
+    fn setup_success_re_resolves() {
+        let (_dir, mut home) = setup_home();
+        home.update(Message::RecordNew);
+        home.update(Message::ToggleMotion);
+        home.update(Message::ConfirmRecordPreflight);
+        home.update(Message::PreflightToolchainResolved(
+            crate::managed_ffmpeg::VideoImportToolchainResolution::NeedsSetup(
+                crate::managed_ffmpeg::FfmpegSetupInfo {
+                    managed_download: None,
+                    install_location: std::path::PathBuf::new(),
+                },
+            ),
+        ));
+        let update = home.update(Message::PreflightSetupFinished(Ok(())));
+        assert!(matches!(update.effect, Effect::None));
+        assert!(matches!(
+            home.preflight.as_ref().unwrap().phase,
+            RecordPreflightPhase::Resolving
+        ));
+    }
+
+    #[test]
+    fn cancel_preflight_returns_home() {
+        let (_dir, mut home) = setup_home();
+        home.update(Message::RecordNew);
+        assert!(home.preflight.is_some());
+        home.update(Message::CancelRecordPreflight);
+        assert!(home.preflight.is_none());
+    }
+
+    #[test]
+    fn no_previous_session_preference_read_or_stored() {
+        let (_dir, mut home) = setup_home();
+        home.update(Message::RecordNew);
+        // Confirm with default unchecked motion — consumes preflight.
+        home.update(Message::ConfirmRecordPreflight);
+        assert!(home.preflight.is_none());
+        // A second RecordNew starts fresh with unchecked motion.
+        home.update(Message::RecordNew);
+        let preflight = home.preflight.as_ref().unwrap();
+        assert!(!preflight.keep_motion);
+    }
+
+    #[test]
+    fn guide_only_continuation_emits_start_recording_none() {
+        let (_dir, mut home) = setup_home();
+        home.update(Message::RecordNew);
+        home.update(Message::ToggleMotion);
+        home.update(Message::ConfirmRecordPreflight);
+        home.update(Message::PreflightToolchainResolved(
+            crate::managed_ffmpeg::VideoImportToolchainResolution::NeedsSetup(
+                crate::managed_ffmpeg::FfmpegSetupInfo {
+                    managed_download: None,
+                    install_location: std::path::PathBuf::new(),
+                },
+            ),
+        ));
+        // Simulate "Continue Guide only" by confirming with motion unchecked.
+        home.update(Message::ToggleMotion);
+        assert!(!home.preflight.as_ref().unwrap().keep_motion);
+        let update = home.update(Message::ConfirmRecordPreflight);
+        assert!(matches!(
+            update.effect,
+            Effect::StartRecording {
+                motion_toolchain: None
+            }
+        ));
+        assert!(home.preflight.is_none());
     }
 
     // ---- Open picker ----

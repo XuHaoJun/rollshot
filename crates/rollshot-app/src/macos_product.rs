@@ -518,7 +518,9 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                     product.phase = Phase::Opening(home);
                     Task::perform(inspect_and_open(path), |msg| msg)
                 }
-                action_guide_home::Effect::RecordNew => {
+                action_guide_home::Effect::StartRecording {
+                    motion_toolchain: _,
+                } => {
                     start_action_guide_recording(product, false)
                 }
                 action_guide_home::Effect::OpenProject(path) => {
@@ -1866,18 +1868,23 @@ mod tests {
 
         #[test]
         #[cfg(not(target_os = "macos"))]
-        fn record_new_enters_capture_phase() {
+        fn record_new_opens_preflight() {
             let mut product = product_in_home_phase();
             let task = update(
                 &mut product,
                 Message::HomeMsg(action_guide_home::Message::RecordNew),
             );
-            // RecordNew transitions to Capture phase (if Component::new succeeds under test).
-            // Under cfg(test), Component::new uses a test factory; we verify the phase transition.
+            // RecordNew now opens the preflight dialog instead of immediately starting.
             assert!(
-                matches!(product.phase, Phase::Capture(_)),
-                "RecordNew should transition to Capture phase"
+                matches!(product.phase, Phase::Home(_)),
+                "RecordNew should stay in Home phase with preflight open"
             );
+            if let Phase::Home(ref home) = product.phase {
+                assert!(
+                    home.preflight.is_some(),
+                    "preflight should be open after RecordNew"
+                );
+            }
             drop(task);
         }
 

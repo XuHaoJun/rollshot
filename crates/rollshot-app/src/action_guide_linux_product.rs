@@ -111,7 +111,9 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
                     state.phase = Phase::Opening;
                     iced::Task::perform(inspect_and_open(path), |msg| msg)
                 }
-                action_guide_home::Effect::RecordNew => {
+                action_guide_home::Effect::StartRecording {
+                    motion_toolchain: _,
+                } => {
                     let _ = crate::platform_actions::spawn_action_guide_record(false);
                     iced::Task::none()
                 }
@@ -658,7 +660,7 @@ mod tests {
             ..DetectorConfig::default()
         };
         let mut rec = ActionRecorder::new(region, StoreConfig::default(), det);
-        rec.ingest_frame(RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255])), 0);
+        rec.ingest_frame(std::sync::Arc::new(RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255]))), 0);
         for i in 1..=6 {
             let mut img = RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255]));
             for y in 0..16 {
@@ -666,7 +668,7 @@ mod tests {
                     img.put_pixel(x, y, Rgba([255, 255, 255, 255]));
                 }
             }
-            rec.ingest_frame(img, i * 100);
+            rec.ingest_frame(std::sync::Arc::new(img), i * 100);
         }
         rec.finish()
     }
