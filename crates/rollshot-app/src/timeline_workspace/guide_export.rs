@@ -421,6 +421,7 @@ mod tests {
             },
             InputCapability::SemanticEvents,
             InputSourceKind::LinuxEvdev,
+            None,
         )
     }
 
@@ -737,6 +738,7 @@ mod tests {
                 reason: rollshot_action::DegradedReason::SourceStartFailed,
             },
             InputSourceKind::VisualOnly,
+            None,
         );
         ws.frame_source = Some(rollshot_action::StepFrameSource::Project(source));
         let _ = dir.keep();

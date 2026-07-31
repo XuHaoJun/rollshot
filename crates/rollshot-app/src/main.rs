@@ -26,6 +26,8 @@ use std::process::ExitCode;
 mod macos_product;
 #[cfg(all(target_os = "macos", feature = "action-guide"))]
 mod macos_recording_tray;
+#[cfg(feature = "action-guide")]
+mod macos_recording_status;
 // Registered on every target so the pure drag placement/result helpers compile
 // and unit-test on Linux; the AppKit bridge inside it is macOS-gated.
 mod issue_pack;

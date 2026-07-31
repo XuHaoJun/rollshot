@@ -237,6 +237,10 @@ pub struct Component {
     fullscreen_action_guide: bool,
     #[cfg(feature = "action-guide")]
     fullscreen_action_guide_started: bool,
+    #[cfg(feature = "action-guide")]
+    motion_toolchain: Option<rollshot_action::video_import::VideoToolchain>,
+    #[cfg(feature = "action-guide")]
+    last_motion_status: rollshot_action::motion::MotionRuntimeStatus,
 }
 
 /// Terminal outcome staged behind a passthrough-disable handshake. Mutually
@@ -255,6 +259,9 @@ impl Component {
         config: &OverlayConfig,
         #[cfg(feature = "action-guide")] action_input_source: Option<
             Box<dyn rollshot_action::SemanticInputSource>,
+        >,
+        #[cfg(feature = "action-guide")] motion_toolchain: Option<
+            rollshot_action::video_import::VideoToolchain,
         >,
     ) -> Result<Option<Self>, OverlayError> {
         let fullscreen_action_guide = config.request.scope == CaptureScope::Fullscreen
@@ -316,6 +323,10 @@ impl Component {
             fullscreen_action_guide,
             #[cfg(feature = "action-guide")]
             fullscreen_action_guide_started: false,
+            #[cfg(feature = "action-guide")]
+            motion_toolchain,
+            #[cfg(feature = "action-guide")]
+            last_motion_status: rollshot_action::motion::MotionRuntimeStatus::Off,
         }))
     }
 
@@ -468,6 +479,28 @@ impl Component {
     fn clear_preview_channel(&mut self) {
         self.preview_rx = None;
         *PREVIEW_RX.lock().unwrap() = None;
+    }
+
+    /// Current motion encoder runtime status, if a driver is active.
+    #[cfg(feature = "action-guide")]
+    pub fn motion_status(&self) -> rollshot_action::motion::MotionRuntimeStatus {
+        self.driver
+            .as_ref()
+            .map(|d| d.motion_status())
+            .unwrap_or(rollshot_action::motion::MotionRuntimeStatus::Off)
+    }
+
+    /// Return the motion status if it changed since the last call, updating
+    /// the cached value. Used by the host to project live status to the tray.
+    #[cfg(feature = "action-guide")]
+    pub fn take_motion_status_change(&mut self) -> Option<rollshot_action::motion::MotionRuntimeStatus> {
+        let current = self.motion_status();
+        if current != self.last_motion_status {
+            self.last_motion_status = current;
+            Some(current)
+        } else {
+            None
+        }
     }
 
     /// Tear down any live capture resources so the stream + reader thread don't
@@ -891,7 +924,7 @@ impl Component {
                         action_region,
                         source,
                         crate::driver::ActionGuideRecordingOptions {
-                            motion_toolchain: None,
+                            motion_toolchain: self.motion_toolchain.clone(),
                         },
                     ).capability);
                 }
@@ -1264,6 +1297,10 @@ mod tests {
             fullscreen_action_guide: false,
             #[cfg(feature = "action-guide")]
             fullscreen_action_guide_started: false,
+            #[cfg(feature = "action-guide")]
+            motion_toolchain: None,
+            #[cfg(feature = "action-guide")]
+            last_motion_status: rollshot_action::motion::MotionRuntimeStatus::Off,
         }
     }
 

@@ -417,6 +417,10 @@ pub struct TimelineWorkspace {
     pub(crate) import_warnings: Vec<rollshot_action::ImportWarning>,
     #[cfg(feature = "action-guide")]
     pub(crate) imported_scratch: Option<rollshot_action::ImportedScratch>,
+    /// Motion recording outcome from the capture session.
+    #[cfg(feature = "action-guide")]
+    #[allow(dead_code)]
+    pub(crate) motion_outcome: Option<rollshot_action::motion::MotionRecordingOutcome>,
 }
 
 impl TimelineWorkspace {
@@ -427,6 +431,7 @@ impl TimelineWorkspace {
         region: CaptureRegion,
         capability: InputCapability,
         source_kind: InputSourceKind,
+        motion_outcome: Option<rollshot_action::motion::MotionRecordingOutcome>,
     ) -> Self {
         let Recording { candidates, store } = recording;
         let guide = Guide::from_candidates(candidates);
@@ -503,6 +508,8 @@ impl TimelineWorkspace {
             import_warnings: Vec::new(),
             #[cfg(feature = "action-guide")]
             imported_scratch: None,
+            #[cfg(feature = "action-guide")]
+            motion_outcome,
         };
         ws.rebuild_selection_handles();
         ws
@@ -579,6 +586,7 @@ impl TimelineWorkspace {
             share_operation_id: 0,
             import_warnings: seed.import_warnings,
             imported_scratch: Some(seed.scratch),
+            motion_outcome: None,
         };
         ws.rebuild_selection_handles();
         ws
@@ -967,7 +975,7 @@ pub fn run(
             .unwrap()
             .take()
             .expect("timeline workspace boot data already consumed");
-        let mut ws = TimelineWorkspace::new(recording, region, capability, source_kind);
+        let mut ws = TimelineWorkspace::new(recording, region, capability, source_kind, None);
         // Open the process-wide task store once at workspace boot.
         if let Ok(config_dir) = crate::daemon::config::rollshot_config_dir() {
             match crate::agent_store::open_process_store(&config_dir) {
@@ -1171,6 +1179,7 @@ mod tests {
             region_32(),
             InputCapability::SemanticEvents,
             InputSourceKind::LinuxEvdev,
+            None,
         )
     }
 

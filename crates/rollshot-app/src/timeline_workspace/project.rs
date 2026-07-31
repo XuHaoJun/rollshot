@@ -422,6 +422,7 @@ pub(crate) fn from_loaded_project(
         share_operation_id: 0,
         import_warnings: manifest.import_warnings.clone(),
         imported_scratch: None,
+        motion_outcome: None,
     };
 
     ws.rebuild_selection_handles();

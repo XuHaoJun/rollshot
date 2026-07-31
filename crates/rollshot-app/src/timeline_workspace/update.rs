@@ -4370,6 +4370,7 @@ mod tests {
             },
             InputCapability::SemanticEvents,
             InputSourceKind::LinuxEvdev,
+            None,
         );
         // Open a temporary task store for tests that need it.
         let dir = tempfile::tempdir().unwrap();

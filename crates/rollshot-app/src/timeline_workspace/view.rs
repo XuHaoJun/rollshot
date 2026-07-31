@@ -1571,6 +1571,7 @@ mod tests {
             },
             capability,
             InputSourceKind::LinuxEvdev,
+            None,
         )
     }
 
