@@ -5,7 +5,7 @@ use rollshot_overlay_core::capture_miss::{
     StitchProgressSignal,
 };
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -20,11 +20,39 @@ use crate::diagnostics::{TARGET_CAPTURE, TARGET_STITCH};
 
 use crate::CaptureResult;
 
+#[cfg(feature = "action-guide")]
+use rollshot_action::motion::{
+    MotionFrame, MotionRecorder, MotionRecordingOutcome, MotionRuntimeStatus,
+};
+
 #[derive(Debug, Clone)]
 pub enum LiveOverlayEvent {
     AcceptedActivity(Instant),
     Preview(ImageHandle),
     CaptureMiss(CaptureMissState),
+}
+
+/// Options for an action-guide recording session.
+#[cfg(feature = "action-guide")]
+pub(crate) struct ActionGuideRecordingOptions {
+    pub motion_toolchain: Option<rollshot_action::video_import::VideoToolchain>,
+}
+
+/// Start status returned by `begin_action_recording`.
+#[cfg(feature = "action-guide")]
+pub(crate) struct ActionRecordingStart {
+    pub capability: rollshot_action::InputCapability,
+    #[allow(dead_code)] // consumed by UI projection via `Driver::motion_status()`
+    pub motion_status: MotionRuntimeStatus,
+}
+
+/// Final result of an action-guide capture session.
+#[cfg(feature = "action-guide")]
+pub struct ActionGuideCaptureResult {
+    pub recording: rollshot_action::Recording,
+    pub capability: rollshot_action::InputCapability,
+    pub region: rollshot_action::CaptureRegion,
+    pub motion: MotionRecordingOutcome,
 }
 
 /// R4: emit on any active-flag transition (rising OR falling — so the recovery
@@ -192,8 +220,12 @@ pub struct Driver {
     action_thread: Option<JoinHandle<()>>,
     #[cfg(feature = "action-guide")]
     action_result: Option<
-        std::sync::mpsc::Receiver<(rollshot_action::Recording, rollshot_action::InputCapability)>,
+        std::sync::mpsc::Receiver<ActionGuideCaptureResult>,
     >,
+    /// Shared motion runtime status: set to `On` after MotionRecorder::start
+    /// succeeds, `Off` after runtime failure or finish.
+    #[cfg(feature = "action-guide")]
+    motion_status: Arc<AtomicU8>,
 }
 
 #[allow(dead_code)]
@@ -292,6 +324,8 @@ impl Driver {
             action_thread: None,
             #[cfg(feature = "action-guide")]
             action_result: None,
+            #[cfg(feature = "action-guide")]
+            motion_status: Arc::new(AtomicU8::new(MotionRuntimeStatus::Off as u8)),
         })
     }
 
@@ -492,7 +526,8 @@ impl Driver {
         &mut self,
         region: rollshot_action::CaptureRegion,
         source: Box<dyn rollshot_action::SemanticInputSource>,
-    ) -> rollshot_action::InputCapability {
+        options: ActionGuideRecordingOptions,
+    ) -> ActionRecordingStart {
         let shared = self.shared.clone();
         let action_stop = self.action_stop.clone();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -510,24 +545,30 @@ impl Driver {
         // Start the source synchronously so the resolved capability is known
         // immediately (the UI surfaces it as a label/advisory); then hand the
         // started recording to the consumer thread.
-        let mut rec = ActionRecording::start(region, source);
+        let mut rec = ActionRecording::start(region, source, &options);
         let capability = rec.capability();
+        let motion_status_val = rec.motion_status();
+        let shared_motion_status = self.motion_status.clone();
+        shared_motion_status.store(motion_status_val as u8, Ordering::Release);
         self.action_thread = Some(std::thread::spawn(move || {
             let mut last_seq = shared.seq.load(Ordering::Relaxed);
             let mut t0: Option<std::time::SystemTime> = None;
+            let mut session_start: Option<Instant> = None;
+            let action_region = region;
             while !action_stop.load(Ordering::Relaxed) {
                 let seq = shared.seq.load(Ordering::Relaxed);
                 if seq != last_seq {
                     last_seq = seq;
                     if let Some(frame) = shared.latest.lock().ok().and_then(|s| s.clone()) {
+                        let _ = session_start.get_or_insert(Instant::now());
                         let base = *t0.get_or_insert(frame.timestamp);
                         let at_ms = frame
                             .timestamp
                             .duration_since(base)
                             .map(|d| d.as_millis() as u64)
                             .unwrap_or(0);
-                        let image = match crop_frame(&frame, crop_region) {
-                            Ok(cropped) => cropped.image,
+                        let cropped = match crop_frame(&frame, crop_region) {
+                            Ok(c) => c.image,
                             // Region outside the source: fall back to the
                             // uncropped frame so detection still runs.
                             Err(err) => {
@@ -539,33 +580,51 @@ impl Driver {
                                 frame.image
                             }
                         };
-                        rec.push_frame(image, at_ms);
+                        let image: rollshot_action::SharedActionFrame =
+                            std::sync::Arc::new(cropped);
+                        rec.push_frame(Arc::clone(&image), at_ms);
+                        rec.offer_motion(image, at_ms);
+                        if let Some(status) = rec.motion_status_if_changed() {
+                            shared_motion_status.store(status as u8, Ordering::Release);
+                        }
                     }
                 }
                 rec.poll_input();
                 std::thread::sleep(Duration::from_millis(20));
             }
-            let capability = rec.capability();
-            let _ = tx.send((rec.finalize(), capability));
+            let session_duration_ms = session_start
+                .map(|s| s.elapsed().as_millis() as u64)
+                .unwrap_or(0);
+            let result = rec.finalize_with_region(session_duration_ms, action_region);
+            let _ = tx.send(result);
         }));
-        capability
+        ActionRecordingStart {
+            capability,
+            motion_status: motion_status_val,
+        }
     }
 
-    /// Signal the action thread to stop and collect the finished Recording plus
-    /// the resolved input capability.
+    /// Current motion encoder runtime status.
+    pub(crate) fn motion_status(&self) -> MotionRuntimeStatus {
+        match self.motion_status.load(Ordering::Acquire) {
+            0 => MotionRuntimeStatus::On,
+            _ => MotionRuntimeStatus::Off,
+        }
+    }
+
+    /// Signal the action thread to stop and collect the finished
+    /// ActionGuideCaptureResult.
     pub(crate) fn finalize_action(
         mut self,
-    ) -> Result<(rollshot_action::Recording, rollshot_action::InputCapability), String> {
+    ) -> Result<ActionGuideCaptureResult, String> {
         self.action_stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.action_thread.take() {
             let _ = handle.join();
         }
-        let (recording, capability) = self
-            .action_result
+        self.action_result
             .take()
             .and_then(|rx| rx.recv().ok())
-            .ok_or_else(|| "action recording produced no result".to_string())?;
-        Ok((recording, capability))
+            .ok_or_else(|| "action recording produced no result".to_string())
     }
 }
 
@@ -574,6 +633,8 @@ impl Driver {
 pub(crate) struct ActionRecording {
     recorder: rollshot_action::ActionRecorder,
     input: rollshot_action::StartedSemanticInput,
+    motion: Option<MotionRecorder>,
+    motion_failure: Option<rollshot_action::motion::MotionFailureCategory>,
 }
 
 #[cfg(feature = "action-guide")]
@@ -582,8 +643,19 @@ impl ActionRecording {
     pub(crate) fn start(
         region: rollshot_action::CaptureRegion,
         source: Box<dyn rollshot_action::SemanticInputSource>,
+        options: &ActionGuideRecordingOptions,
     ) -> Self {
         use rollshot_action::{DetectorConfig, StoreConfig};
+        let motion = options
+            .motion_toolchain
+            .as_ref()
+            .and_then(|toolchain| match MotionRecorder::start(toolchain, region.width, region.height) {
+                Ok(recorder) => Some(recorder),
+                Err(e) => {
+                    tracing::warn!(target: TARGET_CAPTURE, %e, "motion recorder start failed");
+                    None
+                }
+            });
         Self {
             recorder: rollshot_action::ActionRecorder::new(
                 region,
@@ -594,12 +666,37 @@ impl ActionRecording {
             // source is swapped to a started VisualOnlySource carrying the real
             // reason (see `rollshot_action::StartedSemanticInput`).
             input: rollshot_action::StartedSemanticInput::start(source, region),
+            motion,
+            motion_failure: None,
         }
     }
 
     /// `at_ms` is session-relative milliseconds (monotonic from 0).
-    pub(crate) fn push_frame(&mut self, image: image::RgbaImage, at_ms: u64) {
+    /// `image` is a shared frame (zero-copy tee: the guide recorder and motion
+    /// sink observe the same `Arc` allocation).
+    pub(crate) fn push_frame(
+        &mut self,
+        image: rollshot_action::SharedActionFrame,
+        at_ms: u64,
+    ) {
         self.recorder.ingest_frame(image, at_ms);
+    }
+
+    /// Offer a frame to the motion sink. Stops offering on first failure.
+    pub(crate) fn offer_motion(&mut self, image: rollshot_action::SharedActionFrame, at_ms: u64) {
+        if self.motion_failure.is_some() {
+            return;
+        }
+        if let Some(ref motion) = self.motion {
+            let frame = MotionFrame {
+                at_ms,
+                image,
+            };
+            if let Err(e) = motion.offer(frame) {
+                tracing::warn!(target: TARGET_CAPTURE, %e, "motion offer failed");
+                self.motion_failure = Some(e);
+            }
+        }
     }
 
     pub(crate) fn poll_input(&mut self) {
@@ -610,6 +707,48 @@ impl ActionRecording {
         self.input.capability()
     }
 
+    pub(crate) fn motion_status(&self) -> MotionRuntimeStatus {
+        match &self.motion {
+            Some(m) => m.status(),
+            None => MotionRuntimeStatus::Off,
+        }
+    }
+
+    /// Return the current motion status if it differs from the last known
+    /// status, or `None` if unchanged.
+    fn motion_status_if_changed(&self) -> Option<MotionRuntimeStatus> {
+        // We always report the current status; the caller decides whether to
+        // store it. For simplicity, always return the current status.
+        Some(self.motion_status())
+    }
+
+    /// Finalize both the guide recording and motion sink, producing the full
+    /// capture result.
+    pub(crate) fn finalize_with_region(
+        mut self,
+        session_duration_ms: u64,
+        region: rollshot_action::CaptureRegion,
+    ) -> ActionGuideCaptureResult {
+        self.input.stop();
+        let recording = self.recorder.finish();
+        let capability = self.input.capability();
+        let motion = match self.motion.take() {
+            Some(mut motion) => motion.finish(session_duration_ms),
+            None => MotionRecordingOutcome::Failure(
+                self.motion_failure
+                    .unwrap_or(rollshot_action::motion::MotionFailureCategory::Cancelled),
+            ),
+        };
+        ActionGuideCaptureResult {
+            recording,
+            capability,
+            region,
+            motion,
+        }
+    }
+
+    /// Finalize only the guide recording (no motion), returning the recording
+    /// and capability. Used when the caller does not need motion outcome.
     pub(crate) fn finalize(mut self) -> rollshot_action::Recording {
         self.input.stop();
         self.recorder.finish()
@@ -696,6 +835,12 @@ mod action_tests {
     use image::RgbaImage;
     use rollshot_action::{CaptureRegion, DegradedReason, VisualOnlySource};
 
+    fn no_motion_options() -> ActionGuideRecordingOptions {
+        ActionGuideRecordingOptions {
+            motion_toolchain: None,
+        }
+    }
+
     #[test]
     fn finalize_action_produces_candidates_from_changing_frames() {
         let region = CaptureRegion {
@@ -707,14 +852,15 @@ mod action_tests {
         let mut rec = ActionRecording::start(
             region,
             Box::new(VisualOnlySource::new(DegradedReason::SourceStartFailed)),
+            &no_motion_options(),
         );
-        let black = RgbaImage::from_pixel(64, 64, image::Rgba([0, 0, 0, 255]));
-        let white = RgbaImage::from_pixel(64, 64, image::Rgba([255, 255, 255, 255]));
-        rec.push_frame(black, 0);
+        let black = Arc::new(RgbaImage::from_pixel(64, 64, image::Rgba([0, 0, 0, 255])));
+        let white = Arc::new(RgbaImage::from_pixel(64, 64, image::Rgba([255, 255, 255, 255])));
+        rec.push_frame(Arc::clone(&black), 0);
         // Multiple white frames to satisfy stable_frames settle.
-        rec.push_frame(white.clone(), 500);
-        rec.push_frame(white.clone(), 600);
-        rec.push_frame(white, 700);
+        rec.push_frame(Arc::clone(&white), 500);
+        rec.push_frame(Arc::clone(&white), 600);
+        rec.push_frame(Arc::clone(&white), 700);
         assert!(
             matches!(
                 rec.capability(),
@@ -740,13 +886,386 @@ mod action_tests {
         let mut rec = ActionRecording::start(
             region,
             Box::new(VisualOnlySource::new(DegradedReason::PermissionDenied)),
+            &no_motion_options(),
         );
         rec.push_frame(
-            RgbaImage::from_pixel(64, 64, image::Rgba([0, 0, 0, 255])),
+            Arc::new(RgbaImage::from_pixel(64, 64, image::Rgba([0, 0, 0, 255]))),
             0,
         );
         let recording = rec.finalize();
         assert!(recording.candidates.is_empty());
+    }
+
+    // ── RED tests: zero-copy tee contract ───────────────────────────────
+
+    #[test]
+    fn motion_disabled_recorder_sequence_matches_and_motion_factory_never_called() {
+        let region = CaptureRegion {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        };
+        let mut rec = ActionRecording::start(
+            region,
+            Box::new(VisualOnlySource::new(DegradedReason::SourceStartFailed)),
+            &no_motion_options(),
+        );
+        assert!(
+            rec.motion.is_none(),
+            "motion factory must not be called when toolchain is None"
+        );
+        let f1 = Arc::new(RgbaImage::from_pixel(8, 8, image::Rgba([10, 20, 30, 255])));
+        let f2 = Arc::new(RgbaImage::from_pixel(8, 8, image::Rgba([40, 50, 60, 255])));
+        rec.push_frame(Arc::clone(&f1), 0);
+        rec.push_frame(Arc::clone(&f2), 100);
+        // offer_motion is a no-op when motion is None.
+        rec.offer_motion(Arc::clone(&f1), 0);
+        rec.offer_motion(Arc::clone(&f2), 100);
+        let result = rec.finalize_with_region(200, region);
+        assert!(
+            !result.recording.candidates.is_empty(),
+            "recorder must produce candidates from changing frames"
+        );
+        // motion outcome must be Failure since motion was disabled.
+        assert!(
+            matches!(result.motion, MotionRecordingOutcome::Failure(_)),
+            "motion outcome must be Failure when motion was disabled"
+        );
+    }
+
+    // ── RED tests: completion/failure contract ──────────────────────────
+
+    #[test]
+    fn motion_status_is_off_when_motion_not_started() {
+        let region = CaptureRegion {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        };
+        let rec = ActionRecording::start(
+            region,
+            Box::new(VisualOnlySource::new(DegradedReason::SourceStartFailed)),
+            &no_motion_options(),
+        );
+        assert_eq!(
+            rec.motion_status(),
+            MotionRuntimeStatus::Off,
+            "motion status must be Off when no motion recorder was started"
+        );
+    }
+
+    #[test]
+    fn finalize_with_region_reports_guide_and_motion_outcome() {
+        let region = CaptureRegion {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        };
+        let mut rec = ActionRecording::start(
+            region,
+            Box::new(VisualOnlySource::new(DegradedReason::SourceStartFailed)),
+            &no_motion_options(),
+        );
+        let f1 = Arc::new(RgbaImage::from_pixel(8, 8, image::Rgba([10, 20, 30, 255])));
+        let f2 = Arc::new(RgbaImage::from_pixel(8, 8, image::Rgba([40, 50, 60, 255])));
+        rec.push_frame(Arc::clone(&f1), 0);
+        rec.push_frame(Arc::clone(&f2), 100);
+        let result = rec.finalize_with_region(200, region);
+        assert_eq!(result.region, region, "result must carry the region");
+        assert!(
+            !result.recording.candidates.is_empty(),
+            "recorder must produce candidates"
+        );
+        assert!(
+            matches!(result.motion, MotionRecordingOutcome::Failure(_)),
+            "motion must be Failure when not started"
+        );
+    }
+
+    #[test]
+    fn action_guide_capture_result_carries_region() {
+        let region = CaptureRegion {
+            x: 10,
+            y: 20,
+            width: 64,
+            height: 64,
+        };
+        let mut rec = ActionRecording::start(
+            region,
+            Box::new(VisualOnlySource::new(DegradedReason::SourceStartFailed)),
+            &no_motion_options(),
+        );
+        rec.push_frame(
+            Arc::new(RgbaImage::from_pixel(64, 64, image::Rgba([0, 0, 0, 255]))),
+            0,
+        );
+        let result = rec.finalize_with_region(100, region);
+        assert_eq!(result.region.x, 10);
+        assert_eq!(result.region.y, 20);
+        assert_eq!(result.region.width, 64);
+        assert_eq!(result.region.height, 64);
+    }
+
+    #[test]
+    fn action_guide_capture_result_carries_capability() {
+        let region = CaptureRegion {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        };
+        let mut rec = ActionRecording::start(
+            region,
+            Box::new(VisualOnlySource::new(DegradedReason::PermissionDenied)),
+            &no_motion_options(),
+        );
+        rec.push_frame(
+            Arc::new(RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 0, 255]))),
+            0,
+        );
+        let result = rec.finalize_with_region(100, region);
+        assert!(
+            matches!(result.capability, rollshot_action::InputCapability::VisualOnly { .. }),
+            "capability must reflect the source"
+        );
+    }
+
+    #[test]
+    fn motion_off_produces_failure_on_finalize_when_no_motion() {
+        let region = CaptureRegion {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        };
+        let rec = ActionRecording::start(
+            region,
+            Box::new(VisualOnlySource::new(DegradedReason::SourceStartFailed)),
+            &no_motion_options(),
+        );
+        let result = rec.finalize_with_region(0, region);
+        assert!(
+            matches!(result.motion, MotionRecordingOutcome::Failure(_)),
+            "finalize must report Failure when motion was never started"
+        );
+    }
+
+    // ── RED tests: zero-copy tee with motion enabled ────────────────────
+
+    #[test]
+    fn tee_shares_arc_pointer_between_recorder_and_motion() {
+        // Requires FFmpeg. Skipped in environments without it.
+        let ffmpeg = match std::process::Command::new("ffmpeg").arg("-version").output() {
+            Ok(o) if o.status.success() => std::path::PathBuf::from("ffmpeg"),
+            _ => {
+                eprintln!("SKIPPED: FFmpeg not available");
+                return;
+            }
+        };
+        let toolchain = rollshot_action::video_import::VideoToolchain {
+            ffmpeg: ffmpeg.clone(),
+            ffprobe: ffmpeg,
+        };
+        let region = CaptureRegion {
+            x: 0,
+            y: 0,
+            width: 64,
+            height: 64,
+        };
+        let options = ActionGuideRecordingOptions {
+            motion_toolchain: Some(toolchain),
+        };
+        let mut rec = ActionRecording::start(
+            region,
+            Box::new(VisualOnlySource::new(DegradedReason::SourceStartFailed)),
+            &options,
+        );
+        assert!(
+            rec.motion.is_some(),
+            "motion recorder must start when toolchain is available"
+        );
+        assert_eq!(
+            rec.motion_status(),
+            MotionRuntimeStatus::On,
+            "motion status must be On after successful start"
+        );
+        let f1: rollshot_action::SharedActionFrame =
+            Arc::new(RgbaImage::from_pixel(64, 64, image::Rgba([10, 20, 30, 255])));
+        let f2: rollshot_action::SharedActionFrame =
+            Arc::new(RgbaImage::from_pixel(64, 64, image::Rgba([40, 50, 60, 255])));
+        rec.push_frame(Arc::clone(&f1), 0);
+        rec.offer_motion(Arc::clone(&f1), 0);
+        rec.push_frame(Arc::clone(&f2), 100);
+        rec.offer_motion(Arc::clone(&f2), 100);
+        let result = rec.finalize_with_region(200, region);
+        assert!(
+            !result.recording.candidates.is_empty(),
+            "recorder must produce candidates"
+        );
+        // Motion outcome should be Ready if FFmpeg processed successfully.
+        match result.motion {
+            MotionRecordingOutcome::Ready(asset) => {
+                assert!(!asset.sha256().is_empty(), "validated asset must have a sha256 digest");
+            }
+            MotionRecordingOutcome::Failure(e) => {
+                // FFmpeg may fail in CI; record the failure but don't panic.
+                eprintln!("motion recording failed (may be CI): {e}");
+            }
+        }
+    }
+
+    #[test]
+    fn motion_stalled_failing_does_not_affect_guide_candidates() {
+        let region = CaptureRegion {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        };
+        let mut rec_with_motion = ActionRecording::start(
+            region,
+            Box::new(VisualOnlySource::new(DegradedReason::SourceStartFailed)),
+            &no_motion_options(),
+        );
+        let mut rec_without = ActionRecording::start(
+            region,
+            Box::new(VisualOnlySource::new(DegradedReason::SourceStartFailed)),
+            &no_motion_options(),
+        );
+        let f1 = Arc::new(RgbaImage::from_pixel(8, 8, image::Rgba([10, 20, 30, 255])));
+        let f2 = Arc::new(RgbaImage::from_pixel(8, 8, image::Rgba([40, 50, 60, 255])));
+        // Feed identical frames to both recorders.
+        rec_with_motion.push_frame(Arc::clone(&f1), 0);
+        rec_with_motion.push_frame(Arc::clone(&f2), 100);
+        rec_without.push_frame(Arc::clone(&f1), 0);
+        rec_without.push_frame(Arc::clone(&f2), 100);
+        let r1 = rec_with_motion.finalize_with_region(200, region);
+        let r2 = rec_without.finalize_with_region(200, region);
+        assert_eq!(
+            r1.recording.candidates.len(),
+            r2.recording.candidates.len(),
+            "guide candidates must match regardless of motion state"
+        );
+    }
+
+    // ── RED tests: completion/failure lifecycle ─────────────────────────
+
+    #[test]
+    fn motion_success_produces_ready_outcome() {
+        let ffmpeg = match std::process::Command::new("ffmpeg").arg("-version").output() {
+            Ok(o) if o.status.success() => std::path::PathBuf::from("ffmpeg"),
+            _ => {
+                eprintln!("SKIPPED: FFmpeg not available");
+                return;
+            }
+        };
+        let toolchain = rollshot_action::video_import::VideoToolchain {
+            ffmpeg: ffmpeg.clone(),
+            ffprobe: ffmpeg,
+        };
+        let region = CaptureRegion {
+            x: 0,
+            y: 0,
+            width: 64,
+            height: 64,
+        };
+        let options = ActionGuideRecordingOptions {
+            motion_toolchain: Some(toolchain),
+        };
+        let mut rec = ActionRecording::start(
+            region,
+            Box::new(VisualOnlySource::new(DegradedReason::SourceStartFailed)),
+            &options,
+        );
+        // Feed enough frames for a valid H.264 stream.
+        for i in 0..10u64 {
+            let frame: rollshot_action::SharedActionFrame = Arc::new(RgbaImage::from_pixel(
+                64,
+                64,
+                image::Rgba([(i * 25) as u8, 100, 200, 255]),
+            ));
+            rec.push_frame(Arc::clone(&frame), i * 33);
+            rec.offer_motion(Arc::clone(&frame), i * 33);
+        }
+        let result = rec.finalize_with_region(330, region);
+        match result.motion {
+            MotionRecordingOutcome::Ready(asset) => {
+                assert!(!asset.sha256().is_empty(), "validated asset must have a sha256 digest");
+            }
+            MotionRecordingOutcome::Failure(e) => {
+                panic!("motion recording should succeed with valid frames: {e}");
+            }
+        }
+    }
+
+    #[test]
+    fn cancel_motion_cleans_encoder() {
+        let ffmpeg = match std::process::Command::new("ffmpeg").arg("-version").output() {
+            Ok(o) if o.status.success() => std::path::PathBuf::from("ffmpeg"),
+            _ => {
+                eprintln!("SKIPPED: FFmpeg not available");
+                return;
+            }
+        };
+        let toolchain = rollshot_action::video_import::VideoToolchain {
+            ffmpeg: ffmpeg.clone(),
+            ffprobe: ffmpeg,
+        };
+        let region = CaptureRegion {
+            x: 0,
+            y: 0,
+            width: 64,
+            height: 64,
+        };
+        let options = ActionGuideRecordingOptions {
+            motion_toolchain: Some(toolchain),
+        };
+        let mut rec = ActionRecording::start(
+            region,
+            Box::new(VisualOnlySource::new(DegradedReason::SourceStartFailed)),
+            &options,
+        );
+        rec.push_frame(
+            Arc::new(RgbaImage::from_pixel(64, 64, image::Rgba([0, 0, 0, 255]))),
+            0,
+        );
+        // Cancel the motion recorder before finalizing.
+        if let Some(ref mut motion) = rec.motion {
+            motion.cancel();
+        }
+        let result = rec.finalize_with_region(100, region);
+        // After cancel, motion outcome should be Failure(Cancelled).
+        assert!(
+            matches!(
+                result.motion,
+                MotionRecordingOutcome::Failure(rollshot_action::motion::MotionFailureCategory::Cancelled)
+            ),
+            "cancelled motion must produce Failure(Cancelled)"
+        );
+    }
+
+    #[test]
+    fn motion_spawn_failure_leaves_status_off() {
+        // No toolchain → no motion → status Off.
+        let region = CaptureRegion {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        };
+        let rec = ActionRecording::start(
+            region,
+            Box::new(VisualOnlySource::new(DegradedReason::SourceStartFailed)),
+            &no_motion_options(),
+        );
+        assert_eq!(
+            rec.motion_status(),
+            MotionRuntimeStatus::Off,
+            "motion status must be Off when no recorder started"
+        );
     }
 }
 

@@ -203,7 +203,7 @@ static RESULT_SLOT: Mutex<Option<Result<Option<CaptureResult>, String>>> = Mutex
 #[cfg(feature = "action-guide")]
 #[allow(clippy::type_complexity)]
 static ACTION_RESULT_SLOT: Mutex<
-    Option<Result<Option<(rollshot_action::Recording, rollshot_action::InputCapability)>, String>>,
+    Option<Result<Option<crate::driver::ActionGuideCaptureResult>, String>>,
 > = Mutex::new(None);
 #[cfg(feature = "action-guide")]
 static ACTION_REGION_SLOT: Mutex<Option<rollshot_action::CaptureRegion>> = Mutex::new(None);
@@ -541,7 +541,11 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                                     rollshot_action::DegradedReason::SourceStartFailed,
                                 ))
                             });
-                        capability = Some(driver.begin_action_recording(action_region, source));
+                        let options = crate::driver::ActionGuideRecordingOptions {
+                            motion_toolchain: None,
+                        };
+                        let start = driver.begin_action_recording(action_region, source, options);
+                        capability = Some(start.capability);
                     }
                     state.recording_started = Some(std::time::Instant::now());
                     state.recording_capability = capability.map(crate::app::capability_label);
@@ -720,14 +724,7 @@ fn orchestrate_fullscreen<R>(
 pub fn run_action_guide_fullscreen(
     config: OverlayConfig,
     input_source: Box<dyn rollshot_action::SemanticInputSource>,
-) -> Result<
-    Option<(
-        rollshot_action::Recording,
-        rollshot_action::InputCapability,
-        rollshot_action::CaptureRegion,
-    )>,
-    OverlayError,
-> {
+) -> Result<Option<crate::driver::ActionGuideCaptureResult>, OverlayError> {
     if !config.request.is_supported() {
         return Err(OverlayError::Capture(
             "unsupported capture request".to_string(),
@@ -781,14 +778,20 @@ pub fn run_action_guide_fullscreen(
                 "recording full display"
             );
 
-            let _capability = driver.begin_action_recording(region, input_source);
+            let _capability = driver.begin_action_recording(
+                region,
+                input_source,
+                crate::driver::ActionGuideRecordingOptions {
+                    motion_toolchain: None,
+                },
+            );
 
             // Block until the user clicks the tray icon.
             _tray.wait_for_finish();
 
-            let (recording, capability) =
+            let result =
                 driver.finalize_action().map_err(OverlayError::Capture)?;
-            Ok(Some((recording, capability, region)))
+            Ok(Some(result))
         },
     )
 }
@@ -797,14 +800,7 @@ pub fn run_action_guide_fullscreen(
 pub fn run_action_guide(
     config: OverlayConfig,
     input_source: Box<dyn rollshot_action::SemanticInputSource>,
-) -> Result<
-    Option<(
-        rollshot_action::Recording,
-        rollshot_action::InputCapability,
-        rollshot_action::CaptureRegion,
-    )>,
-    OverlayError,
-> {
+) -> Result<Option<crate::driver::ActionGuideCaptureResult>, OverlayError> {
     *ACTION_INPUT_SLOT.lock().unwrap() = Some(input_source);
     *ACTION_REGION_SLOT.lock().unwrap() = None;
     *ACTION_RESULT_SLOT.lock().unwrap() = None;
@@ -815,18 +811,7 @@ pub fn run_action_guide(
         .take()
         .unwrap_or(Ok(None))
         .map_err(OverlayError::Capture)?;
-    let region =
-        ACTION_REGION_SLOT
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap_or(rollshot_action::CaptureRegion {
-                x: 0,
-                y: 0,
-                width: 1920,
-                height: 1080,
-            });
-    Ok(result.map(|(recording, capability)| (recording, capability, region)))
+    Ok(result)
 }
 
 fn run_overlay_session(config: OverlayConfig) -> Result<Option<CaptureResult>, OverlayError> {

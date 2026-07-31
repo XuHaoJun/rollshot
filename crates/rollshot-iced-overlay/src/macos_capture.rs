@@ -209,11 +209,7 @@ pub enum HostEffect {
     Task(iced::Task<Message>),
     Completed(CaptureResult),
     #[cfg(feature = "action-guide")]
-    ActionRecorded(
-        rollshot_action::Recording,
-        rollshot_action::InputCapability,
-        rollshot_action::CaptureRegion,
-    ),
+    ActionRecorded(crate::driver::ActionGuideCaptureResult),
     Cancelled,
     Fatal(String),
 }
@@ -891,7 +887,13 @@ impl Component {
                             rollshot_action::DegradedReason::SourceStartFailed,
                         ))
                     });
-                    capability = Some(driver.begin_action_recording(action_region, source));
+                    capability = Some(driver.begin_action_recording(
+                        action_region,
+                        source,
+                        crate::driver::ActionGuideRecordingOptions {
+                            motion_toolchain: None,
+                        },
+                    ).capability);
                 }
                 self.overlay.recording_started = Some(std::time::Instant::now());
                 self.overlay.recording_capability = capability.map(crate::app::capability_label);
@@ -902,47 +904,11 @@ impl Component {
                 tracing::info!(target: TARGET_OVERLAY, "finish recording requested");
                 match self.driver.take() {
                     Some(driver) => {
-                        // Resolve the region before `finalize_action` consumes
-                        // the driver (it owns `source_size`).
-                        let crop = self.overlay.crop.unwrap_or(iced::Rectangle {
-                            x: 0.0,
-                            y: 0.0,
-                            width: 0.0,
-                            height: 0.0,
-                        });
-                        let ws = self
-                            .overlay
-                            .window_size
-                            .unwrap_or(iced::Size::new(1920.0, 1080.0));
-                        let source_size = driver.source_size();
-                        let region = crate::coords::map_crop_to_frame(
-                            crate::coords::LogicalRect {
-                                x: crop.x,
-                                y: crop.y,
-                                width: crop.width,
-                                height: crop.height,
-                            },
-                            rollshot_capture::Size {
-                                width: ws.width as u32,
-                                height: ws.height as u32,
-                            },
-                            source_size,
-                        );
-                        let action_region = rollshot_action::CaptureRegion {
-                            x: region.x,
-                            y: region.y,
-                            width: region.width,
-                            height: region.height,
-                        };
                         match driver.finalize_action() {
-                            Ok((recording, capability)) => {
+                            Ok(result) => {
                                 self.overlay.recording_started = None;
                                 self.overlay.recording_capability = None;
-                                EffectOutcome::Terminal(HostEffect::ActionRecorded(
-                                    recording,
-                                    capability,
-                                    action_region,
-                                ))
+                                EffectOutcome::Terminal(HostEffect::ActionRecorded(result))
                             }
                             Err(e) => {
                                 self.overlay.transient_error = Some(e);

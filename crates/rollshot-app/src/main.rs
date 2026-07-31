@@ -188,12 +188,12 @@ fn run_action_guide_record(fullscreen: bool) -> Result<(), String> {
     }
     .map_err(|e| e.to_string())?;
     match outcome {
-        Some((recording, capability, region)) => {
+        Some(result) => {
             let source_kind = crate::timeline_workspace::source_kind_for(
-                capability,
+                result.capability,
                 crate::storage::Platform::Linux,
             );
-            crate::timeline_workspace::run(recording, region, capability, source_kind)
+            crate::timeline_workspace::run(result.recording, result.region, result.capability, source_kind)
         }
         None => Ok(()),
     }

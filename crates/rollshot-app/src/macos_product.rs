@@ -844,8 +844,8 @@ fn apply_capture_host_effect(product: &mut MacosProduct, effect: HostEffect) -> 
         HostEffect::Task(task) => task.map(Message::Capture),
         HostEffect::Completed(result) => complete_capture(product, result),
         #[cfg(feature = "action-guide")]
-        HostEffect::ActionRecorded(recording, capability, region) => {
-            complete_action_recording(product, recording, capability, region)
+        HostEffect::ActionRecorded(result) => {
+            complete_action_recording(product, result.recording, result.capability, result.region)
         }
         HostEffect::Cancelled => {
             #[cfg(feature = "action-guide")]
