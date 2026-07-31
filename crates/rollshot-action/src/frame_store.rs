@@ -9,6 +9,10 @@ use std::sync::Arc;
 
 use image::RgbaImage;
 
+/// A reference-counted full-resolution frame shared between the ring buffer
+/// and retained candidate windows, avoiding redundant pixel copies.
+pub type SharedActionFrame = Arc<RgbaImage>;
+
 use crate::metrics::{downsample_luma, LumaPlane};
 use crate::models::{FrameId, Millis};
 
@@ -97,11 +101,10 @@ impl FrameStore {
     /// Push a cropped full-res frame. Stores it in the ring and enqueues a
     /// downsampled analysis frame. Never blocks: if the analysis queue is full,
     /// the oldest queued frame is dropped (latest-useful). Returns the frame id.
-    pub fn ingest(&mut self, image: RgbaImage, at_ms: Millis) -> FrameId {
+    pub fn ingest(&mut self, image: SharedActionFrame, at_ms: Millis) -> FrameId {
         let id = self.next_id;
         self.next_id += 1;
-        let luma = downsample_luma(&image, self.config.analysis_width);
-        let image = Arc::new(image);
+        let luma = downsample_luma(image.as_ref(), self.config.analysis_width);
 
         self.ring.push_back(RingFrame { id, at_ms, image });
         if self.ring.len() > self.config.ring_capacity {
@@ -191,10 +194,11 @@ impl FrameStore {
 mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
+    use std::sync::Weak;
     use std::sync::Arc;
 
-    fn frame(v: u8) -> RgbaImage {
-        RgbaImage::from_pixel(8, 8, Rgba([v, v, v, 255]))
+    fn frame(v: u8) -> SharedActionFrame {
+        Arc::new(RgbaImage::from_pixel(8, 8, Rgba([v, v, v, 255])))
     }
 
     fn small_store() -> FrameStore {
@@ -206,6 +210,17 @@ mod tests {
             window_after: 3,
             nearby_max: 3,
         })
+    }
+
+    #[test]
+    fn ingest_preserves_shared_frame_allocation() {
+        let mut store = small_store();
+        let frame = Arc::new(RgbaImage::from_pixel(8, 8, Rgba([1, 2, 3, 255])));
+        let weak = Arc::downgrade(&frame);
+        store.ingest(Arc::clone(&frame), 0);
+        drop(frame);
+        let kept = weak.upgrade().expect("ring must keep the Arc alive");
+        assert!(Arc::ptr_eq(&kept, &store.ring.back().unwrap().image));
     }
 
     #[test]
@@ -298,7 +313,7 @@ mod tests {
     #[test]
     fn retained_window_shares_ring_pixels() {
         let mut store = small_store();
-        let id = store.ingest(RgbaImage::new(4, 4), 0);
+        let id = store.ingest(Arc::new(RgbaImage::new(4, 4)), 0);
         store.retain_window(id);
 
         let ring = &store.ring.back().unwrap().image;

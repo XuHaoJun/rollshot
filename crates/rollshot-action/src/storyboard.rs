@@ -596,7 +596,9 @@ mod tests {
     use crate::models::{CandidateKind, CandidateStep, CaptureRegion, DetectReason};
     use crate::recorder::{ActionRecorder, Recording};
     use image::{ImageReader, Rgba, RgbaImage};
+    use crate::frame_store::SharedActionFrame;
     use rollshot_image_document::measure_block;
+    use std::sync::Arc;
 
     fn region() -> CaptureRegion {
         CaptureRegion {
@@ -607,18 +609,18 @@ mod tests {
         }
     }
 
-    fn black() -> RgbaImage {
-        RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255]))
+    fn black() -> SharedActionFrame {
+        Arc::new(RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255])))
     }
 
-    fn quadrant() -> RgbaImage {
-        let mut img = black();
+    fn quadrant() -> SharedActionFrame {
+        let mut img = RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255]));
         for y in 0..4 {
             for x in 0..4 {
                 img.put_pixel(x, y, Rgba([255, 255, 255, 255]));
             }
         }
-        img
+        Arc::new(img)
     }
 
     fn recording() -> Recording {

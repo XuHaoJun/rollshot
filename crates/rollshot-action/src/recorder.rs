@@ -8,7 +8,7 @@ use image::RgbaImage;
 
 use crate::detector::{CandidateMarker, Detector, DetectorConfig};
 use crate::diagnostics::TARGET_ACTION;
-use crate::frame_store::{FrameStore, StoreConfig};
+use crate::frame_store::{FrameStore, SharedActionFrame, StoreConfig};
 use crate::models::{
     CandidateId, CandidateStep, CaptureRegion, FrameId, Millis, TimedSemanticAction,
 };
@@ -65,7 +65,7 @@ impl ActionRecorder {
     }
 
     /// Push one cropped full-resolution frame. Always returns immediately.
-    pub fn ingest_frame(&mut self, image: RgbaImage, at_ms: Millis) {
+    pub fn ingest_frame(&mut self, image: SharedActionFrame, at_ms: Millis) {
         self.store.ingest(image, at_ms);
         self.frame_count += 1;
         while let Some(frame) = self.store.take_analysis() {
@@ -177,10 +177,12 @@ mod tests {
     use super::*;
     use crate::detector::DetectorConfig;
     use crate::frame_store::StoreConfig;
+    use crate::frame_store::SharedActionFrame;
     use crate::models::{
         CandidateKind, CaptureRegion, MouseButton, SemanticAction, TimedSemanticAction,
     };
     use image::{Rgba, RgbaImage};
+    use std::sync::Arc;
 
     fn region() -> CaptureRegion {
         CaptureRegion {
@@ -190,17 +192,17 @@ mod tests {
             height: 8,
         }
     }
-    fn black() -> RgbaImage {
-        RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255]))
+    fn black() -> SharedActionFrame {
+        Arc::new(RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255])))
     }
-    fn quadrant() -> RgbaImage {
-        let mut img = black();
+    fn quadrant() -> SharedActionFrame {
+        let mut img = RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255]));
         for y in 0..4 {
             for x in 0..4 {
                 img.put_pixel(x, y, Rgba([255, 255, 255, 255]));
             }
         }
-        img
+        Arc::new(img)
     }
     fn cfg() -> DetectorConfig {
         DetectorConfig {
@@ -228,7 +230,7 @@ mod tests {
     #[test]
     fn visual_only_recording_produces_one_deterministic_step_with_retained_keyframe() {
         let mut rec = ActionRecorder::new(region(), store_cfg(), cfg());
-        let frames = [
+        let frames: Vec<SharedActionFrame> = [
             black(),
             quadrant(),
             quadrant(),
@@ -236,7 +238,8 @@ mod tests {
             quadrant(),
             quadrant(),
             quadrant(),
-        ];
+        ]
+        .to_vec();
         for (i, f) in frames.into_iter().enumerate() {
             rec.ingest_frame(f, i as u64 * 100);
         }
@@ -280,14 +283,14 @@ mod tests {
         }
     }
 
-    fn localized_image() -> RgbaImage {
-        let mut image = black();
+    fn localized_image() -> SharedActionFrame {
+        let mut image = RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255]));
         for y in 0..2 {
             for x in 0..2 {
                 image.put_pixel(x, y, Rgba([255, 255, 255, 255]));
             }
         }
-        image
+        Arc::new(image)
     }
 
     #[test]

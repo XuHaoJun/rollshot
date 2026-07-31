@@ -524,7 +524,7 @@ mod tests {
     #[test]
     fn frame_store_retained_shared_returns_timestamp_and_arc() {
         let mut store = FrameStore::new(Default::default());
-        let image = RgbaImage::new(4, 4);
+        let image = Arc::new(RgbaImage::new(4, 4));
         let id = store.ingest(image, 42);
         store.retain_window(id);
 
