@@ -52,11 +52,14 @@ impl CfrScheduler {
 
         match self.last_written_tick {
             None => {
-                // First frame ever. Write it at the arrival tick.
+                // First frame ever. If it arrives at a nonzero tick, emit
+                // hold-frames to fill the gap from tick 0 so the output
+                // duration is not shortened by late first frames.
+                let holds = arrival_tick;
                 self.last_written_tick = Some(arrival_tick);
                 self.written_count += 1;
                 CfrEmission {
-                    repeat_previous: 0,
+                    repeat_previous: holds,
                     write_new: true,
                 }
             }
@@ -161,10 +164,11 @@ mod tests {
     #[test]
     fn duplicate_timestamp_returns_false() {
         let mut scheduler = CfrScheduler::new(1000);
+        // First frame at 100ms → tick 3, fills leading ticks 0-2
         assert_eq!(
             scheduler.push(100),
             CfrEmission {
-                repeat_previous: 0,
+                repeat_previous: 3,
                 write_new: true,
             }
         );
@@ -181,10 +185,11 @@ mod tests {
     #[test]
     fn late_timestamp_behind_cursor_returns_false() {
         let mut scheduler = CfrScheduler::new(1000);
+        // First frame at 200ms → tick 6, fills leading ticks 0-5
         assert_eq!(
             scheduler.push(200),
             CfrEmission {
-                repeat_previous: 0,
+                repeat_previous: 6,
                 write_new: true,
             }
         );
