@@ -1313,7 +1313,7 @@ pub fn run_action_guide(initial: ActionGuideIntent) -> Result<(), String> {
                 fullscreen,
                 keep_motion: _,
             } => {
-                tasks.push(start_action_guide_recording(&mut product, fullscreen));
+                tasks.push(start_action_guide_recording(&mut product, fullscreen, None));
             }
             ActionGuideIntent::Open { path: Some(path) } => {
                 let Phase::Home(home) = std::mem::replace(
