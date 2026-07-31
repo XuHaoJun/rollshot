@@ -88,6 +88,11 @@ impl MotionFrameReceiver {
     pub fn recv(&self) -> Option<MotionFrame> {
         self.rx.recv().ok()
     }
+
+    /// Non-blocking receive. Returns None if the mailbox is empty or disconnected.
+    pub fn try_recv(&self) -> Option<MotionFrame> {
+        self.rx.try_recv().ok()
+    }
 }
 
 impl Drop for MotionFrameReceiver {

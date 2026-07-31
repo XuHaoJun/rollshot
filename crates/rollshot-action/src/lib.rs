@@ -66,6 +66,12 @@ pub use storyboard::{
     StoryboardExportResult, StoryboardOptions, StoryboardRenderResult, StoryboardStep,
 };
 pub use video::{export_reviewed_video, export_video, VideoOptions};
+pub use motion::{
+    motion_frame_mailbox, CfrEmission, CfrScheduler, MotionAudio, MotionCodec,
+    MotionFailureCategory, MotionFrame, MotionFrameReceiver, MotionFrameSender,
+    MotionMetadata, MotionOfferResult, MotionRecorder, MotionRecordingOutcome,
+    MotionRuntimeStatus, ValidatedMotionAsset,
+};
 pub use video_import::{
     cleanup_stale_import_scratch, import_video, ImportedScratch, ImportedWorkspaceSeed,
     VideoImportCancellation, VideoImportError, VideoImportPass, VideoImportProgress,
