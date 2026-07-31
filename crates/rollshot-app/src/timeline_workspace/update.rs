@@ -3411,7 +3411,7 @@ fn handle_save_recording_requested(state: &mut TimelineWorkspace) -> Update {
     };
     Update::task(iced::Task::perform(
         pick_mp4_save_path(picker_default_dir()),
-        move |path| Message::SaveRecordingPickerChosen(path),
+        Message::SaveRecordingPickerChosen,
     ))
 }
 

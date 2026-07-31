@@ -4,6 +4,8 @@
 //! Tested on every host; the native tray construction that consumes
 //! these values lives in [`crate::macos_recording_tray`] (macOS-only).
 
+#![allow(dead_code)] // tested on every host; consumed by macOS-only tray code
+
 /// Live motion-recording status. Starts `Off`; transitions to `On` once the
 /// encoder accepts frames, or `Failed` on runtime error. `Failed` is terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

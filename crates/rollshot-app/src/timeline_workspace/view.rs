@@ -2485,7 +2485,7 @@ mod tests {
                     audio: MotionAudio::None,
                 },
                 path,
-                dir.into_path(),
+                dir.keep(),
             )
         }
 

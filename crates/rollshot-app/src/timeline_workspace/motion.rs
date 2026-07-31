@@ -188,8 +188,10 @@ pub(crate) enum SaveRecordingState {
 
 /// Outcome of the save-recording background worker.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) enum SaveRecordingOutcome {
     Success,
+    #[allow(dead_code)]
     Failed(String),
 }
 
@@ -215,7 +217,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("recording.mp4");
         std::fs::write(&path, b"fake mp4").unwrap();
-        ValidatedMotionAsset::new_for_test(dummy_metadata(), path, dir.into_path())
+        ValidatedMotionAsset::new_for_test(dummy_metadata(), path, dir.keep())
     }
 
     // ---- WorkspaceMotion construction tests ----
@@ -329,7 +331,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("recording.mp4");
         std::fs::write(&path, b"fake mp4").unwrap();
-        let asset = ValidatedMotionAsset::new_for_test(meta, path, dir.into_path());
+        let asset = ValidatedMotionAsset::new_for_test(meta, path, dir.keep());
         let line = motion_metadata_line(&asset);
         assert!(line.contains("24000/1001 fps"), "line: {line}");
     }
@@ -413,7 +415,7 @@ mod tests {
     #[test]
     fn save_failure_retains_session_asset() {
         // On failed save, the workspace motion state is untouched.
-        let mut ws = WorkspaceMotion::from_outcome(Some(
+        let ws = WorkspaceMotion::from_outcome(Some(
             rollshot_action::motion::MotionRecordingOutcome::Ready(dummy_asset()),
         ));
         // Simulate: save failed, so we do NOT call take_ready.

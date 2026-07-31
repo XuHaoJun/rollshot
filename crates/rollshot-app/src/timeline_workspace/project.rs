@@ -152,7 +152,7 @@ impl std::fmt::Debug for OpenProjectResult {
 
 #[allow(dead_code)]
 pub(crate) enum OpenProjectWorkerResult {
-    Opened(OpenProjectResult),
+    Opened(Box<OpenProjectResult>),
     WriterLocked { root: PathBuf },
 }
 
@@ -236,10 +236,12 @@ pub(crate) async fn load_project_worker(
                             );
                             ProjectWorkerError::Project(e)
                         })?;
-                    return Ok(OpenProjectWorkerResult::Opened(OpenProjectResult {
-                        loaded,
-                        access: ProjectAccess::Writable(guard),
-                    }));
+                    return Ok(OpenProjectWorkerResult::Opened(Box::new(
+                        OpenProjectResult {
+                            loaded,
+                            access: ProjectAccess::Writable(guard),
+                        },
+                    )));
                 }
             }
         }
@@ -253,10 +255,12 @@ pub(crate) async fn load_project_worker(
             );
             ProjectWorkerError::Project(e)
         })?;
-        Ok(OpenProjectWorkerResult::Opened(OpenProjectResult {
-            loaded,
-            access: ProjectAccess::ReadOnly,
-        }))
+        Ok(OpenProjectWorkerResult::Opened(Box::new(
+            OpenProjectResult {
+                loaded,
+                access: ProjectAccess::ReadOnly,
+            },
+        )))
     })
     .await
     .map_err(|_| ProjectWorkerError::Join {
