@@ -202,6 +202,7 @@ impl MotionRecorder {
 
         let worker_status = Arc::clone(&status);
         let worker_cancel = Arc::clone(&cancel_flag);
+        let ffprobe_path = toolchain.ffprobe.clone();
 
         let worker = std::thread::spawn(move || {
             let outcome = worker_loop(
@@ -214,6 +215,7 @@ impl MotionRecorder {
                 &part_path,
                 &final_path,
                 &worker_cancel,
+                &ffprobe_path,
             );
             worker_status.store(MotionRuntimeStatus::Off as u8, Ordering::Release);
             outcome
@@ -327,6 +329,7 @@ fn worker_loop(
     part_path: &Path,
     final_path: &Path,
     cancel: &AtomicBool,
+    ffprobe_path: &Path,
 ) -> MotionRecordingOutcome {
     let frame_size = (width as usize) * (height as usize) * 4;
     let mut scheduler: Option<CfrScheduler> = None;
@@ -442,8 +445,8 @@ fn worker_loop(
     let probe_result = probe::probe_motion(
         part_path,
         &VideoToolchain {
-            ffmpeg: PathBuf::new(), // not needed for probe
-            ffprobe: find_ffprobe(),
+            ffmpeg: PathBuf::new(),
+            ffprobe: ffprobe_path.to_path_buf(),
         },
         width,
         height,
@@ -501,11 +504,6 @@ fn create_scratch_dir() -> Result<PathBuf, MotionFailureCategory> {
     ));
     std::fs::create_dir_all(&dir).map_err(|_| MotionFailureCategory::Filesystem)?;
     Ok(dir)
-}
-
-fn find_ffprobe() -> PathBuf {
-    // Try common locations; the worker's actual probe uses the toolchain.
-    PathBuf::from("ffprobe")
 }
 
 fn compute_sha256(path: &Path) -> Result<String, MotionFailureCategory> {
