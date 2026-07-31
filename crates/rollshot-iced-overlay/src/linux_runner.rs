@@ -324,9 +324,7 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                         Some(rollshot_action::motion::MotionRuntimeStatus::On) => {
                             state.motion_status = app::MotionIndicatorStatus::On;
                         }
-                        Some(rollshot_action::motion::MotionRuntimeStatus::Off)
-                            if state.motion_status == app::MotionIndicatorStatus::On =>
-                        {
+                        Some(rollshot_action::motion::MotionRuntimeStatus::Failed) => {
                             state.motion_status = app::MotionIndicatorStatus::Failed(
                                 rollshot_action::motion::MotionFailureCategory::BrokenPipe,
                             );
@@ -575,10 +573,7 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                         };
                         let start = driver.begin_action_recording(action_region, source, options);
                         capability = Some(start.capability);
-                        if has_motion {
-                            *MOTION_STATUS_SLOT.lock().unwrap() =
-                                Some(rollshot_action::motion::MotionRuntimeStatus::On);
-                        }
+                        *MOTION_STATUS_SLOT.lock().unwrap() = Some(start.motion_status);
                     }
                     state.recording_started = Some(std::time::Instant::now());
                     state.recording_capability = capability.map(crate::app::capability_label);
@@ -815,18 +810,18 @@ pub fn run_action_guide_fullscreen(
                 "recording full display"
             );
 
-            let has_motion = motion_toolchain.is_some();
-            let _capability = driver.begin_action_recording(
+            let start = driver.begin_action_recording(
                 region,
                 input_source,
                 crate::driver::ActionGuideRecordingOptions { motion_toolchain },
             );
 
             // Update motion status for tray display.
-            if has_motion {
-                *MOTION_STATUS_SLOT.lock().unwrap() =
-                    Some(rollshot_action::motion::MotionRuntimeStatus::On);
-            }
+            let has_motion = matches!(
+                start.motion_status,
+                rollshot_action::motion::MotionRuntimeStatus::On
+            );
+            *MOTION_STATUS_SLOT.lock().unwrap() = Some(start.motion_status);
 
             // Update tray title if motion recording is active.
             if has_motion {

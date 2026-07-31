@@ -21,6 +21,7 @@ pub fn recording_status(
 ) -> RecordingStatus {
     match motion {
         rollshot_action::motion::MotionRuntimeStatus::On => RecordingStatus::On,
+        rollshot_action::motion::MotionRuntimeStatus::Failed => RecordingStatus::Failed,
         rollshot_action::motion::MotionRuntimeStatus::Off => {
             if current == RecordingStatus::Failed {
                 return current;
@@ -120,6 +121,14 @@ mod tests {
         // The on-transition after failure is blocked because Failed is terminal.
         assert_eq!(
             recording_status(MotionRuntimeStatus::Off, RecordingStatus::Failed),
+            RecordingStatus::Failed,
+        );
+    }
+
+    #[test]
+    fn runtime_failed_maps_to_failed() {
+        assert_eq!(
+            recording_status(MotionRuntimeStatus::Failed, RecordingStatus::On),
             RecordingStatus::Failed,
         );
     }

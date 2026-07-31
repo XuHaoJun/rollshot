@@ -26,8 +26,10 @@ use crate::video_import::VideoToolchain;
 pub enum MotionRuntimeStatus {
     /// The encoder thread is running and accepting frames.
     On = 0,
-    /// The encoder thread has stopped (finished, cancelled, or errored).
+    /// The encoder thread has stopped after a successful finish or cancel.
     Off = 1,
+    /// The encoder thread stopped due to a runtime error.
+    Failed = 2,
 }
 
 /// Outcome of a `finish()` call.
@@ -217,7 +219,11 @@ impl MotionRecorder {
                 &worker_cancel,
                 &ffprobe_path,
             );
-            worker_status.store(MotionRuntimeStatus::Off as u8, Ordering::Release);
+            let exit_status = match &outcome {
+                MotionRecordingOutcome::Ready(_) => MotionRuntimeStatus::Off,
+                MotionRecordingOutcome::Failure(_) => MotionRuntimeStatus::Failed,
+            };
+            worker_status.store(exit_status as u8, Ordering::Release);
             outcome
         });
 

@@ -608,6 +608,7 @@ impl Driver {
     pub(crate) fn motion_status(&self) -> MotionRuntimeStatus {
         match self.motion_status.load(Ordering::Acquire) {
             0 => MotionRuntimeStatus::On,
+            2 => MotionRuntimeStatus::Failed,
             _ => MotionRuntimeStatus::Off,
         }
     }
@@ -700,6 +701,9 @@ impl ActionRecording {
     }
 
     pub(crate) fn motion_status(&self) -> MotionRuntimeStatus {
+        if self.motion_failure.is_some() {
+            return MotionRuntimeStatus::Failed;
+        }
         match &self.motion {
             Some(m) => m.status(),
             None => MotionRuntimeStatus::Off,
