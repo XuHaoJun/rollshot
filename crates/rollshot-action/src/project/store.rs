@@ -210,7 +210,7 @@ fn write_manifest_atomic(root: &Path, manifest: &ProjectManifestV3) -> Result<()
     write_json_atomic(root, "project.json", manifest)
 }
 
-fn fsync_dir(path: &Path) -> Result<(), ProjectError> {
+pub(crate) fn fsync_dir(path: &Path) -> Result<(), ProjectError> {
     let file = std::fs::File::open(path).map_err(|e| ProjectError::Io {
         path: path.to_path_buf(),
         source: e,
@@ -220,6 +220,16 @@ fn fsync_dir(path: &Path) -> Result<(), ProjectError> {
         source: e,
     })?;
     Ok(())
+}
+
+/// Public alias for fsync_dir, used by the motion module.
+pub(crate) fn fsync_dir_public(path: &Path) -> Result<(), ProjectError> {
+    fsync_dir(path)
+}
+
+/// Get the next temp counter value. Used by the motion module.
+pub(crate) fn next_temp_counter() -> u64 {
+    TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 fn commit_noreplace(temp: &Path, destination: &Path) -> Result<(), ProjectError> {
@@ -301,6 +311,12 @@ fn commit_new_project(
 
     let frames = materialize_all(&temp_root, snapshot)?;
 
+    // Promote motion asset if present.
+    let motion_manifest = match &snapshot.motion {
+        Some(asset) => Some(super::motion::promote_motion_asset(asset, &temp_root)?),
+        None => None,
+    };
+
     let manifest = ProjectManifestV3 {
         schema_version: PROJECT_SCHEMA_VERSION,
         revision: 1,
@@ -312,7 +328,7 @@ fn commit_new_project(
         frames,
         steps: snapshot.steps.clone(),
         import_warnings: snapshot.import_warnings.clone(),
-        motion: None,
+        motion: motion_manifest,
     };
 
     validate_manifest_structure(&manifest)?;
@@ -331,6 +347,7 @@ fn commit_new_project(
     Ok(ProjectCommit {
         root: destination.to_path_buf(),
         manifest,
+        motion: snapshot.motion.clone(),
     })
 }
 
@@ -391,7 +408,10 @@ pub fn save_project(
         frames,
         steps: snapshot.steps.clone(),
         import_warnings: snapshot.import_warnings.clone(),
-        motion: None,
+        motion: match &snapshot.motion {
+            Some(asset) => Some(super::motion::promote_motion_asset(asset, project_root)?),
+            None => current.motion.clone(),
+        },
     };
 
     validate_manifest_structure(&manifest)?;
@@ -400,6 +420,7 @@ pub fn save_project(
     Ok(ProjectCommit {
         root: project_root.to_path_buf(),
         manifest,
+        motion: snapshot.motion.clone(),
     })
 }
 
@@ -587,6 +608,7 @@ mod tests {
                 annotations: None,
             }],
             import_warnings: Vec::new(),
+            motion: None,
         }
     }
 
@@ -989,6 +1011,7 @@ mod tests {
                 annotations: None,
             }],
             import_warnings: Vec::new(),
+            motion: None,
         };
 
         let second = create_project(&snap, &root2).unwrap();
@@ -1062,6 +1085,7 @@ mod tests {
                 annotations: None,
             }],
             import_warnings: warnings,
+            motion: None,
         }
     }
 

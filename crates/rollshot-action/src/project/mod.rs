@@ -2,6 +2,7 @@ mod assets;
 pub mod continuity;
 mod error;
 mod model;
+pub(crate) mod motion;
 pub mod publish;
 mod store;
 mod validate;
@@ -22,6 +23,7 @@ pub use publish::{
     PublishFreshness, PublishOutputKind, PublishStateLoad, PublishStateV1, PublishedOutputV1,
 };
 pub use store::{create_project, load_project, save_project, save_project_as};
+pub use motion::export_motion_asset;
 pub use validate::{validate_manifest_structure, validate_snapshot_structure};
 
 #[allow(unused_imports)]

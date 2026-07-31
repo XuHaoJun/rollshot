@@ -257,6 +257,7 @@ pub struct ProjectSnapshot {
     pub frames: Vec<SnapshotFrame>,
     pub steps: Vec<ProjectStep>,
     pub import_warnings: Vec<ImportWarning>,
+    pub motion: Option<ValidatedMotionAsset>,
 }
 
 #[derive(Debug, Clone)]
@@ -270,6 +271,7 @@ pub struct LoadedProject {
 pub struct ProjectCommit {
     pub root: std::path::PathBuf,
     pub manifest: ProjectManifestV3,
+    pub motion: Option<ValidatedMotionAsset>,
 }
 
 #[cfg(test)]

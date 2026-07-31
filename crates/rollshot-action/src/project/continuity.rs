@@ -350,6 +350,7 @@ mod tests {
             }],
             steps,
             import_warnings: Vec::new(),
+            motion: None,
         };
 
         create_project(&snapshot, &root).unwrap();
@@ -400,6 +401,7 @@ mod tests {
             }],
             steps: steps.clone(),
             import_warnings: Vec::new(),
+            motion: None,
         };
 
         create_project(&make_snapshot(None), &root).unwrap();
@@ -540,6 +542,7 @@ mod tests {
                 annotations: None,
             }],
             import_warnings: Vec::new(),
+            motion: None,
         };
 
         create_project(&snapshot, &root).unwrap();
@@ -584,6 +587,7 @@ mod tests {
                 annotations: None,
             }],
             import_warnings: Vec::new(),
+            motion: None,
         };
 
         create_project(&snapshot, &root).unwrap();
@@ -628,6 +632,7 @@ mod tests {
                 annotations: None,
             }],
             import_warnings: Vec::new(),
+            motion: None,
         };
 
         create_project(&snapshot, &root).unwrap();
@@ -688,6 +693,7 @@ mod tests {
                 },
             ],
             import_warnings: Vec::new(),
+            motion: None,
         };
 
         create_project(&snapshot, &root).unwrap();
@@ -760,6 +766,7 @@ mod tests {
                 annotations: None,
             }],
             import_warnings: Vec::new(),
+            motion: None,
         };
 
         create_project(&snapshot, &root).unwrap();
@@ -807,6 +814,7 @@ mod tests {
                 annotations: None,
             }],
             import_warnings: Vec::new(),
+            motion: None,
         };
 
         create_project(&snapshot, &root).unwrap();
@@ -857,6 +865,7 @@ mod tests {
                 annotations: None,
             }],
             import_warnings: Vec::new(),
+            motion: None,
         };
 
         create_project(&snapshot, &root).unwrap();
