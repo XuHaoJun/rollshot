@@ -209,11 +209,7 @@ pub enum HostEffect {
     Task(iced::Task<Message>),
     Completed(CaptureResult),
     #[cfg(feature = "action-guide")]
-    ActionRecorded(
-        rollshot_action::Recording,
-        rollshot_action::InputCapability,
-        rollshot_action::CaptureRegion,
-    ),
+    ActionRecorded(crate::driver::ActionGuideCaptureResult),
     Cancelled,
     Fatal(String),
 }
@@ -241,6 +237,10 @@ pub struct Component {
     fullscreen_action_guide: bool,
     #[cfg(feature = "action-guide")]
     fullscreen_action_guide_started: bool,
+    #[cfg(feature = "action-guide")]
+    motion_toolchain: Option<rollshot_action::video_import::VideoToolchain>,
+    #[cfg(feature = "action-guide")]
+    last_motion_status: rollshot_action::motion::MotionRuntimeStatus,
 }
 
 /// Terminal outcome staged behind a passthrough-disable handshake. Mutually
@@ -259,6 +259,9 @@ impl Component {
         config: &OverlayConfig,
         #[cfg(feature = "action-guide")] action_input_source: Option<
             Box<dyn rollshot_action::SemanticInputSource>,
+        >,
+        #[cfg(feature = "action-guide")] motion_toolchain: Option<
+            rollshot_action::video_import::VideoToolchain,
         >,
     ) -> Result<Option<Self>, OverlayError> {
         let fullscreen_action_guide = config.request.scope == CaptureScope::Fullscreen
@@ -320,6 +323,10 @@ impl Component {
             fullscreen_action_guide,
             #[cfg(feature = "action-guide")]
             fullscreen_action_guide_started: false,
+            #[cfg(feature = "action-guide")]
+            motion_toolchain,
+            #[cfg(feature = "action-guide")]
+            last_motion_status: rollshot_action::motion::MotionRuntimeStatus::Off,
         }))
     }
 
@@ -472,6 +479,30 @@ impl Component {
     fn clear_preview_channel(&mut self) {
         self.preview_rx = None;
         *PREVIEW_RX.lock().unwrap() = None;
+    }
+
+    /// Current motion encoder runtime status, if a driver is active.
+    #[cfg(feature = "action-guide")]
+    pub fn motion_status(&self) -> rollshot_action::motion::MotionRuntimeStatus {
+        self.driver
+            .as_ref()
+            .map(|d| d.motion_status())
+            .unwrap_or(rollshot_action::motion::MotionRuntimeStatus::Off)
+    }
+
+    /// Return the motion status if it changed since the last call, updating
+    /// the cached value. Used by the host to project live status to the tray.
+    #[cfg(feature = "action-guide")]
+    pub fn take_motion_status_change(
+        &mut self,
+    ) -> Option<rollshot_action::motion::MotionRuntimeStatus> {
+        let current = self.motion_status();
+        if current != self.last_motion_status {
+            self.last_motion_status = current;
+            Some(current)
+        } else {
+            None
+        }
     }
 
     /// Tear down any live capture resources so the stream + reader thread don't
@@ -891,7 +922,17 @@ impl Component {
                             rollshot_action::DegradedReason::SourceStartFailed,
                         ))
                     });
-                    capability = Some(driver.begin_action_recording(action_region, source));
+                    capability = Some(
+                        driver
+                            .begin_action_recording(
+                                action_region,
+                                source,
+                                crate::driver::ActionGuideRecordingOptions {
+                                    motion_toolchain: self.motion_toolchain.clone(),
+                                },
+                            )
+                            .capability,
+                    );
                 }
                 self.overlay.recording_started = Some(std::time::Instant::now());
                 self.overlay.recording_capability = capability.map(crate::app::capability_label);
@@ -901,55 +942,17 @@ impl Component {
             OverlayEffect::FinishRecording => {
                 tracing::info!(target: TARGET_OVERLAY, "finish recording requested");
                 match self.driver.take() {
-                    Some(driver) => {
-                        // Resolve the region before `finalize_action` consumes
-                        // the driver (it owns `source_size`).
-                        let crop = self.overlay.crop.unwrap_or(iced::Rectangle {
-                            x: 0.0,
-                            y: 0.0,
-                            width: 0.0,
-                            height: 0.0,
-                        });
-                        let ws = self
-                            .overlay
-                            .window_size
-                            .unwrap_or(iced::Size::new(1920.0, 1080.0));
-                        let source_size = driver.source_size();
-                        let region = crate::coords::map_crop_to_frame(
-                            crate::coords::LogicalRect {
-                                x: crop.x,
-                                y: crop.y,
-                                width: crop.width,
-                                height: crop.height,
-                            },
-                            rollshot_capture::Size {
-                                width: ws.width as u32,
-                                height: ws.height as u32,
-                            },
-                            source_size,
-                        );
-                        let action_region = rollshot_action::CaptureRegion {
-                            x: region.x,
-                            y: region.y,
-                            width: region.width,
-                            height: region.height,
-                        };
-                        match driver.finalize_action() {
-                            Ok((recording, capability)) => {
-                                self.overlay.recording_started = None;
-                                self.overlay.recording_capability = None;
-                                EffectOutcome::Terminal(HostEffect::ActionRecorded(
-                                    recording,
-                                    capability,
-                                    action_region,
-                                ))
-                            }
-                            Err(e) => {
-                                self.overlay.transient_error = Some(e);
-                                EffectOutcome::Task(Task::none())
-                            }
+                    Some(driver) => match driver.finalize_action() {
+                        Ok(result) => {
+                            self.overlay.recording_started = None;
+                            self.overlay.recording_capability = None;
+                            EffectOutcome::Terminal(HostEffect::ActionRecorded(result))
                         }
-                    }
+                        Err(e) => {
+                            self.overlay.transient_error = Some(e);
+                            EffectOutcome::Task(Task::none())
+                        }
+                    },
                     None => EffectOutcome::Terminal(HostEffect::Cancelled),
                 }
             }
@@ -1298,6 +1301,10 @@ mod tests {
             fullscreen_action_guide: false,
             #[cfg(feature = "action-guide")]
             fullscreen_action_guide_started: false,
+            #[cfg(feature = "action-guide")]
+            motion_toolchain: None,
+            #[cfg(feature = "action-guide")]
+            last_motion_status: rollshot_action::motion::MotionRuntimeStatus::Off,
         }
     }
 
@@ -1579,6 +1586,8 @@ mod tests {
             &config,
             #[cfg(feature = "action-guide")]
             None,
+            #[cfg(feature = "action-guide")]
+            None,
         );
         assert!(result.is_err(), "fullscreen scope must be rejected");
         let err = match result {
@@ -1601,7 +1610,13 @@ mod tests {
             request: rollshot_capture::CaptureRequest::action_guide_fullscreen(),
             target_output_name: None,
         };
-        let err = match Component::new(&config, None) {
+        let err = match Component::new(
+            &config,
+            #[cfg(feature = "action-guide")]
+            None,
+            #[cfg(feature = "action-guide")]
+            None,
+        ) {
             Err(err) => err.to_string(),
             Ok(_) => panic!("test factory must reject streaming acquisition"),
         };

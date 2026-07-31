@@ -152,7 +152,7 @@ impl std::fmt::Debug for OpenProjectResult {
 
 #[allow(dead_code)]
 pub(crate) enum OpenProjectWorkerResult {
-    Opened(OpenProjectResult),
+    Opened(Box<OpenProjectResult>),
     WriterLocked { root: PathBuf },
 }
 
@@ -226,8 +226,8 @@ pub(crate) async fn load_project_worker(
                     return Ok(OpenProjectWorkerResult::WriterLocked { root: request.root });
                 }
                 ProjectLockResult::Acquired(guard) => {
-                    let loaded =
-                        rollshot_action::project::load_project(&request.root).map_err(|e| {
+                    let loaded = rollshot_action::project::load_project(&request.root, None)
+                        .map_err(|e| {
                             tracing::event!(
                                 target: "rollshot::project",
                                 tracing::Level::ERROR,
@@ -236,15 +236,17 @@ pub(crate) async fn load_project_worker(
                             );
                             ProjectWorkerError::Project(e)
                         })?;
-                    return Ok(OpenProjectWorkerResult::Opened(OpenProjectResult {
-                        loaded,
-                        access: ProjectAccess::Writable(guard),
-                    }));
+                    return Ok(OpenProjectWorkerResult::Opened(Box::new(
+                        OpenProjectResult {
+                            loaded,
+                            access: ProjectAccess::Writable(guard),
+                        },
+                    )));
                 }
             }
         }
 
-        let loaded = rollshot_action::project::load_project(&request.root).map_err(|e| {
+        let loaded = rollshot_action::project::load_project(&request.root, None).map_err(|e| {
             tracing::event!(
                 target: "rollshot::project",
                 tracing::Level::ERROR,
@@ -253,10 +255,12 @@ pub(crate) async fn load_project_worker(
             );
             ProjectWorkerError::Project(e)
         })?;
-        Ok(OpenProjectWorkerResult::Opened(OpenProjectResult {
-            loaded,
-            access: ProjectAccess::ReadOnly,
-        }))
+        Ok(OpenProjectWorkerResult::Opened(Box::new(
+            OpenProjectResult {
+                loaded,
+                access: ProjectAccess::ReadOnly,
+            },
+        )))
     })
     .await
     .map_err(|_| ProjectWorkerError::Join {
@@ -364,6 +368,7 @@ pub(crate) fn from_loaded_project(
     }
 
     let store = rollshot_action::FrameStore::new(Default::default());
+    let ws_motion = super::motion::WorkspaceMotion::from_loaded(loaded.motion);
 
     let mut ws = TimelineWorkspace {
         guide,
@@ -422,6 +427,9 @@ pub(crate) fn from_loaded_project(
         share_operation_id: 0,
         import_warnings: manifest.import_warnings.clone(),
         imported_scratch: None,
+        motion: ws_motion,
+        save_recording_state: super::motion::SaveRecordingState::Idle,
+        next_save_recording_operation_id: 0,
     };
 
     ws.rebuild_selection_handles();
@@ -512,6 +520,7 @@ pub(crate) fn build_project_snapshot(
         import_warnings: ws.import_warnings.clone(),
         #[cfg(not(feature = "action-guide"))]
         import_warnings: Vec::new(),
+        motion: ws.motion.as_ready().cloned(),
     })
 }
 
@@ -519,14 +528,14 @@ pub(crate) fn build_project_snapshot(
 mod tests {
     use super::*;
     use rollshot_action::project::{
-        EnabledOutputs, PersistedStepAnnotations, ProjectFrame, ProjectManifestV1, ProjectStep,
+        EnabledOutputs, PersistedStepAnnotations, ProjectFrame, ProjectManifestV2, ProjectStep,
         ProjectStepId,
     };
     use rollshot_action::{
         CandidateKind, CaptureRegion, DetectReason, InputCapability, InputSourceKind,
     };
 
-    fn manifest_two_steps_with_annotations() -> ProjectManifestV1 {
+    fn manifest_two_steps_with_annotations() -> ProjectManifestV2 {
         let annotations = PersistedStepAnnotations {
             annotations: vec![rollshot_image_document::Annotation::NumberCallout {
                 id: rollshot_image_document::AnnotationId(1),
@@ -545,7 +554,7 @@ mod tests {
             },
         };
 
-        ProjectManifestV1 {
+        ProjectManifestV2 {
             schema_version: 1,
             revision: 3,
             title: "Test Guide".into(),
@@ -604,13 +613,15 @@ mod tests {
                     annotations: None,
                 },
             ],
+            import_warnings: Vec::new(),
         }
     }
 
-    fn loaded_project(manifest: ProjectManifestV1) -> LoadedProject {
+    fn loaded_project(manifest: ProjectManifestV2) -> LoadedProject {
         LoadedProject {
             root: std::path::PathBuf::from("/tmp/test-project"),
             manifest: manifest.into(),
+            motion: rollshot_action::project::MotionAssetLoad::None,
         }
     }
 
@@ -1162,6 +1173,7 @@ mod tests {
                 annotations: None,
             }],
             import_warnings: Vec::new(),
+            motion: None,
         }
     }
 }

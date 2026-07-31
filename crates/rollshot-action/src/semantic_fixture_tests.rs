@@ -1,40 +1,50 @@
+use std::sync::Arc;
+
 use image::{Rgba, RgbaImage};
 
 use crate::{
     downsample_luma, ActionRecorder, AnalysisFrame, CandidateKind, CaptureRegion, Detector,
-    DetectorConfig, MouseButton, SemanticAction, StoreConfig, TimedSemanticAction,
+    DetectorConfig, MouseButton, SemanticAction, SharedActionFrame, StoreConfig,
+    TimedSemanticAction,
 };
 
 const W: u32 = 32;
 const H: u32 = 24;
 
-fn base() -> RgbaImage {
-    RgbaImage::from_pixel(W, H, Rgba([24, 24, 24, 255]))
+fn base() -> SharedActionFrame {
+    Arc::new(RgbaImage::from_pixel(W, H, Rgba([24, 24, 24, 255])))
 }
 
-fn paint_rect(mut image: RgbaImage, x: u32, y: u32, w: u32, h: u32, v: u8) -> RgbaImage {
+fn paint_rect(
+    image: SharedActionFrame,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    v: u8,
+) -> SharedActionFrame {
+    let mut image = image;
     for py in y..(y + h).min(H) {
         for px in x..(x + w).min(W) {
-            image.put_pixel(px, py, Rgba([v, v, v, 255]));
+            Arc::make_mut(&mut image).put_pixel(px, py, Rgba([v, v, v, 255]));
         }
     }
     image
 }
 
-fn checkbox_checked() -> RgbaImage {
+fn checkbox_checked() -> SharedActionFrame {
     paint_rect(base(), 2, 2, 2, 2, 240)
 }
 
-fn popover() -> RgbaImage {
+fn popover() -> SharedActionFrame {
     paint_rect(base(), 8, 5, 16, 10, 220)
 }
 
-fn typed_text() -> RgbaImage {
-    let image = paint_rect(base(), 3, 18, 6, 1, 230);
-    paint_rect(image, 10, 18, 5, 1, 230)
+fn typed_text() -> SharedActionFrame {
+    paint_rect(paint_rect(base(), 3, 18, 6, 1, 230), 10, 18, 5, 1, 230)
 }
 
-fn scrolled(offset: u32) -> RgbaImage {
+fn scrolled(offset: u32) -> SharedActionFrame {
     let mut image = base();
     for row in 0..4 {
         let y = (2 + row * 5 + offset) % H;
@@ -43,7 +53,7 @@ fn scrolled(offset: u32) -> RgbaImage {
     image
 }
 
-fn cursor_at(x: u32) -> RgbaImage {
+fn cursor_at(x: u32) -> SharedActionFrame {
     paint_rect(base(), x, 2, 1, 2, 255)
 }
 
@@ -128,8 +138,8 @@ fn fixture_animated_click_prefers_stable_final_state() {
     rec.ingest_frame(base(), 0);
     rec.ingest_event(click(100));
     rec.ingest_frame(transition, 200);
-    rec.ingest_frame(final_state.clone(), 300);
-    rec.ingest_frame(final_state.clone(), 400);
+    rec.ingest_frame(Arc::clone(&final_state), 300);
+    rec.ingest_frame(Arc::clone(&final_state), 400);
     rec.ingest_frame(final_state, 500);
     let recording = rec.finish();
 
@@ -147,17 +157,17 @@ fn fixture_scroll_settle_uses_shifted_rows() {
     let before = scrolled(0);
     let after = scrolled(2);
     let mut rec = recorder(DetectorConfig::default());
-    rec.ingest_frame(before.clone(), 0);
+    rec.ingest_frame(Arc::clone(&before), 0);
     rec.ingest_event(TimedSemanticAction {
         action: SemanticAction::ScrollActivity,
         at_ms: 100,
     });
-    rec.ingest_frame(after.clone(), 200);
+    rec.ingest_frame(Arc::clone(&after), 200);
     rec.ingest_event(TimedSemanticAction {
         action: SemanticAction::ScrollActivity,
         at_ms: 250,
     });
-    rec.ingest_frame(after.clone(), 400);
+    rec.ingest_frame(Arc::clone(&after), 400);
     rec.ingest_frame(after, 900);
     let recording = rec.finish();
 
@@ -197,8 +207,8 @@ fn fixture_stable_visual_navigation_remains_ui_changed() {
     let navigated = paint_rect(base(), 0, 0, W, H, 180);
     let mut rec = recorder(DetectorConfig::default());
     rec.ingest_frame(base(), 0);
-    rec.ingest_frame(navigated.clone(), 200);
-    rec.ingest_frame(navigated.clone(), 400);
+    rec.ingest_frame(Arc::clone(&navigated), 200);
+    rec.ingest_frame(Arc::clone(&navigated), 400);
     rec.ingest_frame(navigated, 600);
     let recording = rec.finish();
 
@@ -334,15 +344,15 @@ fn fixture_product_scale_checkbox_survives_1920_to_384_downsampling() {
         DetectorConfig::default(),
     );
 
-    rec.ingest_frame(base_img, 0);
+    rec.ingest_frame(Arc::new(base_img), 0);
     rec.ingest_event(click(100));
-    rec.ingest_frame(checkbox, 200);
+    rec.ingest_frame(Arc::new(checkbox), 200);
     rec.ingest_frame(
-        RgbaImage::from_pixel(1920, 1080, Rgba([24, 24, 24, 255])),
+        Arc::new(RgbaImage::from_pixel(1920, 1080, Rgba([24, 24, 24, 255]))),
         400,
     );
     rec.ingest_frame(
-        RgbaImage::from_pixel(1920, 1080, Rgba([24, 24, 24, 255])),
+        Arc::new(RgbaImage::from_pixel(1920, 1080, Rgba([24, 24, 24, 255]))),
         800,
     );
     let recording = rec.finish();
@@ -364,9 +374,9 @@ fn fixture_animated_click_emits_exactly_one_candidate() {
     let final_state = paint_rect(base(), 4, 4, 8, 8, 240);
     rec.ingest_frame(base(), 0);
     rec.ingest_event(click(100));
-    rec.ingest_frame(transition, 200);
-    rec.ingest_frame(final_state.clone(), 300);
-    rec.ingest_frame(final_state.clone(), 400);
+    rec.ingest_frame(Arc::clone(&transition), 200);
+    rec.ingest_frame(Arc::clone(&final_state), 300);
+    rec.ingest_frame(Arc::clone(&final_state), 400);
     rec.ingest_frame(final_state, 500);
     assert_eq!(rec.finish().candidates.len(), 1);
 }
@@ -381,7 +391,7 @@ fn fixture_click_then_typing_emits_exactly_one_candidate() {
         action: SemanticAction::TypingActivity,
         at_ms: 150,
     });
-    rec.ingest_frame(completed.clone(), 200);
+    rec.ingest_frame(Arc::clone(&completed), 200);
     rec.ingest_frame(completed, 900);
     assert_eq!(rec.finish().candidates.len(), 1);
 }

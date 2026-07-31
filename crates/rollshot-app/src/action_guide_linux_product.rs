@@ -111,8 +111,9 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
                     state.phase = Phase::Opening;
                     iced::Task::perform(inspect_and_open(path), |msg| msg)
                 }
-                action_guide_home::Effect::RecordNew => {
-                    let _ = crate::platform_actions::spawn_action_guide_record(false);
+                action_guide_home::Effect::StartRecording { motion_toolchain } => {
+                    let keep_motion = motion_toolchain.is_some();
+                    let _ = crate::platform_actions::spawn_action_guide_record(false, keep_motion);
                     iced::Task::none()
                 }
                 action_guide_home::Effect::OpenProject(path) => {
@@ -424,8 +425,11 @@ pub(crate) fn run(initial: ActionGuideIntent) -> Result<(), String> {
 
         match boot_initial {
             ActionGuideIntent::Home => {}
-            ActionGuideIntent::Record { fullscreen } => {
-                let _ = crate::platform_actions::spawn_action_guide_record(fullscreen);
+            ActionGuideIntent::Record {
+                fullscreen,
+                keep_motion,
+            } => {
+                let _ = crate::platform_actions::spawn_action_guide_record(fullscreen, keep_motion);
             }
             ActionGuideIntent::Open { path: Some(path) } => {
                 state.phase = Phase::Opening;
@@ -658,7 +662,10 @@ mod tests {
             ..DetectorConfig::default()
         };
         let mut rec = ActionRecorder::new(region, StoreConfig::default(), det);
-        rec.ingest_frame(RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255])), 0);
+        rec.ingest_frame(
+            std::sync::Arc::new(RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255]))),
+            0,
+        );
         for i in 1..=6 {
             let mut img = RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255]));
             for y in 0..16 {
@@ -666,7 +673,7 @@ mod tests {
                     img.put_pixel(x, y, Rgba([255, 255, 255, 255]));
                 }
             }
-            rec.ingest_frame(img, i * 100);
+            rec.ingest_frame(std::sync::Arc::new(img), i * 100);
         }
         rec.finish()
     }
@@ -682,6 +689,7 @@ mod tests {
             },
             rollshot_action::InputCapability::SemanticEvents,
             rollshot_action::InputSourceKind::LinuxEvdev,
+            None,
         )
     }
 

@@ -15,17 +15,32 @@ const TARGET_TRAY: &str = "rollshot::overlay::tray";
 pub(crate) trait RecordingTray: Send {
     /// Block the calling thread until the user activates (clicks) the tray item.
     fn wait_for_finish(&self);
+
+    /// Update the tray title. Default is a no-op (for fake trays in tests).
+    fn update_title(&self, _title: String) {}
+
+    /// Update the tray tooltip. Default is a no-op.
+    fn update_tooltip(&self, _title: String, _description: String) {}
 }
 
 impl RecordingTray for Box<dyn RecordingTray> {
     fn wait_for_finish(&self) {
         (**self).wait_for_finish()
     }
+    fn update_title(&self, title: String) {
+        (**self).update_title(title)
+    }
+    fn update_tooltip(&self, title: String, description: String) {
+        (**self).update_tooltip(title, description)
+    }
 }
 
 /// The ksni-backed tray item. `activate` (click) fires the finish channel.
 struct RecordingItem {
     finish_tx: Sender<()>,
+    title_override: Option<String>,
+    tooltip_title: Option<String>,
+    tooltip_description: Option<String>,
 }
 
 impl ksni::Tray for RecordingItem {
@@ -33,15 +48,20 @@ impl ksni::Tray for RecordingItem {
         "rollshot-recording".into()
     }
     fn title(&self) -> String {
-        "Rollshot is recording".into()
+        self.title_override
+            .clone()
+            .unwrap_or_else(|| "Rollshot is recording".into())
     }
     fn icon_name(&self) -> String {
         "media-record".into()
     }
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
-            title: "Rollshot is recording — click to finish".into(),
-            description: String::new(),
+            title: self
+                .tooltip_title
+                .clone()
+                .unwrap_or_else(|| "Rollshot is recording \u{2014} click to finish".into()),
+            description: self.tooltip_description.clone().unwrap_or_default(),
             icon_name: "media-record".into(),
             icon_pixmap: Vec::new(),
         }
@@ -62,6 +82,19 @@ impl RecordingTray for KsniTray {
     fn wait_for_finish(&self) {
         let _ = self.finish_rx.recv();
     }
+
+    fn update_title(&self, title: String) {
+        self.handle.update(|item: &mut RecordingItem| {
+            item.title_override = Some(title);
+        });
+    }
+
+    fn update_tooltip(&self, title: String, description: String) {
+        self.handle.update(|item: &mut RecordingItem| {
+            item.tooltip_title = Some(title);
+            item.tooltip_description = Some(description);
+        });
+    }
 }
 
 impl Drop for KsniTray {
@@ -81,8 +114,13 @@ pub(crate) fn create_recording_tray() -> Result<Box<dyn RecordingTray>, OverlayE
         ));
     }
     let (finish_tx, finish_rx) = std::sync::mpsc::channel();
-    let handle = ksni::blocking::TrayMethods::spawn(RecordingItem { finish_tx })
-        .map_err(|e| OverlayError::Capture(format!("failed to spawn tray service: {e}")))?;
+    let handle = ksni::blocking::TrayMethods::spawn(RecordingItem {
+        finish_tx,
+        title_override: None,
+        tooltip_title: None,
+        tooltip_description: None,
+    })
+    .map_err(|e| OverlayError::Capture(format!("failed to spawn tray service: {e}")))?;
     tracing::info!(target: TARGET_TRAY, "recording tray item registered");
     Ok(Box::new(KsniTray { finish_rx, handle }))
 }
@@ -141,5 +179,24 @@ mod tests {
             );
         }
         assert!(dropped.load(Ordering::SeqCst), "dropped at scope end");
+    }
+
+    // ---- Motion indicator tray RED tests ----
+
+    #[test]
+    fn tray_update_title_is_no_op_on_fake() {
+        // FakeTray implements default no-op update methods.
+        let tray: Box<dyn RecordingTray> = Box::new(FakeTray {
+            dropped: Arc::new(AtomicBool::new(false)),
+            waited: Arc::new(AtomicBool::new(false)),
+        });
+        // Should not panic.
+        tray.update_title("Motion recording on".into());
+        tray.update_tooltip(
+            "Motion recording on \u{2014} click to finish".into(),
+            String::new(),
+        );
+        // Finish still works.
+        tray.wait_for_finish();
     }
 }

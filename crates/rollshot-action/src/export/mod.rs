@@ -189,6 +189,7 @@ pub fn render_import_notices(warnings: &[crate::models::ImportWarning]) -> Strin
 mod tests {
     use super::*;
     use crate::detector::DetectorConfig;
+    use crate::frame_store::SharedActionFrame;
     use crate::frame_store::{FrameStore, StoreConfig};
     use crate::guide::Guide;
     use crate::models::{
@@ -221,17 +222,17 @@ mod tests {
             height: 8,
         }
     }
-    fn black() -> RgbaImage {
-        RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255]))
+    fn black() -> SharedActionFrame {
+        Arc::new(RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255])))
     }
-    fn quadrant() -> RgbaImage {
-        let mut img = black();
+    fn quadrant() -> SharedActionFrame {
+        let mut img = RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255]));
         for y in 0..4 {
             for x in 0..4 {
                 img.put_pixel(x, y, Rgba([255, 255, 255, 255]));
             }
         }
-        img
+        Arc::new(img)
     }
 
     /// A real recording yielding exactly one step + a store retaining its frames.

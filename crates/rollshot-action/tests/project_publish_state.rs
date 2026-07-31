@@ -53,6 +53,7 @@ fn committed_project() -> (tempfile::TempDir, std::path::PathBuf) {
             annotations: None,
         }],
         import_warnings: Vec::new(),
+        motion: None,
     };
     create_project(&snap, &root).unwrap();
     (dir, root)

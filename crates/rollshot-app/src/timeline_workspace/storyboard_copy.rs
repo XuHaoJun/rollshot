@@ -112,6 +112,7 @@ mod tests {
             },
             rollshot_action::InputCapability::SemanticEvents,
             rollshot_action::InputSourceKind::LinuxEvdev,
+            None,
         )
     }
 
@@ -126,6 +127,7 @@ mod tests {
             },
             rollshot_action::InputCapability::SemanticEvents,
             rollshot_action::InputSourceKind::LinuxEvdev,
+            None,
         )
     }
 

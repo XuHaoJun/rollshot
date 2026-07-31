@@ -129,7 +129,7 @@ pub(crate) async fn prepare_visual_annotation_context_task(
         } => {
             let root_for_load = root.clone();
             let loaded = tokio::task::spawn_blocking(move || {
-                rollshot_action::project::load_project(&root_for_load)
+                rollshot_action::project::load_project(&root_for_load, None)
             })
             .await
             .map_err(|_| "Project load task panicked.".to_string())?
@@ -2081,9 +2081,10 @@ mod tests {
             }],
             steps,
             import_warnings: Vec::new(),
+            motion: None,
         };
         create_project(&snapshot, &project_dir).unwrap();
-        let loaded = load_project(&project_dir).unwrap();
+        let loaded = load_project(&project_dir, None).unwrap();
         let actual_revision = loaded.manifest.revision;
 
         let result = run(prepare_visual_annotation_context_task(
@@ -2265,6 +2266,7 @@ mod tests {
             }],
             steps,
             import_warnings: Vec::new(),
+            motion: None,
         };
         create_project(&snapshot, &project_dir).unwrap();
 

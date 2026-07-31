@@ -23,7 +23,7 @@ pub enum LaunchMode {
 #[cfg(feature = "action-guide")]
 pub enum ActionGuideLaunch {
     Home,
-    Record { fullscreen: bool },
+    Record { fullscreen: bool, keep_motion: bool },
     Open { path: Option<PathBuf> },
 }
 
@@ -81,6 +81,11 @@ pub struct ActionGuideArgs {
     /// Open an existing Action Guide project.
     #[arg(long, conflicts_with = "record", num_args = 0..=1, value_name = "PATH")]
     pub open: Option<Option<PathBuf>>,
+
+    /// Retain a silent motion recording alongside the Action Guide.
+    /// Requires --record. Added only by the preflight-confirmed parent.
+    #[arg(long, hide = true, requires = "record")]
+    pub keep_motion: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -211,6 +216,7 @@ pub fn resolve_launch_mode(command: Option<LaunchCommand>) -> Result<LaunchMode,
             if args.record {
                 Ok(LaunchMode::ActionGuide(ActionGuideLaunch::Record {
                     fullscreen: args.fullscreen,
+                    keep_motion: args.keep_motion,
                 }))
             } else if let Some(path) = args.open {
                 Ok(LaunchMode::ActionGuide(ActionGuideLaunch::Open { path }))
@@ -414,7 +420,10 @@ mod tests {
         let mode = parse(&["rollshot-app", "action-guide", "--record"]).expect("parse");
         assert_eq!(
             mode,
-            LaunchMode::ActionGuide(ActionGuideLaunch::Record { fullscreen: false })
+            LaunchMode::ActionGuide(ActionGuideLaunch::Record {
+                fullscreen: false,
+                keep_motion: false,
+            })
         );
     }
 
@@ -425,7 +434,10 @@ mod tests {
             parse(&["rollshot-app", "action-guide", "--record", "--fullscreen"]).expect("parse");
         assert_eq!(
             mode,
-            LaunchMode::ActionGuide(ActionGuideLaunch::Record { fullscreen: true })
+            LaunchMode::ActionGuide(ActionGuideLaunch::Record {
+                fullscreen: true,
+                keep_motion: false,
+            })
         );
     }
 
@@ -555,7 +567,10 @@ mod tests {
     #[cfg(feature = "action-guide")]
     #[test]
     fn action_guide_route_record() {
-        let route = route_action_guide_launch(&ActionGuideLaunch::Record { fullscreen: false });
+        let route = route_action_guide_launch(&ActionGuideLaunch::Record {
+            fullscreen: false,
+            keep_motion: false,
+        });
         if cfg!(target_os = "macos") {
             assert_eq!(route, Route::MacOsProductDaemon);
         } else {
@@ -566,7 +581,10 @@ mod tests {
     #[cfg(feature = "action-guide")]
     #[test]
     fn action_guide_route_record_fullscreen() {
-        let route = route_action_guide_launch(&ActionGuideLaunch::Record { fullscreen: true });
+        let route = route_action_guide_launch(&ActionGuideLaunch::Record {
+            fullscreen: true,
+            keep_motion: false,
+        });
         if cfg!(target_os = "macos") {
             assert_eq!(route, Route::MacOsProductDaemon);
         } else {
@@ -605,6 +623,65 @@ mod tests {
         );
         assert!(
             LaunchCli::try_parse_from(["rollshot-app", "open", "a.png", "--show-cursor"]).is_err()
+        );
+    }
+
+    // ---- --keep-motion RED tests ----
+
+    #[cfg(feature = "action-guide")]
+    #[test]
+    fn keep_motion_defaults_off_for_opt_out() {
+        let mode = parse(&["rollshot-app", "action-guide", "--record"]).expect("parse");
+        assert_eq!(
+            mode,
+            LaunchMode::ActionGuide(ActionGuideLaunch::Record {
+                fullscreen: false,
+                keep_motion: false,
+            })
+        );
+    }
+
+    #[cfg(feature = "action-guide")]
+    #[test]
+    fn keep_motion_opt_in() {
+        let mode =
+            parse(&["rollshot-app", "action-guide", "--record", "--keep-motion"]).expect("parse");
+        assert_eq!(
+            mode,
+            LaunchMode::ActionGuide(ActionGuideLaunch::Record {
+                fullscreen: false,
+                keep_motion: true,
+            })
+        );
+    }
+
+    #[cfg(feature = "action-guide")]
+    #[test]
+    fn keep_motion_rejected_without_record() {
+        let err = parse(&["rollshot-app", "action-guide", "--keep-motion"]).unwrap_err();
+        assert!(
+            err.contains("--record"),
+            "error should mention --record: {err}"
+        );
+    }
+
+    #[cfg(feature = "action-guide")]
+    #[test]
+    fn keep_motion_with_fullscreen_composition_unchanged() {
+        let mode = parse(&[
+            "rollshot-app",
+            "action-guide",
+            "--record",
+            "--fullscreen",
+            "--keep-motion",
+        ])
+        .expect("parse");
+        assert_eq!(
+            mode,
+            LaunchMode::ActionGuide(ActionGuideLaunch::Record {
+                fullscreen: true,
+                keep_motion: true,
+            })
         );
     }
 }

@@ -70,6 +70,12 @@ mod macos_window;
 mod recording_tray;
 pub mod region;
 
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    feature = "action-guide"
+))]
+pub use driver::ActionGuideCaptureResult;
+
 /// Run the blocking capture overlay, blocking the calling thread until the user
 /// finishes (Esc) or cancels. `Ok(Some(_))` on finish, `Ok(None)` on cancel.
 ///
@@ -95,28 +101,16 @@ pub fn run_overlay(config: OverlayConfig) -> Result<Option<CaptureResult>, Overl
 pub fn run_action_guide(
     config: OverlayConfig,
     input_source: Box<dyn rollshot_action::SemanticInputSource>,
-) -> Result<
-    Option<(
-        rollshot_action::Recording,
-        rollshot_action::InputCapability,
-        rollshot_action::CaptureRegion,
-    )>,
-    OverlayError,
-> {
-    linux_runner::run_action_guide(config, input_source)
+    motion_toolchain: Option<rollshot_action::VideoToolchain>,
+) -> Result<Option<ActionGuideCaptureResult>, OverlayError> {
+    linux_runner::run_action_guide(config, input_source, motion_toolchain)
 }
 
 #[cfg(all(target_os = "linux", feature = "action-guide"))]
 pub fn run_action_guide_fullscreen(
     config: OverlayConfig,
     input_source: Box<dyn rollshot_action::SemanticInputSource>,
-) -> Result<
-    Option<(
-        rollshot_action::Recording,
-        rollshot_action::InputCapability,
-        rollshot_action::CaptureRegion,
-    )>,
-    OverlayError,
-> {
-    linux_runner::run_action_guide_fullscreen(config, input_source)
+    motion_toolchain: Option<rollshot_action::VideoToolchain>,
+) -> Result<Option<ActionGuideCaptureResult>, OverlayError> {
+    linux_runner::run_action_guide_fullscreen(config, input_source, motion_toolchain)
 }

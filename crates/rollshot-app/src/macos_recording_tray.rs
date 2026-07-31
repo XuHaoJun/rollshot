@@ -1,6 +1,11 @@
 use iced::futures::channel::mpsc::{self, UnboundedReceiver};
 use iced::futures::StreamExt;
 use std::sync::Mutex;
+
+use crate::macos_recording_status::{
+    recording_status, status_title, status_tooltip, RecordingStatus,
+};
+
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
 use tray_icon::{TrayIcon, TrayIconBuilder};
 
@@ -24,7 +29,8 @@ fn event_for(id: &str) -> Option<Event> {
 }
 
 pub struct Guard {
-    _tray: TrayIcon,
+    tray: TrayIcon,
+    status: RecordingStatus,
 }
 
 impl Guard {
@@ -45,14 +51,26 @@ impl Guard {
             }
         }));
 
+        let status = RecordingStatus::Off;
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_title("● Rollshot")
-            .with_tooltip("Rollshot is recording")
+            .with_title(status_title(status))
+            .with_tooltip(status_tooltip(status))
             .build()
             .map_err(|error| format!("failed to create recording tray: {error}"))?;
 
-        Ok(Self { _tray: tray })
+        Ok(Self { tray, status })
+    }
+
+    /// Update the tray to reflect a new motion runtime status.
+    pub fn set_motion_status(&mut self, status: rollshot_action::motion::MotionRuntimeStatus) {
+        let new = recording_status(status, self.status);
+        if new == self.status {
+            return;
+        }
+        self.status = new;
+        self.tray.set_title(Some(&status_title(new)));
+        let _ = self.tray.set_tooltip(Some(&status_tooltip(new)));
     }
 }
 

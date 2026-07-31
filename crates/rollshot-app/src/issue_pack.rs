@@ -1400,9 +1400,9 @@ mod action_guide_tests {
             ..DetectorConfig::default()
         };
         let mut recorder = ActionRecorder::new(region(), StoreConfig::default(), detector);
-        recorder.ingest_frame(black(), 0);
+        recorder.ingest_frame(std::sync::Arc::new(black()), 0);
         for i in 1..=6 {
-            recorder.ingest_frame(quadrant(), i * 100);
+            recorder.ingest_frame(std::sync::Arc::new(quadrant()), i * 100);
         }
         let recording = recorder.finish();
         assert!(!recording.candidates.is_empty());
@@ -1575,7 +1575,7 @@ mod action_guide_tests {
         });
         let mut candidates = Vec::with_capacity(count);
         for i in 0..count {
-            let id = store.ingest(quadrant(), i as u64 * 100);
+            let id = store.ingest(std::sync::Arc::new(quadrant()), i as u64 * 100);
             store.retain_window(id);
             candidates.push(CandidateStep {
                 id,

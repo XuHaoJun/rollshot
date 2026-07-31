@@ -19,6 +19,7 @@
 pub(crate) mod annotation;
 mod caption_agent;
 pub(crate) mod guide_export;
+pub(crate) mod motion;
 mod storyboard_copy;
 mod update;
 mod view;
@@ -417,6 +418,15 @@ pub struct TimelineWorkspace {
     pub(crate) import_warnings: Vec<rollshot_action::ImportWarning>,
     #[cfg(feature = "action-guide")]
     pub(crate) imported_scratch: Option<rollshot_action::ImportedScratch>,
+    /// Workspace motion state: session-owned recording, failure, or none.
+    #[cfg(feature = "action-guide")]
+    pub(crate) motion: motion::WorkspaceMotion,
+    /// Save recording (raw MP4 export) state machine.
+    #[cfg(feature = "action-guide")]
+    pub(crate) save_recording_state: motion::SaveRecordingState,
+    /// Monotonic operation id for save-recording export provenance.
+    #[cfg(feature = "action-guide")]
+    pub(crate) next_save_recording_operation_id: u64,
 }
 
 impl TimelineWorkspace {
@@ -427,6 +437,7 @@ impl TimelineWorkspace {
         region: CaptureRegion,
         capability: InputCapability,
         source_kind: InputSourceKind,
+        motion_outcome: Option<rollshot_action::motion::MotionRecordingOutcome>,
     ) -> Self {
         let Recording { candidates, store } = recording;
         let guide = Guide::from_candidates(candidates);
@@ -503,6 +514,12 @@ impl TimelineWorkspace {
             import_warnings: Vec::new(),
             #[cfg(feature = "action-guide")]
             imported_scratch: None,
+            #[cfg(feature = "action-guide")]
+            motion: motion::WorkspaceMotion::from_outcome(motion_outcome),
+            #[cfg(feature = "action-guide")]
+            save_recording_state: motion::SaveRecordingState::Idle,
+            #[cfg(feature = "action-guide")]
+            next_save_recording_operation_id: 0,
         };
         ws.rebuild_selection_handles();
         ws
@@ -579,6 +596,9 @@ impl TimelineWorkspace {
             share_operation_id: 0,
             import_warnings: seed.import_warnings,
             imported_scratch: Some(seed.scratch),
+            motion: motion::WorkspaceMotion::None,
+            save_recording_state: motion::SaveRecordingState::Idle,
+            next_save_recording_operation_id: 0,
         };
         ws.rebuild_selection_handles();
         ws
@@ -952,6 +972,7 @@ pub fn run(
     region: CaptureRegion,
     capability: InputCapability,
     source_kind: InputSourceKind,
+    motion_outcome: Option<rollshot_action::motion::MotionRecordingOutcome>,
 ) -> Result<(), String> {
     use std::sync::{Arc, Mutex};
 
@@ -960,14 +981,15 @@ pub fn run(
         region,
         capability,
         source_kind,
+        motion_outcome,
     ))));
     let boot = move || {
-        let (recording, region, capability, source_kind) = boot_data
+        let (recording, region, capability, source_kind, motion) = boot_data
             .lock()
             .unwrap()
             .take()
             .expect("timeline workspace boot data already consumed");
-        let mut ws = TimelineWorkspace::new(recording, region, capability, source_kind);
+        let mut ws = TimelineWorkspace::new(recording, region, capability, source_kind, motion);
         // Open the process-wide task store once at workspace boot.
         if let Ok(config_dir) = crate::daemon::config::rollshot_config_dir() {
             match crate::agent_store::open_process_store(&config_dir) {
@@ -1070,9 +1092,9 @@ mod tests {
             ..DetectorConfig::default()
         };
         let mut rec = ActionRecorder::new(region_32(), StoreConfig::default(), det);
-        rec.ingest_frame(black_32(), 0);
+        rec.ingest_frame(std::sync::Arc::new(black_32()), 0);
         for i in 1..=6 {
-            rec.ingest_frame(white_quadrant_32(), i * 100);
+            rec.ingest_frame(std::sync::Arc::new(white_quadrant_32()), i * 100);
         }
         let recording = rec.finish();
         assert!(
@@ -1171,6 +1193,7 @@ mod tests {
             region_32(),
             InputCapability::SemanticEvents,
             InputSourceKind::LinuxEvdev,
+            None,
         )
     }
 
@@ -1318,11 +1341,11 @@ mod tests {
 
         fn ws_project_backed() -> TimelineWorkspace {
             use rollshot_action::project::{
-                EnabledOutputs, ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
+                EnabledOutputs, ProjectFrame, ProjectManifestV2, ProjectStep, ProjectStepId,
             };
             use rollshot_action::{CandidateKind, DetectReason, InputCapability, InputSourceKind};
 
-            let manifest = ProjectManifestV1 {
+            let manifest = ProjectManifestV2 {
                 schema_version: 1,
                 revision: 1,
                 title: "Test Guide".into(),
@@ -1379,10 +1402,12 @@ mod tests {
                         annotations: None,
                     },
                 ],
+                import_warnings: Vec::new(),
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root: std::path::PathBuf::from("/tmp/test-project"),
                 manifest: manifest.into(),
+                motion: rollshot_action::project::MotionAssetLoad::None,
             };
             let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
             crate::timeline_workspace::project::from_loaded_project(
@@ -1394,11 +1419,11 @@ mod tests {
 
         fn ws_project_backed_read_only() -> TimelineWorkspace {
             use rollshot_action::project::{
-                EnabledOutputs, ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
+                EnabledOutputs, ProjectFrame, ProjectManifestV2, ProjectStep, ProjectStepId,
             };
             use rollshot_action::{CandidateKind, DetectReason, InputCapability, InputSourceKind};
 
-            let manifest = ProjectManifestV1 {
+            let manifest = ProjectManifestV2 {
                 schema_version: 1,
                 revision: 1,
                 title: "Test Guide".into(),
@@ -1455,10 +1480,12 @@ mod tests {
                         annotations: None,
                     },
                 ],
+                import_warnings: Vec::new(),
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root: std::path::PathBuf::from("/tmp/test-project"),
                 manifest: manifest.into(),
+                motion: rollshot_action::project::MotionAssetLoad::None,
             };
             crate::timeline_workspace::project::from_loaded_project(loaded, ProjectAccess::ReadOnly)
                 .expect("ok")
@@ -1776,8 +1803,8 @@ mod tests {
                     super::super::update::SaveWorkerOutcome::NewCommittedReadOnly {
                         root: std::path::PathBuf::from("/tmp/test"),
                         revision: 1,
-                        manifest: rollshot_action::project::ProjectManifestV2 {
-                            schema_version: 2,
+                        manifest: rollshot_action::project::ProjectManifestV3 {
+                            schema_version: 3,
                             revision: 1,
                             title: "Test Guide".into(),
                             capture_region: super::region_32(),
@@ -1787,6 +1814,7 @@ mod tests {
                             frames: Vec::new(),
                             steps: Vec::new(),
                             import_warnings: Vec::new(),
+                            motion: None,
                         },
                         category: "post_commit_lock_race",
                     },
@@ -1807,8 +1835,8 @@ mod tests {
                 Message::SaveWorkerFinished(super::super::update::SaveWorkerOutcome::NewWritable {
                     root: root.clone(),
                     revision: 1,
-                    manifest: rollshot_action::project::ProjectManifestV2 {
-                        schema_version: 2,
+                    manifest: rollshot_action::project::ProjectManifestV3 {
+                        schema_version: 3,
                         revision: 1,
                         title: "Test Guide".into(),
                         capture_region: super::region_32(),
@@ -1818,6 +1846,7 @@ mod tests {
                         frames: Vec::new(),
                         steps: Vec::new(),
                         import_warnings: Vec::new(),
+                        motion: None,
                     },
                 }),
             );
@@ -1970,7 +1999,7 @@ mod tests {
 
         fn ws_project_backed_with_assets() -> (TimelineWorkspace, tempfile::TempDir) {
             use rollshot_action::project::{
-                EnabledOutputs, ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
+                EnabledOutputs, ProjectFrame, ProjectManifestV2, ProjectStep, ProjectStepId,
             };
             use rollshot_action::{CandidateKind, DetectReason, InputCapability, InputSourceKind};
 
@@ -1991,7 +2020,7 @@ mod tests {
                 });
             }
 
-            let manifest = ProjectManifestV1 {
+            let manifest = ProjectManifestV2 {
                 schema_version: 1,
                 revision: 1,
                 title: "Test Guide".into(),
@@ -2012,10 +2041,12 @@ mod tests {
                     nearby: vec![1, 2, 3],
                     annotations: None,
                 }],
+                import_warnings: Vec::new(),
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root,
                 manifest: manifest.into(),
+                motion: rollshot_action::project::MotionAssetLoad::None,
             };
             let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
             let ws = crate::timeline_workspace::project::from_loaded_project(
@@ -2166,7 +2197,7 @@ mod tests {
         #[test]
         fn select_step_schedules_at_most_two_decodes_initially() {
             use rollshot_action::project::{
-                EnabledOutputs, ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
+                EnabledOutputs, ProjectFrame, ProjectManifestV2, ProjectStep, ProjectStepId,
             };
             use rollshot_action::{CandidateKind, DetectReason, InputCapability, InputSourceKind};
 
@@ -2188,7 +2219,7 @@ mod tests {
                 });
             }
 
-            let manifest = ProjectManifestV1 {
+            let manifest = ProjectManifestV2 {
                 schema_version: 1,
                 revision: 1,
                 title: "Test Guide".into(),
@@ -2209,10 +2240,12 @@ mod tests {
                     nearby: vec![1, 2, 3, 4, 5],
                     annotations: None,
                 }],
+                import_warnings: Vec::new(),
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root,
                 manifest: manifest.into(),
+                motion: rollshot_action::project::MotionAssetLoad::None,
             };
             let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
             let mut ws = crate::timeline_workspace::project::from_loaded_project(
@@ -2235,7 +2268,7 @@ mod tests {
         #[test]
         fn frame_load_completed_with_remaining_spawns_next_batch() {
             use rollshot_action::project::{
-                EnabledOutputs, ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
+                EnabledOutputs, ProjectFrame, ProjectManifestV2, ProjectStep, ProjectStepId,
             };
             use rollshot_action::{CandidateKind, DetectReason, InputCapability, InputSourceKind};
 
@@ -2256,7 +2289,7 @@ mod tests {
                 });
             }
 
-            let manifest = ProjectManifestV1 {
+            let manifest = ProjectManifestV2 {
                 schema_version: 1,
                 revision: 1,
                 title: "Test Guide".into(),
@@ -2277,10 +2310,12 @@ mod tests {
                     nearby: vec![1, 2, 3, 4, 5],
                     annotations: None,
                 }],
+                import_warnings: Vec::new(),
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root,
                 manifest: manifest.into(),
+                motion: rollshot_action::project::MotionAssetLoad::None,
             };
             let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
             let mut ws = crate::timeline_workspace::project::from_loaded_project(
@@ -2337,11 +2372,11 @@ mod tests {
         #[test]
         fn delete_step_is_noop_when_only_one_step() {
             use rollshot_action::project::{
-                EnabledOutputs, ProjectFrame, ProjectManifestV1, ProjectStep, ProjectStepId,
+                EnabledOutputs, ProjectFrame, ProjectManifestV2, ProjectStep, ProjectStepId,
             };
             use rollshot_action::{CandidateKind, DetectReason, InputCapability, InputSourceKind};
 
-            let manifest = ProjectManifestV1 {
+            let manifest = ProjectManifestV2 {
                 schema_version: 1,
                 revision: 1,
                 title: "Single Step Guide".into(),
@@ -2368,10 +2403,12 @@ mod tests {
                     nearby: vec![1],
                     annotations: None,
                 }],
+                import_warnings: Vec::new(),
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root: std::path::PathBuf::from("/tmp/test-project"),
                 manifest: manifest.into(),
+                motion: rollshot_action::project::MotionAssetLoad::None,
             };
             let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
             let mut ws = crate::timeline_workspace::project::from_loaded_project(
@@ -2629,8 +2666,8 @@ mod tests {
         }
 
         fn complete_first_save(ws: &mut TimelineWorkspace) {
-            let manifest = rollshot_action::project::ProjectManifestV2 {
-                schema_version: 2,
+            let manifest = rollshot_action::project::ProjectManifestV3 {
+                schema_version: 3,
                 revision: 1,
                 title: ws.guide.title().to_string(),
                 capture_region: ws.region,
@@ -2666,6 +2703,7 @@ mod tests {
                     })
                     .collect(),
                 import_warnings: ws.import_warnings.clone(),
+                motion: None,
             };
             super::super::update::update(
                 ws,
@@ -2767,15 +2805,15 @@ mod tests {
         #[test]
         fn build_snapshot_carries_import_warnings() {
             use rollshot_action::project::{
-                EnabledOutputs, ProjectFrame, ProjectManifestV2, ProjectStep, ProjectStepId,
+                EnabledOutputs, ProjectFrame, ProjectManifestV3, ProjectStep, ProjectStepId,
             };
             use rollshot_action::{
                 CandidateKind, CaptureRegion, DetectReason, ImportWarning, InputCapability,
                 InputSourceKind,
             };
 
-            let manifest = ProjectManifestV2 {
-                schema_version: 2,
+            let manifest = ProjectManifestV3 {
+                schema_version: 3,
                 revision: 1,
                 title: "Imported Guide".into(),
                 capture_region: CaptureRegion {
@@ -2809,10 +2847,12 @@ mod tests {
                     annotations: None,
                 }],
                 import_warnings: vec![ImportWarning::NoVisualChangesDetected],
+                motion: None,
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root: std::path::PathBuf::from("/tmp/test-imported"),
                 manifest,
+                motion: rollshot_action::project::MotionAssetLoad::None,
             };
             let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
             let mut ws = crate::timeline_workspace::project::from_loaded_project(
@@ -2831,15 +2871,15 @@ mod tests {
         #[test]
         fn reopen_preserves_import_warnings() {
             use rollshot_action::project::{
-                EnabledOutputs, ProjectFrame, ProjectManifestV2, ProjectStep, ProjectStepId,
+                EnabledOutputs, ProjectFrame, ProjectManifestV3, ProjectStep, ProjectStepId,
             };
             use rollshot_action::{
                 CandidateKind, CaptureRegion, DetectReason, ImportWarning, InputCapability,
                 InputSourceKind,
             };
 
-            let manifest = ProjectManifestV2 {
-                schema_version: 2,
+            let manifest = ProjectManifestV3 {
+                schema_version: 3,
                 revision: 1,
                 title: "Imported Guide".into(),
                 capture_region: CaptureRegion {
@@ -2876,10 +2916,12 @@ mod tests {
                     ImportWarning::NoVisualChangesDetected,
                     ImportWarning::IntermediateChangesReduced,
                 ],
+                motion: None,
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root: std::path::PathBuf::from("/tmp/test-imported"),
                 manifest,
+                motion: rollshot_action::project::MotionAssetLoad::None,
             };
             let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
             let ws = crate::timeline_workspace::project::from_loaded_project(

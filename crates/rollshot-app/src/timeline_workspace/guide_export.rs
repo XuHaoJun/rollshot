@@ -421,6 +421,7 @@ mod tests {
             },
             InputCapability::SemanticEvents,
             InputSourceKind::LinuxEvdev,
+            None,
         )
     }
 
@@ -631,7 +632,7 @@ mod tests {
         use image::ImageEncoder;
         use image::RgbaImage;
         use rollshot_action::project::{
-            EnabledOutputs, LoadedProject, ProjectFrame, ProjectManifestV1,
+            EnabledOutputs, LoadedProject, ProjectFrame, ProjectManifestV2,
         };
         use rollshot_action::step_frame_source::ProjectFrameSource;
         use rollshot_action::{
@@ -661,13 +662,16 @@ mod tests {
         );
         let img1 = RgbaImage::from_pixel(8, 8, image::Rgba([10, 20, 30, 255]));
         let img2 = RgbaImage::from_pixel(8, 8, image::Rgba([40, 50, 60, 255]));
-        rec.ingest_frame(RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 0, 255])), 0);
-        rec.ingest_frame(img1.clone(), 100);
-        rec.ingest_frame(img1.clone(), 200);
-        rec.ingest_frame(img1.clone(), 300);
-        rec.ingest_frame(img2.clone(), 400);
-        rec.ingest_frame(img2.clone(), 500);
-        rec.ingest_frame(img2.clone(), 600);
+        rec.ingest_frame(
+            std::sync::Arc::new(RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 0, 255]))),
+            0,
+        );
+        rec.ingest_frame(std::sync::Arc::new(img1.clone()), 100);
+        rec.ingest_frame(std::sync::Arc::new(img1.clone()), 200);
+        rec.ingest_frame(std::sync::Arc::new(img1.clone()), 300);
+        rec.ingest_frame(std::sync::Arc::new(img2.clone()), 400);
+        rec.ingest_frame(std::sync::Arc::new(img2.clone()), 500);
+        rec.ingest_frame(std::sync::Arc::new(img2.clone()), 600);
         let recording = rec.finish();
         let guide = rollshot_action::Guide::from_candidates(recording.candidates.clone());
         let kf_ids: Vec<u64> = guide.steps().iter().map(|s| s.keyframe).collect();
@@ -696,7 +700,7 @@ mod tests {
             });
         }
 
-        let manifest = ProjectManifestV1 {
+        let manifest = ProjectManifestV2 {
             schema_version: 1,
             revision: 1,
             title: "Test".into(),
@@ -713,10 +717,12 @@ mod tests {
             enabled_outputs: EnabledOutputs::default(),
             frames,
             steps: Vec::new(),
+            import_warnings: Vec::new(),
         };
         let loaded = LoadedProject {
             root,
             manifest: manifest.into(),
+            motion: rollshot_action::project::MotionAssetLoad::None,
         };
         let source = ProjectFrameSource::from_loaded(
             &loaded,
@@ -735,6 +741,7 @@ mod tests {
                 reason: rollshot_action::DegradedReason::SourceStartFailed,
             },
             InputSourceKind::VisualOnly,
+            None,
         );
         ws.frame_source = Some(rollshot_action::StepFrameSource::Project(source));
         let _ = dir.keep();

@@ -2,6 +2,7 @@ mod assets;
 pub mod continuity;
 mod error;
 mod model;
+pub(crate) mod motion;
 pub mod publish;
 mod store;
 mod validate;
@@ -12,10 +13,12 @@ pub use continuity::{
 };
 pub use error::{ProjectError, ProjectErrorCategory};
 pub use model::{
-    EnabledOutputs, LoadedProject, PersistedStepAnnotations, ProjectCommit, ProjectFrame,
-    ProjectManifestV1, ProjectManifestV2, ProjectSnapshot, ProjectStep, ProjectStepId,
-    SnapshotFrame, SnapshotFramePayload, PROJECT_SCHEMA_VERSION,
+    EnabledOutputs, LoadedProject, MotionAsset, MotionAssetLoad, PersistedStepAnnotations,
+    ProjectCommit, ProjectFrame, ProjectManifestV1, ProjectManifestV2, ProjectManifestV3,
+    ProjectSnapshot, ProjectStep, ProjectStepId, SnapshotFrame, SnapshotFramePayload,
+    PROJECT_SCHEMA_VERSION,
 };
+pub use motion::export_motion_asset;
 pub use publish::{
     load_publish_state, write_publish_state, PublishCancellation, PublishCancelled,
     PublishFreshness, PublishOutputKind, PublishStateLoad, PublishStateV1, PublishedOutputV1,

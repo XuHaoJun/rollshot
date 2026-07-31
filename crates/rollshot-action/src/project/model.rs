@@ -8,9 +8,14 @@ use crate::models::{
     CandidateKind, CaptureRegion, DetectReason, FrameId, ImportWarning, InputCapability,
     InputSourceKind, Millis,
 };
+use crate::motion::asset::ValidatedMotionAsset;
+use crate::motion::error::MotionFailureCategory;
+use crate::motion::probe::{MotionAudio, MotionCodec};
+
+use super::error::{ProjectError, ProjectErrorCategory};
 use rollshot_image_document::{Annotation, AnnotationId};
 
-pub const PROJECT_SCHEMA_VERSION: u32 = 2;
+pub const PROJECT_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -85,10 +90,55 @@ pub struct ProjectManifestV2 {
     pub import_warnings: Vec<ImportWarning>,
 }
 
+/// Persisted motion asset metadata. Validated during structure checks;
+/// asset-level validation (file exists, digest, probe) happens at load time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MotionAsset {
+    pub relative_path: String,
+    pub sha256: String,
+    pub duration_ms: u64,
+    pub width: u32,
+    pub height: u32,
+    pub fps_numerator: u32,
+    pub fps_denominator: u32,
+    pub codec: String,
+    pub audio: String,
+}
+
+/// Load-time state of a motion asset. Separates "no motion specified" from
+/// "motion specified but unavailable" so the Guide can still load.
+#[derive(Debug, Clone)]
+pub enum MotionAssetLoad {
+    /// No motion asset was specified in the manifest.
+    None,
+    /// Motion asset was specified, validated, and is available.
+    Available(ValidatedMotionAsset),
+    /// Motion asset was specified but could not be loaded.
+    Unavailable(MotionFailureCategory),
+}
+
+/// Current manifest schema with motion asset support.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectManifestV3 {
+    pub schema_version: u32,
+    pub revision: u64,
+    pub title: String,
+    pub capture_region: CaptureRegion,
+    pub input_source: InputSourceKind,
+    pub input_capability: InputCapability,
+    pub enabled_outputs: EnabledOutputs,
+    pub frames: Vec<ProjectFrame>,
+    pub steps: Vec<ProjectStep>,
+    pub import_warnings: Vec<ImportWarning>,
+    pub motion: Option<MotionAsset>,
+}
+
 impl From<ProjectManifestV1> for ProjectManifestV2 {
     fn from(v1: ProjectManifestV1) -> Self {
         Self {
-            schema_version: PROJECT_SCHEMA_VERSION,
+            schema_version: 2,
             revision: v1.revision,
             title: v1.title,
             capture_region: v1.capture_region,
@@ -100,6 +150,82 @@ impl From<ProjectManifestV1> for ProjectManifestV2 {
             import_warnings: Vec::new(),
         }
     }
+}
+
+impl From<ProjectManifestV2> for ProjectManifestV3 {
+    fn from(v2: ProjectManifestV2) -> Self {
+        Self {
+            schema_version: PROJECT_SCHEMA_VERSION,
+            revision: v2.revision,
+            title: v2.title,
+            capture_region: v2.capture_region,
+            input_source: v2.input_source,
+            input_capability: v2.input_capability,
+            enabled_outputs: v2.enabled_outputs,
+            frames: v2.frames,
+            steps: v2.steps,
+            import_warnings: v2.import_warnings,
+            motion: None,
+        }
+    }
+}
+
+impl MotionAsset {
+    /// The only canonical relative path for a motion asset.
+    pub const CANONICAL_PATH: &'static str = "assets/motion/recording.mp4";
+
+    /// Validate structural invariants of the persisted motion asset.
+    pub fn validate_structure(&self) -> Result<(), ProjectError> {
+        if self.relative_path != Self::CANONICAL_PATH {
+            return Err(ProjectError::invalid_manifest(
+                ProjectErrorCategory::InvalidMotion,
+                None,
+                None,
+            ));
+        }
+        if !is_canonical_sha256(&self.sha256) {
+            return Err(ProjectError::invalid_manifest(
+                ProjectErrorCategory::InvalidMotion,
+                None,
+                None,
+            ));
+        }
+        if self.duration_ms == 0
+            || self.width == 0
+            || self.height == 0
+            || self.fps_numerator == 0
+            || self.fps_denominator == 0
+        {
+            return Err(ProjectError::invalid_manifest(
+                ProjectErrorCategory::InvalidMotion,
+                None,
+                None,
+            ));
+        }
+        if self.codec != MotionCodec::H264.as_str() {
+            return Err(ProjectError::invalid_manifest(
+                ProjectErrorCategory::InvalidMotion,
+                None,
+                None,
+            ));
+        }
+        if self.audio != MotionAudio::None.as_str() {
+            return Err(ProjectError::invalid_manifest(
+                ProjectErrorCategory::InvalidMotion,
+                None,
+                None,
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn is_canonical_sha256(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
 }
 
 #[derive(Clone)]
@@ -131,18 +257,21 @@ pub struct ProjectSnapshot {
     pub frames: Vec<SnapshotFrame>,
     pub steps: Vec<ProjectStep>,
     pub import_warnings: Vec<ImportWarning>,
+    pub motion: Option<ValidatedMotionAsset>,
 }
 
 #[derive(Debug, Clone)]
 pub struct LoadedProject {
     pub root: std::path::PathBuf,
-    pub manifest: ProjectManifestV2,
+    pub manifest: ProjectManifestV3,
+    pub motion: MotionAssetLoad,
 }
 
 #[derive(Debug, Clone)]
 pub struct ProjectCommit {
     pub root: std::path::PathBuf,
-    pub manifest: ProjectManifestV2,
+    pub manifest: ProjectManifestV3,
+    pub motion: Option<ValidatedMotionAsset>,
 }
 
 #[cfg(test)]
@@ -349,6 +478,103 @@ mod tests {
             "extra": true
         });
         let error = serde_json::from_value::<ProjectStep>(json).unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    // ---- Schema v3 model RED tests ----
+
+    #[test]
+    fn v3_manifest_rejects_unknown_fields() {
+        let json = serde_json::json!({
+            "schema_version": 3,
+            "revision": 1,
+            "title": "Guide",
+            "capture_region": { "x": 0, "y": 0, "width": 8, "height": 8 },
+            "input_source": "visual-only",
+            "input_capability": "semantic-events",
+            "enabled_outputs": { "storyboard": false, "gif": false, "mp4": false },
+            "frames": [],
+            "steps": [],
+            "import_warnings": [],
+            "motion": null,
+            "surprise": true
+        });
+        let error = serde_json::from_value::<ProjectManifestV3>(json).unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn v3_manifest_round_trips_with_motion_none() {
+        let json = serde_json::json!({
+            "schema_version": 3,
+            "revision": 1,
+            "title": "Guide",
+            "capture_region": { "x": 0, "y": 0, "width": 8, "height": 8 },
+            "input_source": "visual-only",
+            "input_capability": "semantic-events",
+            "enabled_outputs": { "storyboard": false, "gif": false, "mp4": false },
+            "frames": [],
+            "steps": [],
+            "import_warnings": [],
+            "motion": null
+        });
+        let manifest: ProjectManifestV3 = serde_json::from_value(json).unwrap();
+        let serialized = serde_json::to_string(&manifest).unwrap();
+        let round_tripped: ProjectManifestV3 = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(manifest, round_tripped);
+        assert!(round_tripped.motion.is_none());
+    }
+
+    #[test]
+    fn v3_manifest_round_trips_with_motion_some() {
+        let json = serde_json::json!({
+            "schema_version": 3,
+            "revision": 1,
+            "title": "Guide",
+            "capture_region": { "x": 0, "y": 0, "width": 8, "height": 8 },
+            "input_source": "visual-only",
+            "input_capability": "semantic-events",
+            "enabled_outputs": { "storyboard": false, "gif": false, "mp4": false },
+            "frames": [],
+            "steps": [],
+            "import_warnings": [],
+            "motion": {
+                "relative_path": "assets/motion/recording.mp4",
+                "sha256": "a".repeat(64),
+                "duration_ms": 1000,
+                "width": 1920,
+                "height": 1080,
+                "fps_numerator": 30,
+                "fps_denominator": 1,
+                "codec": "h264",
+                "audio": "none"
+            }
+        });
+        let manifest: ProjectManifestV3 = serde_json::from_value(json).unwrap();
+        let serialized = serde_json::to_string(&manifest).unwrap();
+        let round_tripped: ProjectManifestV3 = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(manifest, round_tripped);
+        let m = round_tripped.motion.unwrap();
+        assert_eq!(m.relative_path, "assets/motion/recording.mp4");
+        assert_eq!(m.duration_ms, 1000);
+        assert_eq!(m.codec, "h264");
+    }
+
+    #[test]
+    fn motion_asset_rejects_unknown_fields() {
+        let json = serde_json::json!({
+            "relative_path": "assets/motion/recording.mp4",
+            "sha256": "a".repeat(64),
+            "duration_ms": 1000,
+            "width": 1920,
+            "height": 1080,
+            "fps_numerator": 30,
+            "fps_denominator": 1,
+            "codec": "h264",
+            "audio": "none",
+            "extra": true
+        });
+        let error = serde_json::from_value::<MotionAsset>(json).unwrap_err();
         assert!(error.to_string().contains("unknown field"));
     }
 }

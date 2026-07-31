@@ -18,6 +18,7 @@ mod guide;
 mod input;
 mod metrics;
 mod models;
+pub mod motion;
 pub mod project;
 mod recorder;
 #[cfg(test)]
@@ -44,7 +45,7 @@ pub use export::{
     model as export_model, render_guide_folder, render_import_notices, ManifestStep,
     SessionManifest,
 };
-pub use frame_store::{AnalysisFrame, FrameStore, RetainedFrame, StoreConfig};
+pub use frame_store::{AnalysisFrame, FrameStore, RetainedFrame, SharedActionFrame, StoreConfig};
 pub use gif::{export_gif, export_gif_images, export_reviewed_gif, GifOptions};
 pub use guide::{Guide, DEFAULT_GUIDE_TITLE};
 pub use input::{SemanticInputSource, StartedSemanticInput, VisualOnlySource};
@@ -53,6 +54,12 @@ pub use models::{
     default_title, CandidateId, CandidateKind, CandidateStep, CaptureRegion, DegradedReason,
     DetectReason, FrameId, FrameRef, GuideStep, ImportWarning, InputCapability, InputSourceKind,
     Millis, MouseButton, Point, SemanticAction, SemanticKey, TimedSemanticAction,
+};
+pub use motion::{
+    motion_frame_mailbox, CfrEmission, CfrScheduler, MotionAudio, MotionCodec,
+    MotionFailureCategory, MotionFrame, MotionFrameReceiver, MotionFrameSender, MotionMetadata,
+    MotionOfferResult, MotionRecorder, MotionRecordingOutcome, MotionRuntimeStatus,
+    ValidatedMotionAsset,
 };
 pub use recorder::{ActionRecorder, Recording};
 pub use step_frame_source::{

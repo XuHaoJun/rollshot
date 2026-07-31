@@ -417,10 +417,12 @@ mod tests {
     use image::{Rgba, RgbaImage};
 
     use crate::detector::DetectorConfig;
+    use crate::frame_store::SharedActionFrame;
     use crate::frame_store::StoreConfig;
     use crate::models::{CandidateKind, CandidateStep, CaptureRegion, DetectReason};
     use crate::recorder::{ActionRecorder, Recording};
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
 
     fn region() -> CaptureRegion {
         CaptureRegion {
@@ -431,12 +433,12 @@ mod tests {
         }
     }
 
-    fn black() -> RgbaImage {
-        RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255]))
+    fn black() -> SharedActionFrame {
+        Arc::new(RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255])))
     }
 
-    fn white() -> RgbaImage {
-        RgbaImage::from_pixel(8, 8, Rgba([255, 255, 255, 255]))
+    fn white() -> SharedActionFrame {
+        Arc::new(RgbaImage::from_pixel(8, 8, Rgba([255, 255, 255, 255])))
     }
 
     fn recording() -> Recording {
@@ -638,7 +640,7 @@ mod tests {
     #[test]
     fn export_cleans_temp_file_when_ffmpeg_closes_stdin_early() {
         let mut store = FrameStore::new(StoreConfig::default());
-        let frame = RgbaImage::from_pixel(2048, 2048, Rgba([12, 34, 56, 255]));
+        let frame = Arc::new(RgbaImage::from_pixel(2048, 2048, Rgba([12, 34, 56, 255])));
         let id = store.ingest(frame, 0);
         store.retain_window(id);
         let guide = one_step_guide(id);

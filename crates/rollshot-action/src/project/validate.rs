@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use super::error::{ProjectError, ProjectErrorCategory};
 use super::model::{
-    PersistedStepAnnotations, ProjectFrame, ProjectManifestV2, ProjectSnapshot, ProjectStep,
+    PersistedStepAnnotations, ProjectFrame, ProjectManifestV3, ProjectSnapshot, ProjectStep,
     SnapshotFrame, SnapshotFramePayload, PROJECT_SCHEMA_VERSION,
 };
 use crate::models::{CaptureRegion, FrameId, ImportWarning};
@@ -43,7 +43,7 @@ impl FrameMeta {
     }
 }
 
-pub fn validate_manifest_structure(manifest: &ProjectManifestV2) -> Result<(), ProjectError> {
+pub fn validate_manifest_structure(manifest: &ProjectManifestV3) -> Result<(), ProjectError> {
     if manifest.schema_version != PROJECT_SCHEMA_VERSION {
         return Err(ProjectError::UnsupportedSchema {
             path: None,
@@ -58,6 +58,9 @@ pub fn validate_manifest_structure(manifest: &ProjectManifestV2) -> Result<(), P
         ));
     }
     validate_import_warnings(&manifest.import_warnings)?;
+    if let Some(ref motion) = manifest.motion {
+        motion.validate_structure()?;
+    }
     let frames = manifest
         .frames
         .iter()
@@ -282,8 +285,8 @@ mod tests {
     };
     use rollshot_image_document::AnnotationId;
 
-    fn valid_manifest() -> ProjectManifestV2 {
-        ProjectManifestV2 {
+    fn valid_manifest() -> ProjectManifestV3 {
+        ProjectManifestV3 {
             schema_version: PROJECT_SCHEMA_VERSION,
             revision: 1,
             title: String::new(),
@@ -316,6 +319,7 @@ mod tests {
                 annotations: None,
             }],
             import_warnings: Vec::new(),
+            motion: None,
         }
     }
 
@@ -350,6 +354,7 @@ mod tests {
                 annotations: None,
             }],
             import_warnings: Vec::new(),
+            motion: None,
         }
     }
 
@@ -663,5 +668,118 @@ mod tests {
     fn snapshot_accepts_valid_fixture() {
         let snapshot = valid_snapshot();
         validate_snapshot_structure(&snapshot).unwrap();
+    }
+
+    // ---- Motion structure validation RED tests ----
+
+    use super::super::model::MotionAsset;
+
+    fn valid_motion_asset() -> MotionAsset {
+        MotionAsset {
+            relative_path: "assets/motion/recording.mp4".into(),
+            sha256: "a".repeat(64),
+            duration_ms: 1000,
+            width: 1920,
+            height: 1080,
+            fps_numerator: 30,
+            fps_denominator: 1,
+            codec: "h264".into(),
+            audio: "none".into(),
+        }
+    }
+
+    #[test]
+    fn motion_invalid_relative_path_rejected() {
+        let motion = MotionAsset {
+            relative_path: "../escape".into(),
+            ..valid_motion_asset()
+        };
+        let error = motion.validate_structure().unwrap_err();
+        assert_eq!(error.category(), "invalid-motion");
+    }
+
+    #[test]
+    fn motion_absolute_path_rejected() {
+        let motion = MotionAsset {
+            relative_path: "/etc/passwd".into(),
+            ..valid_motion_asset()
+        };
+        let error = motion.validate_structure().unwrap_err();
+        assert_eq!(error.category(), "invalid-motion");
+    }
+
+    #[test]
+    fn motion_backslash_path_rejected() {
+        let motion = MotionAsset {
+            relative_path: "assets\\\\motion\\\\recording.mp4".into(),
+            ..valid_motion_asset()
+        };
+        let error = motion.validate_structure().unwrap_err();
+        assert_eq!(error.category(), "invalid-motion");
+    }
+
+    #[test]
+    fn motion_non_canonical_sha256_rejected() {
+        let motion = MotionAsset {
+            sha256: "NOT-HEX".into(),
+            ..valid_motion_asset()
+        };
+        let error = motion.validate_structure().unwrap_err();
+        assert_eq!(error.category(), "invalid-motion");
+    }
+
+    #[test]
+    fn motion_zero_dimensions_rejected() {
+        let motion = MotionAsset {
+            width: 0,
+            ..valid_motion_asset()
+        };
+        let error = motion.validate_structure().unwrap_err();
+        assert_eq!(error.category(), "invalid-motion");
+    }
+
+    #[test]
+    fn motion_zero_fps_rejected() {
+        let motion = MotionAsset {
+            fps_numerator: 0,
+            ..valid_motion_asset()
+        };
+        let error = motion.validate_structure().unwrap_err();
+        assert_eq!(error.category(), "invalid-motion");
+    }
+
+    #[test]
+    fn motion_zero_duration_rejected() {
+        let motion = MotionAsset {
+            duration_ms: 0,
+            ..valid_motion_asset()
+        };
+        let error = motion.validate_structure().unwrap_err();
+        assert_eq!(error.category(), "invalid-motion");
+    }
+
+    #[test]
+    fn motion_unknown_codec_rejected() {
+        let motion = MotionAsset {
+            codec: "vp9".into(),
+            ..valid_motion_asset()
+        };
+        let error = motion.validate_structure().unwrap_err();
+        assert_eq!(error.category(), "invalid-motion");
+    }
+
+    #[test]
+    fn motion_unknown_audio_rejected() {
+        let motion = MotionAsset {
+            audio: "aac".into(),
+            ..valid_motion_asset()
+        };
+        let error = motion.validate_structure().unwrap_err();
+        assert_eq!(error.category(), "invalid-motion");
+    }
+
+    #[test]
+    fn motion_valid_asset_accepted() {
+        valid_motion_asset().validate_structure().unwrap();
     }
 }

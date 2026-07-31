@@ -28,6 +28,7 @@ pub enum ProjectErrorCategory {
     MissingExplanationAnnotation,
     AnnotationValidationFailed,
     DuplicateImportWarning,
+    InvalidMotion,
 }
 
 impl ProjectErrorCategory {
@@ -58,6 +59,7 @@ impl ProjectErrorCategory {
             Self::MissingExplanationAnnotation => "missing-explanation-annotation",
             Self::AnnotationValidationFailed => "annotation-validation-failed",
             Self::DuplicateImportWarning => "duplicate-import-warning",
+            Self::InvalidMotion => "invalid-motion",
         }
     }
 }

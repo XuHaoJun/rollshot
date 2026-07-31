@@ -148,11 +148,12 @@ pub(crate) async fn prepare_caption_context_task(
             root,
             expected_revision,
         } => {
-            let loaded =
-                tokio::task::spawn_blocking(move || rollshot_action::project::load_project(&root))
-                    .await
-                    .map_err(|_| "Project load task panicked.".to_string())?
-                    .map_err(|e| e.to_string())?;
+            let loaded = tokio::task::spawn_blocking(move || {
+                rollshot_action::project::load_project(&root, None)
+            })
+            .await
+            .map_err(|_| "Project load task panicked.".to_string())?
+            .map_err(|e| e.to_string())?;
 
             if loaded.manifest.revision != expected_revision {
                 return Err(format!(
@@ -1606,9 +1607,10 @@ pub(crate) mod provider_tests {
             }],
             steps,
             import_warnings: Vec::new(),
+            motion: None,
         };
         create_project(&snapshot, &project_dir).unwrap();
-        let loaded = load_project(&project_dir).unwrap();
+        let loaded = load_project(&project_dir, None).unwrap();
         let projection = ActionGuideContextProjectionV1::from_loaded_project(&loaded).unwrap();
         let revision = projection.revision();
         let digest = projection.digest().to_owned();

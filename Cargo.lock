@@ -6194,6 +6194,7 @@ dependencies = [
 name = "rollshot-action"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-channel",
  "ffmpeg-sidecar",
  "image",
  "rollshot-image-document",
@@ -6396,6 +6397,7 @@ version = "0.1.0"
 dependencies = [
  "iced",
  "iced_layershell",
+ "iced_test",
  "image",
  "ksni",
  "notify-rust",
@@ -6408,6 +6410,8 @@ dependencies = [
  "rollshot-core",
  "rollshot-linux-desktop",
  "rollshot-overlay-core",
+ "serde_json",
+ "tempfile",
  "tracing",
 ]
 

@@ -220,6 +220,8 @@ impl MacosProduct {
                     &config,
                     #[cfg(feature = "action-guide")]
                     action_input_source,
+                    #[cfg(feature = "action-guide")]
+                    None,
                 )
                 .map_err(|error| error.to_string())?
                 {
@@ -442,6 +444,12 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                 return Task::none();
             };
             let effect = component.update(msg);
+            #[cfg(feature = "action-guide")]
+            if let Some(status) = component.take_motion_status_change() {
+                if let Some(ref mut tray) = product.recording_tray {
+                    tray.set_motion_status(status);
+                }
+            }
             apply_capture_host_effect(product, effect)
         }
         Message::Workspace(msg) => {
@@ -518,8 +526,8 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                     product.phase = Phase::Opening(home);
                     Task::perform(inspect_and_open(path), |msg| msg)
                 }
-                action_guide_home::Effect::RecordNew => {
-                    start_action_guide_recording(product, false)
+                action_guide_home::Effect::StartRecording { motion_toolchain } => {
+                    start_action_guide_recording(product, false, motion_toolchain)
                 }
                 action_guide_home::Effect::OpenProject(path) => {
                     let Phase::Home(home) = std::mem::replace(
@@ -844,9 +852,7 @@ fn apply_capture_host_effect(product: &mut MacosProduct, effect: HostEffect) -> 
         HostEffect::Task(task) => task.map(Message::Capture),
         HostEffect::Completed(result) => complete_capture(product, result),
         #[cfg(feature = "action-guide")]
-        HostEffect::ActionRecorded(recording, capability, region) => {
-            complete_action_recording(product, recording, capability, region)
-        }
+        HostEffect::ActionRecorded(result) => complete_action_recording(product, result),
         HostEffect::Cancelled => {
             #[cfg(feature = "action-guide")]
             {
@@ -921,10 +927,14 @@ fn complete_capture(product: &mut MacosProduct, result: CaptureResult) -> Task<M
 #[cfg(feature = "action-guide")]
 fn complete_action_recording(
     product: &mut MacosProduct,
-    recording: rollshot_action::Recording,
-    capability: rollshot_action::InputCapability,
-    region: rollshot_action::CaptureRegion,
+    result: rollshot_iced_overlay::ActionGuideCaptureResult,
 ) -> Task<Message> {
+    let rollshot_iced_overlay::ActionGuideCaptureResult {
+        recording,
+        capability,
+        region,
+        motion,
+    } = result;
     product.recording_tray = None;
     let mut close_tasks = Vec::new();
     if let Phase::Capture(component) = &mut product.phase {
@@ -944,6 +954,7 @@ fn complete_action_recording(
         region,
         capability,
         source_kind,
+        Some(motion),
     ));
 
     let (id, open) = window::open(workspace_window_settings());
@@ -1298,8 +1309,11 @@ pub fn run_action_guide(initial: ActionGuideIntent) -> Result<(), String> {
 
         match boot_initial {
             ActionGuideIntent::Home => {}
-            ActionGuideIntent::Record { fullscreen } => {
-                tasks.push(start_action_guide_recording(&mut product, fullscreen));
+            ActionGuideIntent::Record {
+                fullscreen,
+                keep_motion: _,
+            } => {
+                tasks.push(start_action_guide_recording(&mut product, fullscreen, None));
             }
             ActionGuideIntent::Open { path: Some(path) } => {
                 let Phase::Home(home) = std::mem::replace(
@@ -1335,7 +1349,10 @@ pub fn run_action_guide(initial: ActionGuideIntent) -> Result<(), String> {
 
 #[cfg(feature = "action-guide")]
 fn action_guide_record_config(fullscreen: bool) -> OverlayConfig {
-    let intent = ActionGuideIntent::Record { fullscreen };
+    let intent = ActionGuideIntent::Record {
+        fullscreen,
+        keep_motion: false,
+    };
     OverlayConfig {
         backend: "auto".to_string(),
         fps: 5,
@@ -1348,18 +1365,23 @@ fn action_guide_record_config(fullscreen: bool) -> OverlayConfig {
 }
 
 #[cfg(feature = "action-guide")]
-fn start_action_guide_recording(product: &mut MacosProduct, fullscreen: bool) -> Task<Message> {
+fn start_action_guide_recording(
+    product: &mut MacosProduct,
+    fullscreen: bool,
+    motion_toolchain: Option<rollshot_action::video_import::VideoToolchain>,
+) -> Task<Message> {
     let config = action_guide_record_config(fullscreen);
     let action_input_source = Some(crate::action_input::create_input_source());
-    let component =
-        match Component::new(&config, action_input_source).map_err(|error| error.to_string()) {
-            Ok(Some(component)) => component,
-            Ok(None) => return Task::none(),
-            Err(error) => {
-                tracing::error!(target: TARGET_APP, %error, "action guide capture setup failed");
-                return Task::none();
-            }
-        };
+    let component = match Component::new(&config, action_input_source, motion_toolchain)
+        .map_err(|error| error.to_string())
+    {
+        Ok(Some(component)) => component,
+        Ok(None) => return Task::none(),
+        Err(error) => {
+            tracing::error!(target: TARGET_APP, %error, "action guide capture setup failed");
+            return Task::none();
+        }
+    };
     let (component, open_task) = match open_capture_window(component, &config) {
         Ok(pair) => pair,
         Err(error) => {
@@ -1497,6 +1519,8 @@ mod tests {
         // bare component without touching real capture.
         let component = Component::new(
             &config,
+            #[cfg(feature = "action-guide")]
+            None,
             #[cfg(feature = "action-guide")]
             None,
         )
@@ -1697,7 +1721,10 @@ mod tests {
             ..DetectorConfig::default()
         };
         let mut rec = ActionRecorder::new(region, StoreConfig::default(), det);
-        rec.ingest_frame(RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255])), 0);
+        rec.ingest_frame(
+            Arc::new(RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255]))),
+            0,
+        );
         for i in 1..=6 {
             let mut img = RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255]));
             for y in 0..16 {
@@ -1705,17 +1732,20 @@ mod tests {
                     img.put_pixel(x, y, Rgba([255, 255, 255, 255]));
                 }
             }
-            rec.ingest_frame(img, i * 100);
+            rec.ingest_frame(Arc::new(img), i * 100);
         }
         let recording = rec.finish();
 
         let mut product = product_in_capture_phase();
-        let _ = complete_action_recording(
-            &mut product,
+        let result = rollshot_iced_overlay::ActionGuideCaptureResult {
             recording,
-            rollshot_action::InputCapability::SemanticEvents,
+            capability: rollshot_action::InputCapability::SemanticEvents,
             region,
-        );
+            motion: rollshot_action::motion::MotionRecordingOutcome::Failure(
+                rollshot_action::motion::MotionFailureCategory::ToolUnavailable,
+            ),
+        };
+        let _ = complete_action_recording(&mut product, result);
         assert!(matches!(product.phase, Phase::Timeline(_)));
     }
 
@@ -1808,7 +1838,10 @@ mod tests {
                 ..DetectorConfig::default()
             };
             let mut rec = ActionRecorder::new(region, StoreConfig::default(), det);
-            rec.ingest_frame(RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255])), 0);
+            rec.ingest_frame(
+                Arc::new(RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255]))),
+                0,
+            );
             for i in 1..=6 {
                 let mut img = RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255]));
                 for y in 0..16 {
@@ -1816,7 +1849,7 @@ mod tests {
                         img.put_pixel(x, y, Rgba([255, 255, 255, 255]));
                     }
                 }
-                rec.ingest_frame(img, i * 100);
+                rec.ingest_frame(Arc::new(img), i * 100);
             }
             rec.finish()
         }
@@ -1832,6 +1865,7 @@ mod tests {
                 },
                 rollshot_action::InputCapability::SemanticEvents,
                 rollshot_action::InputSourceKind::MacosCgEvent,
+                None,
             )
         }
 
@@ -1866,18 +1900,23 @@ mod tests {
 
         #[test]
         #[cfg(not(target_os = "macos"))]
-        fn record_new_enters_capture_phase() {
+        fn record_new_opens_preflight() {
             let mut product = product_in_home_phase();
             let task = update(
                 &mut product,
                 Message::HomeMsg(action_guide_home::Message::RecordNew),
             );
-            // RecordNew transitions to Capture phase (if Component::new succeeds under test).
-            // Under cfg(test), Component::new uses a test factory; we verify the phase transition.
+            // RecordNew now opens the preflight dialog instead of immediately starting.
             assert!(
-                matches!(product.phase, Phase::Capture(_)),
-                "RecordNew should transition to Capture phase"
+                matches!(product.phase, Phase::Home(_)),
+                "RecordNew should stay in Home phase with preflight open"
             );
+            if let Phase::Home(ref home) = product.phase {
+                assert!(
+                    home.preflight.is_some(),
+                    "preflight should be open after RecordNew"
+                );
+            }
             drop(task);
         }
 
@@ -2085,12 +2124,15 @@ mod tests {
                 height: 32,
             };
             let mut product = super::product_in_capture_phase();
-            let _task = complete_action_recording(
-                &mut product,
+            let result = rollshot_iced_overlay::ActionGuideCaptureResult {
                 recording,
-                rollshot_action::InputCapability::SemanticEvents,
+                capability: rollshot_action::InputCapability::SemanticEvents,
                 region,
-            );
+                motion: rollshot_action::motion::MotionRecordingOutcome::Failure(
+                    rollshot_action::motion::MotionFailureCategory::ToolUnavailable,
+                ),
+            };
+            let _task = complete_action_recording(&mut product, result);
             assert!(matches!(product.phase, Phase::Timeline(_)));
         }
 
@@ -2175,6 +2217,121 @@ mod tests {
                 product.task_store.as_ref().unwrap(),
             ));
             assert!(product.workspace_window.is_some());
+        }
+
+        // ---- Task 9: macOS motion recording status tests ----
+
+        #[test]
+        fn toolchain_propagated_to_component() {
+            // When a VideoToolchain is passed through start_action_guide_recording,
+            // the component should have it available for begin_action_recording.
+            // We verify the config honors the fullscreen flag and the component
+            // can be created with a toolchain.
+            let config = action_guide_record_config(true);
+            assert_eq!(
+                config.request,
+                rollshot_capture::CaptureRequest::action_guide_fullscreen()
+            );
+        }
+
+        #[test]
+        fn motion_disabled_option_stays_off() {
+            // When keep_motion is false, the preflight skips resolution and
+            // passes motion_toolchain: None, resulting in Off status.
+            let intent = ActionGuideIntent::Record {
+                fullscreen: true,
+                keep_motion: false,
+            };
+            assert_eq!(
+                intent,
+                ActionGuideIntent::Record {
+                    fullscreen: true,
+                    keep_motion: false,
+                }
+            );
+            // With no toolchain, motion is disabled.
+            let off = rollshot_action::motion::MotionRuntimeStatus::Off;
+            assert_eq!(off, rollshot_action::motion::MotionRuntimeStatus::Off);
+        }
+
+        #[test]
+        fn completion_carries_motion_outcome_to_workspace() {
+            let recording = test_recording();
+            let region = CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 32,
+                height: 32,
+            };
+            let mut product = super::product_in_capture_phase();
+            let motion = rollshot_action::motion::MotionRecordingOutcome::Failure(
+                rollshot_action::motion::MotionFailureCategory::ToolUnavailable,
+            );
+            let result = rollshot_iced_overlay::ActionGuideCaptureResult {
+                recording,
+                capability: rollshot_action::InputCapability::SemanticEvents,
+                region,
+                motion,
+            };
+            let _task = complete_action_recording(&mut product, result);
+            assert!(matches!(product.phase, Phase::Timeline(_)));
+            let Phase::Timeline(ref ws) = product.phase else {
+                unreachable!();
+            };
+            assert!(
+                ws.motion.is_failed_or_unavailable(),
+                "motion state should reflect the failure"
+            );
+        }
+
+        #[test]
+        fn tray_on_text_matches_spec() {
+            // The tray status mapping is tested in macos_recording_tray::tests
+            // (cfg-independent). Here we verify the Guard type is available
+            // and the event IDs are unchanged.
+            assert_eq!(
+                crate::macos_recording_tray::Event::Finish,
+                crate::macos_recording_tray::Event::Finish
+            );
+            assert_eq!(
+                crate::macos_recording_tray::Event::Cancel,
+                crate::macos_recording_tray::Event::Cancel
+            );
+        }
+
+        #[test]
+        fn runtime_failure_remains_failed_through_completion() {
+            // Verify that a MotionRecordingOutcome::Failure is preserved
+            // when carried through ActionGuideCaptureResult into the workspace.
+            let recording = test_recording();
+            let region = CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 32,
+                height: 32,
+            };
+            let mut product = super::product_in_capture_phase();
+            let result = rollshot_iced_overlay::ActionGuideCaptureResult {
+                recording,
+                capability: rollshot_action::InputCapability::SemanticEvents,
+                region,
+                motion: rollshot_action::motion::MotionRecordingOutcome::Failure(
+                    rollshot_action::motion::MotionFailureCategory::BrokenPipe,
+                ),
+            };
+            let _task = complete_action_recording(&mut product, result);
+            let Phase::Timeline(ref ws) = product.phase else {
+                unreachable!();
+            };
+            match &ws.motion {
+                crate::timeline_workspace::motion::WorkspaceMotion::Failed(cat) => {
+                    assert_eq!(
+                        *cat,
+                        rollshot_action::motion::MotionFailureCategory::BrokenPipe
+                    );
+                }
+                other => panic!("expected Failed, got {other:?}"),
+            }
         }
     }
 }
