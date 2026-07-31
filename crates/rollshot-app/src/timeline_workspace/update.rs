@@ -4238,8 +4238,8 @@ fn handle_save_worker_finished(
         super::update::SaveWorkerOutcome::ExistingSaved { revision } => {
             state.save_state = super::ProjectSaveState::Clean;
             state.last_save_error = None;
-            // Motion was promoted into the project tree; drop the session clone.
-            let _ = state.motion.take_ready();
+            // Keep motion state as Ready so the user can export after save.
+            // The session scratch cleanup happens at workspace close via RAII.
             if let Some(ProjectSession::Saved { base_revision, .. }) = &mut state.project_session {
                 *base_revision = revision;
             }
@@ -4257,8 +4257,8 @@ fn handle_save_worker_finished(
         } => {
             state.save_state = super::ProjectSaveState::Clean;
             state.last_save_error = None;
-            // Motion was promoted into the project tree; drop the session clone.
-            let _ = state.motion.take_ready();
+            // Keep motion state as Ready so the user can export after save.
+            // The session scratch cleanup happens at workspace close via RAII.
             let guard = state
                 .pending_writer_guard
                 .lock()
@@ -4304,8 +4304,8 @@ fn handle_save_worker_finished(
         } => {
             state.save_state = super::ProjectSaveState::Clean;
             state.last_save_error = None;
-            // Motion was promoted into the project tree; drop the session clone.
-            let _ = state.motion.take_ready();
+            // Keep motion state as Ready so the user can export after save.
+            // The session scratch cleanup happens at workspace close via RAII.
             // Rebuild frame source from saved manifest.
             let loaded = rollshot_action::project::LoadedProject {
                 root: root.clone(),
