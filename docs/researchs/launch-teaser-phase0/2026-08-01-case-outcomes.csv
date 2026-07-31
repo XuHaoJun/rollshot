@@ -1,0 +1,5 @@
+case_id,cohort,intake_status,ceiling_status,constrained_status,terminal_category,case_specific,privacy_or_authority_violation,story_critical_gap,final_case_success
+rs-01,rollshot,authorized,PASS,PASS,PASS,true,false,true,true
+rs-02,rollshot,authorized,PASS,PASS,PASS,true,false,false,true
+ext-01,external,authorized,PASS,PASS,PASS,true,false,false,true
+ext-02,external,authorized,PASS,PASS,PASS,true,false,false,true

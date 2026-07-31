@@ -1,0 +1,3 @@
+case_id,story_beat_id,requested_effect,allowed_operation_available,gap_class,story_blocked,hyperframes_capability_used
+rs-01,beat-1-provider-config,motion source video,placeholder color bars,placeholder_videos,true,false
+rs-01,beat-4-accept-reject,audio track for video,no audio asset available,no_audio_track,true,false
