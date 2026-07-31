@@ -70,7 +70,10 @@ mod macos_window;
 mod recording_tray;
 pub mod region;
 
-#[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "action-guide"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    feature = "action-guide"
+))]
 pub use driver::ActionGuideCaptureResult;
 
 /// Run the blocking capture overlay, blocking the calling thread until the user
