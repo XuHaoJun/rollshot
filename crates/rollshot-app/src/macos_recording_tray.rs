@@ -69,8 +69,8 @@ impl Guard {
             return;
         }
         self.status = new;
-        self.tray.set_title(Some(&status_title(new)));
-        self.tray.set_tooltip(Some(&status_tooltip(new)));
+        let _ = self.tray.set_title(Some(&status_title(new)));
+        let _ = self.tray.set_tooltip(Some(&status_tooltip(new)));
     }
 }
 
