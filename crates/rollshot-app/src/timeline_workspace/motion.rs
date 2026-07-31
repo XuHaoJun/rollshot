@@ -80,8 +80,9 @@ impl WorkspaceMotion {
     }
 
     /// Consume and return the validated asset if `Ready`, leaving `None` in
-    /// its place. Used after a successful project save to release the
-    /// session-owned clone (the promoted copy is now project-owned).
+    /// its place. Used by callers that need to explicitly transfer ownership
+    /// of the session asset (e.g. custom cleanup paths).
+    #[allow(dead_code)] // retained for ownership-transfer use cases
     pub(crate) fn take_ready(&mut self) -> Option<ValidatedMotionAsset> {
         let prev = std::mem::replace(self, Self::None);
         match prev {

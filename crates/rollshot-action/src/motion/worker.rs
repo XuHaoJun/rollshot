@@ -186,11 +186,11 @@ impl MotionRecorder {
             .spawn()
             .map_err(|_| MotionFailureCategory::Spawn)?;
 
-        // Drain stderr on a background thread (discard bytes).
+        // Drain stderr on a background thread (discard all bytes until EOF).
         if let Some(stderr) = child.stderr.take() {
             std::thread::spawn(move || {
-                use std::io::Read;
-                let _ = std::io::Read::take(stderr, 1024 * 1024).read_to_end(&mut Vec::new());
+                let mut stderr = stderr;
+                let _ = std::io::copy(&mut stderr, &mut std::io::sink());
             });
         }
 

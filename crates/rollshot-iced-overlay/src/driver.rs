@@ -1073,7 +1073,7 @@ mod action_tests {
         };
         let toolchain = rollshot_action::video_import::VideoToolchain {
             ffmpeg: ffmpeg.clone(),
-            ffprobe: ffmpeg,
+            ffprobe: std::path::PathBuf::from("ffprobe"),
         };
         let region = CaptureRegion {
             x: 0,
@@ -1182,7 +1182,7 @@ mod action_tests {
         };
         let toolchain = rollshot_action::video_import::VideoToolchain {
             ffmpeg: ffmpeg.clone(),
-            ffprobe: ffmpeg,
+            ffprobe: std::path::PathBuf::from("ffprobe"),
         };
         let region = CaptureRegion {
             x: 0,
@@ -1236,7 +1236,7 @@ mod action_tests {
         };
         let toolchain = rollshot_action::video_import::VideoToolchain {
             ffmpeg: ffmpeg.clone(),
-            ffprobe: ffmpeg,
+            ffprobe: std::path::PathBuf::from("ffprobe"),
         };
         let region = CaptureRegion {
             x: 0,

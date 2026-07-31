@@ -567,7 +567,6 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                                 ))
                             });
                         let tc = ACTION_TOOLCHAIN_SLOT.lock().unwrap().take();
-                        let has_motion = tc.is_some();
                         let options = crate::driver::ActionGuideRecordingOptions {
                             motion_toolchain: tc,
                         };
