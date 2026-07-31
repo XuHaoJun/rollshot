@@ -233,12 +233,12 @@ pub(crate) enum SaveWorkerOutcome {
     NewWritable {
         root: PathBuf,
         revision: u64,
-        manifest: rollshot_action::project::ProjectManifestV2,
+        manifest: rollshot_action::project::ProjectManifestV3,
     },
     NewCommittedReadOnly {
         root: PathBuf,
         revision: u64,
-        manifest: rollshot_action::project::ProjectManifestV2,
+        manifest: rollshot_action::project::ProjectManifestV3,
         category: &'static str,
     },
     Failed(String),

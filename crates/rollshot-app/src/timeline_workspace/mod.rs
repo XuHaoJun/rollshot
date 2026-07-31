@@ -1776,8 +1776,8 @@ mod tests {
                     super::super::update::SaveWorkerOutcome::NewCommittedReadOnly {
                         root: std::path::PathBuf::from("/tmp/test"),
                         revision: 1,
-                        manifest: rollshot_action::project::ProjectManifestV2 {
-                            schema_version: 2,
+                        manifest: rollshot_action::project::ProjectManifestV3 {
+                            schema_version: 3,
                             revision: 1,
                             title: "Test Guide".into(),
                             capture_region: super::region_32(),
@@ -1787,6 +1787,7 @@ mod tests {
                             frames: Vec::new(),
                             steps: Vec::new(),
                             import_warnings: Vec::new(),
+                            motion: None,
                         },
                         category: "post_commit_lock_race",
                     },
@@ -1807,8 +1808,8 @@ mod tests {
                 Message::SaveWorkerFinished(super::super::update::SaveWorkerOutcome::NewWritable {
                     root: root.clone(),
                     revision: 1,
-                    manifest: rollshot_action::project::ProjectManifestV2 {
-                        schema_version: 2,
+                    manifest: rollshot_action::project::ProjectManifestV3 {
+                        schema_version: 3,
                         revision: 1,
                         title: "Test Guide".into(),
                         capture_region: super::region_32(),
@@ -1818,6 +1819,7 @@ mod tests {
                         frames: Vec::new(),
                         steps: Vec::new(),
                         import_warnings: Vec::new(),
+                        motion: None,
                     },
                 }),
             );
@@ -2629,8 +2631,8 @@ mod tests {
         }
 
         fn complete_first_save(ws: &mut TimelineWorkspace) {
-            let manifest = rollshot_action::project::ProjectManifestV2 {
-                schema_version: 2,
+            let manifest = rollshot_action::project::ProjectManifestV3 {
+                schema_version: 3,
                 revision: 1,
                 title: ws.guide.title().to_string(),
                 capture_region: ws.region,
@@ -2666,6 +2668,7 @@ mod tests {
                     })
                     .collect(),
                 import_warnings: ws.import_warnings.clone(),
+                motion: None,
             };
             super::super::update::update(
                 ws,
@@ -2767,15 +2770,15 @@ mod tests {
         #[test]
         fn build_snapshot_carries_import_warnings() {
             use rollshot_action::project::{
-                EnabledOutputs, ProjectFrame, ProjectManifestV2, ProjectStep, ProjectStepId,
+                EnabledOutputs, ProjectFrame, ProjectManifestV3, ProjectStep, ProjectStepId,
             };
             use rollshot_action::{
                 CandidateKind, CaptureRegion, DetectReason, ImportWarning, InputCapability,
                 InputSourceKind,
             };
 
-            let manifest = ProjectManifestV2 {
-                schema_version: 2,
+            let manifest = ProjectManifestV3 {
+                schema_version: 3,
                 revision: 1,
                 title: "Imported Guide".into(),
                 capture_region: CaptureRegion {
@@ -2809,10 +2812,12 @@ mod tests {
                     annotations: None,
                 }],
                 import_warnings: vec![ImportWarning::NoVisualChangesDetected],
+                motion: None,
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root: std::path::PathBuf::from("/tmp/test-imported"),
                 manifest,
+                motion: rollshot_action::project::MotionAssetLoad::None,
             };
             let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
             let mut ws = crate::timeline_workspace::project::from_loaded_project(
@@ -2831,15 +2836,15 @@ mod tests {
         #[test]
         fn reopen_preserves_import_warnings() {
             use rollshot_action::project::{
-                EnabledOutputs, ProjectFrame, ProjectManifestV2, ProjectStep, ProjectStepId,
+                EnabledOutputs, ProjectFrame, ProjectManifestV3, ProjectStep, ProjectStepId,
             };
             use rollshot_action::{
                 CandidateKind, CaptureRegion, DetectReason, ImportWarning, InputCapability,
                 InputSourceKind,
             };
 
-            let manifest = ProjectManifestV2 {
-                schema_version: 2,
+            let manifest = ProjectManifestV3 {
+                schema_version: 3,
                 revision: 1,
                 title: "Imported Guide".into(),
                 capture_region: CaptureRegion {
@@ -2876,10 +2881,12 @@ mod tests {
                     ImportWarning::NoVisualChangesDetected,
                     ImportWarning::IntermediateChangesReduced,
                 ],
+                motion: None,
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root: std::path::PathBuf::from("/tmp/test-imported"),
                 manifest,
+                motion: rollshot_action::project::MotionAssetLoad::None,
             };
             let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
             let ws = crate::timeline_workspace::project::from_loaded_project(

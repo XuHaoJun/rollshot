@@ -252,7 +252,7 @@ fn round_trip_full_public_api_contract() {
 
     // ---- Close and load ----
     drop(commit1);
-    let loaded1 = load_project(&root).unwrap();
+    let loaded1 = load_project(&root, None).unwrap();
     assert_eq!(loaded1.manifest.revision, 1);
     assert_eq!(loaded1.manifest.title, "E2E Guide");
     assert_eq!(loaded1.manifest.steps.len(), 2);
@@ -354,7 +354,7 @@ fn round_trip_full_public_api_contract() {
     assert_eq!(commit2.manifest.steps[0].nearby, vec![1, 2]);
 
     // ---- Load again ----
-    let loaded2 = load_project(&root).unwrap();
+    let loaded2 = load_project(&root, None).unwrap();
     assert_eq!(loaded2.manifest.revision, 2);
     assert_eq!(loaded2.manifest.title, "E2E Guide Updated");
     assert_eq!(
@@ -411,7 +411,7 @@ fn setup_project(root: &Path) -> ProjectCommit {
 fn load_missing_directory() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("does-not-exist");
-    let err = load_project(&missing).unwrap_err();
+    let err = load_project(&missing, None).unwrap_err();
     assert_eq!(err.category(), "io");
 }
 
@@ -420,7 +420,7 @@ fn load_directory_without_project_json() {
     let dir = tempfile::tempdir().unwrap();
     let empty = dir.path().join("empty-dir");
     std::fs::create_dir_all(&empty).unwrap();
-    let err = load_project(&empty).unwrap_err();
+    let err = load_project(&empty, None).unwrap_err();
     assert_eq!(err.category(), "io");
 }
 
@@ -435,7 +435,7 @@ fn load_truncated_project_json() {
     let full = std::fs::read(&path).unwrap();
     std::fs::write(&path, &full[..10]).unwrap();
 
-    let err = load_project(&root).unwrap_err();
+    let err = load_project(&root, None).unwrap_err();
     assert_eq!(err.category(), "invalid-json");
 }
 
@@ -453,7 +453,7 @@ fn load_unknown_field_in_project_json() {
     )
     .unwrap();
 
-    let err = load_project(&root).unwrap_err();
+    let err = load_project(&root, None).unwrap_err();
     assert_eq!(err.category(), "invalid-json");
 }
 
@@ -472,7 +472,7 @@ fn load_mutated_png_byte() {
     }
     std::fs::write(&path, &data).unwrap();
 
-    let err = load_project(&root).unwrap_err();
+    let err = load_project(&root, None).unwrap_err();
     assert_eq!(err.category(), "invalid-asset");
 }
 
@@ -486,7 +486,7 @@ fn load_png_replaced_with_invalid_header() {
     let path = root.join("assets/frames").join(format!("{sha}.png"));
     std::fs::write(&path, b"this is not a PNG file at all").unwrap();
 
-    let err = load_project(&root).unwrap_err();
+    let err = load_project(&root, None).unwrap_err();
     // Could be invalid-asset or io depending on how open_project_asset fails
     assert!(
         err.category() == "invalid-asset" || err.category() == "io",
@@ -506,7 +506,7 @@ fn load_assets_dir_replaced_with_symlink() {
     std::fs::remove_dir_all(root.join("assets")).unwrap();
     std::os::unix::fs::symlink(&external, root.join("assets")).unwrap();
 
-    let err = load_project(&root).unwrap_err();
+    let err = load_project(&root, None).unwrap_err();
     // open_project_asset uses NOFOLLOW at every level, so a symlink produces
     // ELOOP → io unconditionally (never reaches the invalid-asset stat check).
     assert_eq!(err.category(), "io");
@@ -523,7 +523,7 @@ fn load_frames_dir_replaced_with_symlink() {
     std::fs::remove_dir_all(root.join("assets/frames")).unwrap();
     std::os::unix::fs::symlink(&external, root.join("assets/frames")).unwrap();
 
-    let err = load_project(&root).unwrap_err();
+    let err = load_project(&root, None).unwrap_err();
     // open_project_asset uses NOFOLLOW at every level, so a symlink produces
     // ELOOP → io unconditionally (never reaches the invalid-asset stat check).
     assert_eq!(err.category(), "io");
@@ -542,7 +542,7 @@ fn load_png_replaced_with_symlink() {
     std::fs::remove_file(&asset_path).unwrap();
     std::os::unix::fs::symlink(&target, &asset_path).unwrap();
 
-    let err = load_project(&root).unwrap_err();
+    let err = load_project(&root, None).unwrap_err();
     // open_project_asset uses NOFOLLOW at every level, so a symlink produces
     // ELOOP → io unconditionally (never reaches the invalid-asset stat check).
     assert_eq!(err.category(), "io");
@@ -558,7 +558,7 @@ fn load_removed_referenced_png() {
     let asset_path = root.join("assets/frames").join(format!("{sha}.png"));
     std::fs::remove_file(&asset_path).unwrap();
 
-    let err = load_project(&root).unwrap_err();
+    let err = load_project(&root, None).unwrap_err();
     assert_eq!(err.category(), "io");
 }
 
@@ -594,7 +594,7 @@ fn save_project_as_rejects_pre_created_destination() {
     assert_eq!(err.category(), "destination-exists");
 
     // Original project untouched (still revision 1)
-    let loaded = load_project(&root).unwrap();
+    let loaded = load_project(&root, None).unwrap();
     assert_eq!(loaded.manifest.revision, 1);
 }
 
@@ -671,7 +671,7 @@ fn save_rejects_changed_base_revision() {
     assert_eq!(err.category(), "revision-conflict");
 
     // Disk untouched — still revision 99
-    let disk = load_project(&root).unwrap();
+    let disk = load_project(&root, None).unwrap();
     assert_eq!(disk.manifest.revision, 99);
 }
 
@@ -689,7 +689,7 @@ fn load_rejects_unsupported_schema_version() {
     )
     .unwrap();
 
-    let err = load_project(&root).unwrap_err();
+    let err = load_project(&root, None).unwrap_err();
     assert_eq!(err.category(), "unsupported-version");
 }
 
@@ -708,6 +708,6 @@ fn load_rejects_non_contiguous_step_order() {
     )
     .unwrap();
 
-    let err = load_project(&root).unwrap_err();
+    let err = load_project(&root, None).unwrap_err();
     assert_eq!(err.category(), "non-contiguous-order");
 }

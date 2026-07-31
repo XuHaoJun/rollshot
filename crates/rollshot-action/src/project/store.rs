@@ -22,8 +22,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::assets::{inspect_png_asset, materialize_asset};
 use super::error::ProjectError;
 use super::model::{
-    LoadedProject, ProjectCommit, ProjectFrame, ProjectManifestV1, ProjectManifestV2,
-    ProjectSnapshot, PROJECT_SCHEMA_VERSION,
+    LoadedProject, MotionAssetLoad, ProjectCommit, ProjectFrame, ProjectManifestV1,
+    ProjectManifestV2, ProjectManifestV3, ProjectSnapshot, PROJECT_SCHEMA_VERSION,
 };
 use super::validate::{validate_manifest_structure, validate_snapshot_structure};
 use crate::models::{DegradedReason, InputSourceKind};
@@ -55,7 +55,7 @@ impl Drop for TempGuard {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn read_manifest(root: &Path) -> Result<ProjectManifestV2, ProjectError> {
+fn read_manifest(root: &Path) -> Result<ProjectManifestV3, ProjectError> {
     let manifest_path = root.join("project.json");
     let bytes = std::fs::read(&manifest_path).map_err(|e| ProjectError::Io {
         path: manifest_path.clone(),
@@ -80,20 +80,21 @@ fn read_manifest(root: &Path) -> Result<ProjectManifestV2, ProjectError> {
             )
         })?;
 
-    let manifest: ProjectManifestV2 = match schema_version {
+    let manifest: ProjectManifestV3 = match schema_version {
         1 => {
             let v1: ProjectManifestV1 =
                 serde_json::from_value(raw).map_err(|e| ProjectError::InvalidJson {
-                    path: manifest_path,
+                    path: manifest_path.clone(),
                     source: e,
                 })?;
             validate_v1_no_v2_values(&v1)?;
-            v1.into()
+            let v2: ProjectManifestV2 = v1.into();
+            v2.into()
         }
         2 => {
             let v2: ProjectManifestV2 =
                 serde_json::from_value(raw).map_err(|e| ProjectError::InvalidJson {
-                    path: manifest_path,
+                    path: manifest_path.clone(),
                     source: e,
                 })?;
             if v2.schema_version != 2 {
@@ -101,7 +102,20 @@ fn read_manifest(root: &Path) -> Result<ProjectManifestV2, ProjectError> {
                     version: v2.schema_version,
                 });
             }
-            v2
+            v2.into()
+        }
+        3 => {
+            let v3: ProjectManifestV3 =
+                serde_json::from_value(raw).map_err(|e| ProjectError::InvalidJson {
+                    path: manifest_path,
+                    source: e,
+                })?;
+            if v3.schema_version != 3 {
+                return Err(ProjectError::UnsupportedVersion {
+                    version: v3.schema_version,
+                });
+            }
+            v3
         }
         other => {
             return Err(ProjectError::UnsupportedVersion { version: other });
@@ -192,7 +206,7 @@ pub(crate) fn write_json_atomic(
     Ok(())
 }
 
-fn write_manifest_atomic(root: &Path, manifest: &ProjectManifestV2) -> Result<(), ProjectError> {
+fn write_manifest_atomic(root: &Path, manifest: &ProjectManifestV3) -> Result<(), ProjectError> {
     write_json_atomic(root, "project.json", manifest)
 }
 
@@ -287,7 +301,7 @@ fn commit_new_project(
 
     let frames = materialize_all(&temp_root, snapshot)?;
 
-    let manifest = ProjectManifestV2 {
+    let manifest = ProjectManifestV3 {
         schema_version: PROJECT_SCHEMA_VERSION,
         revision: 1,
         title: snapshot.title.clone(),
@@ -298,6 +312,7 @@ fn commit_new_project(
         frames,
         steps: snapshot.steps.clone(),
         import_warnings: snapshot.import_warnings.clone(),
+        motion: None,
     };
 
     validate_manifest_structure(&manifest)?;
@@ -365,7 +380,7 @@ pub fn save_project(
         source: std::io::Error::other("revision overflow"),
     })?;
 
-    let manifest = ProjectManifestV2 {
+    let manifest = ProjectManifestV3 {
         schema_version: PROJECT_SCHEMA_VERSION,
         revision: new_revision,
         title: snapshot.title.clone(),
@@ -376,6 +391,7 @@ pub fn save_project(
         frames,
         steps: snapshot.steps.clone(),
         import_warnings: snapshot.import_warnings.clone(),
+        motion: None,
     };
 
     validate_manifest_structure(&manifest)?;
@@ -388,12 +404,117 @@ pub fn save_project(
 }
 
 /// Load a project from disk, validating manifest and all referenced assets.
-pub fn load_project(project_root: &Path) -> Result<LoadedProject, ProjectError> {
+///
+/// When `toolchain` is `Some`, motion asset probe validation runs against
+/// the recording file. Motion asset failures are captured as
+/// `MotionAssetLoad::Unavailable` without failing the entire project load.
+pub fn load_project(
+    project_root: &Path,
+    toolchain: Option<&crate::video_import::VideoToolchain>,
+) -> Result<LoadedProject, ProjectError> {
     let manifest = read_manifest(project_root)?;
+
+    let motion = match manifest.motion {
+        None => MotionAssetLoad::None,
+        Some(ref asset) => {
+            load_motion_asset(project_root, asset, manifest.capture_region.width, manifest.capture_region.height, toolchain)
+        }
+    };
+
     Ok(LoadedProject {
         root: project_root.to_path_buf(),
         manifest,
+        motion,
     })
+}
+
+/// Fail-closed motion asset loading. Never propagates errors upward —
+/// maps every failure into `MotionAssetLoad::Unavailable`.
+fn load_motion_asset(
+    project_root: &Path,
+    asset: &super::model::MotionAsset,
+    expected_width: u32,
+    expected_height: u32,
+    toolchain: Option<&crate::video_import::VideoToolchain>,
+) -> MotionAssetLoad {
+    use crate::motion::error::MotionFailureCategory;
+    use crate::motion::probe::probe_motion;
+
+    // Path is already validated as canonical by structure validation.
+    let file_path = project_root.join(&asset.relative_path);
+
+    // Check file exists and is a regular file (no symlinks).
+    let meta = match std::fs::symlink_metadata(&file_path) {
+        Ok(m) => m,
+        Err(_) => return MotionAssetLoad::Unavailable(MotionFailureCategory::Filesystem),
+    };
+    if !meta.is_file() {
+        return MotionAssetLoad::Unavailable(MotionFailureCategory::Filesystem);
+    }
+
+    // Hash and compare.
+    use sha2::Digest;
+    let bytes = match std::fs::read(&file_path) {
+        Ok(b) => b,
+        Err(_) => return MotionAssetLoad::Unavailable(MotionFailureCategory::Filesystem),
+    };
+    let hash = sha2::Sha256::digest(&bytes);
+    let computed = format!("{hash:x}");
+    if computed != asset.sha256 {
+        return MotionAssetLoad::Unavailable(MotionFailureCategory::Digest);
+    }
+
+    // Probe validation when a toolchain is available.
+    if let Some(tc) = toolchain {
+        match probe_motion(&file_path, tc, expected_width, expected_height) {
+            Ok(_meta) => {
+                match create_scratch_asset(&file_path, &_meta) {
+                    Ok(validated) => MotionAssetLoad::Available(validated),
+                    Err(_) => MotionAssetLoad::Unavailable(MotionFailureCategory::Filesystem),
+                }
+            }
+            Err(category) => MotionAssetLoad::Unavailable(category),
+        }
+    } else {
+        // No toolchain — accept the asset based on structural validation alone.
+        use crate::motion::probe::{MotionAudio, MotionCodec, MotionMetadata};
+        let meta = MotionMetadata {
+            sha256: asset.sha256.clone(),
+            duration_ms: asset.duration_ms,
+            width: asset.width,
+            height: asset.height,
+            fps_numerator: asset.fps_numerator,
+            fps_denominator: asset.fps_denominator,
+            codec: MotionCodec::H264,
+            audio: MotionAudio::None,
+        };
+        match create_scratch_asset(&file_path, &meta) {
+            Ok(validated) => MotionAssetLoad::Available(validated),
+            Err(_) => MotionAssetLoad::Unavailable(MotionFailureCategory::Filesystem),
+        }
+    }
+}
+
+/// Create a scratch directory with a copy of the motion asset.
+/// The scratch directory is automatically cleaned up when the
+/// `ValidatedMotionAsset` is dropped.
+fn create_scratch_asset(
+    source: &Path,
+    meta: &crate::motion::probe::MotionMetadata,
+) -> Result<crate::motion::asset::ValidatedMotionAsset, std::io::Error> {
+    let pid = std::process::id();
+    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let scratch_dir = std::env::temp_dir().join(format!(
+        "rollshot-motion-{pid}-{counter}"
+    ));
+    std::fs::create_dir_all(&scratch_dir)?;
+    let scratch_file = scratch_dir.join("recording.mp4");
+    std::fs::copy(source, &scratch_file)?;
+    Ok(crate::motion::asset::ValidatedMotionAsset::new(
+        meta.clone(),
+        scratch_file,
+        scratch_dir,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -429,6 +550,7 @@ mod tests {
     use crate::models::{
         CandidateKind, CaptureRegion, DetectReason, InputCapability, InputSourceKind,
     };
+    use crate::motion::error::MotionFailureCategory;
 
     fn pixel_image(w: u32, h: u32) -> Arc<RgbaImage> {
         Arc::new(RgbaImage::from_pixel(w, h, Rgba([10, 20, 30, 255])))
@@ -536,7 +658,7 @@ mod tests {
         let _ = create_project(&snapshot(None), &root);
 
         // Verify original project is intact
-        let loaded = load_project(&root).unwrap();
+        let loaded = load_project(&root, None).unwrap();
         assert_eq!(loaded.manifest.revision, 1);
     }
 
@@ -593,7 +715,7 @@ mod tests {
         assert_eq!(second.manifest.title, "Updated Guide");
 
         // Verify on disk
-        let loaded = load_project(&root).unwrap();
+        let loaded = load_project(&root, None).unwrap();
         assert_eq!(loaded.manifest.revision, 2);
     }
 
@@ -622,7 +744,7 @@ mod tests {
         ));
 
         // Disk should still have revision 2 (untouched)
-        let disk: ProjectManifestV2 =
+        let disk: ProjectManifestV3 =
             serde_json::from_slice(&std::fs::read(root.join("project.json")).unwrap()).unwrap();
         assert_eq!(disk.revision, 2);
     }
@@ -672,7 +794,7 @@ mod tests {
         let root = dir.path().join("guide.rollshot-guide");
         create_project(&snapshot(None), &root).unwrap();
 
-        let loaded = load_project(&root).unwrap();
+        let loaded = load_project(&root, None).unwrap();
         assert_eq!(loaded.manifest.revision, 1);
         assert_eq!(loaded.manifest.title, "Test Guide");
         assert_eq!(loaded.root, root);
@@ -696,7 +818,7 @@ mod tests {
             .join(format!("{}.png", encoded.sha256));
         std::fs::remove_file(&asset_path).unwrap();
 
-        let error = load_project(&root).unwrap_err();
+        let error = load_project(&root, None).unwrap_err();
         assert!(matches!(error, ProjectError::Io { .. }));
     }
 
@@ -723,7 +845,7 @@ mod tests {
         }
         std::fs::write(&asset_path, &data).unwrap();
 
-        let error = load_project(&root).unwrap_err();
+        let error = load_project(&root, None).unwrap_err();
         assert!(matches!(error, ProjectError::InvalidAsset { .. }));
     }
 
@@ -749,7 +871,7 @@ mod tests {
         std::fs::remove_file(&asset_path).unwrap();
         std::os::unix::fs::symlink(&target, &asset_path).unwrap();
 
-        let error = load_project(&root).unwrap_err();
+        let error = load_project(&root, None).unwrap_err();
         assert!(
             matches!(error, ProjectError::InvalidAsset { .. })
                 || matches!(error, ProjectError::Io { .. }),
@@ -774,7 +896,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = load_project(&root).unwrap_err();
+        let error = load_project(&root, None).unwrap_err();
         assert!(matches!(error, ProjectError::InvalidJson { .. }));
     }
 
@@ -793,7 +915,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = load_project(&root).unwrap_err();
+        let error = load_project(&root, None).unwrap_err();
         assert_eq!(error.category(), "unsupported-version");
     }
 
@@ -899,7 +1021,7 @@ mod tests {
         assert_eq!(commit3.manifest.revision, 3);
 
         // Load and verify
-        let loaded = load_project(&root).unwrap();
+        let loaded = load_project(&root, None).unwrap();
         assert_eq!(loaded.manifest.revision, 3);
         assert_eq!(loaded.manifest.title, "Test Guide");
     }
@@ -1037,16 +1159,17 @@ mod tests {
         )
         .unwrap();
 
-        load_project(&root)
+        load_project(&root, None)
     }
 
     #[test]
-    fn version_one_manifest_loads_as_version_two_without_warnings() {
+    fn version_one_manifest_loads_as_version_three_without_warnings() {
         let guard = write_v1_project_fixture();
         let root = guard.path().join("guide.rollshot-guide");
-        let loaded = load_project(&root).unwrap();
-        assert_eq!(loaded.manifest.schema_version, 2);
+        let loaded = load_project(&root, None).unwrap();
+        assert_eq!(loaded.manifest.schema_version, 3);
         assert!(loaded.manifest.import_warnings.is_empty());
+        assert!(loaded.manifest.motion.is_none());
     }
 
     #[test]
@@ -1088,5 +1211,566 @@ mod tests {
         let root = dir.path().join("guide.rollshot-guide");
         let error = create_project(&snapshot, &root).unwrap_err();
         assert_eq!(error.category(), "duplicate-import-warning");
+    }
+
+    // ---- Schema v3 migration RED tests ----
+
+    use super::super::model::{MotionAsset, MotionAssetLoad, ProjectManifestV3};
+
+    fn motion_asset_json() -> serde_json::Value {
+        serde_json::json!({
+            "relative_path": "assets/motion/recording.mp4",
+            "sha256": "a".repeat(64),
+            "duration_ms": 1000,
+            "width": 1920,
+            "height": 1080,
+            "fps_numerator": 30,
+            "fps_denominator": 1,
+            "codec": "h264",
+            "audio": "none"
+        })
+    }
+
+    #[test]
+    fn schema1_loads_to_schema3_with_motion_none() {
+        let guard = write_v1_project_fixture();
+        let root = guard.path().join("guide.rollshot-guide");
+        let loaded = load_project(&root, None).unwrap();
+        assert_eq!(loaded.manifest.schema_version, 3);
+        assert!(loaded.manifest.motion.is_none());
+        assert!(matches!(loaded.motion, MotionAssetLoad::None));
+    }
+
+    #[test]
+    fn schema2_loads_to_schema3_with_motion_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        let commit = create_project(&snapshot(None), &root).unwrap();
+        assert_eq!(commit.manifest.schema_version, 3);
+
+        // Overwrite with schema 2 JSON
+        let mut val = serde_json::to_value(&commit.manifest).unwrap();
+        val["schema_version"] = serde_json::json!(2);
+        // Remove motion field for v2
+        val.as_object_mut().unwrap().remove("motion");
+        std::fs::write(
+            root.join("project.json"),
+            serde_json::to_vec_pretty(&val).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = load_project(&root, None).unwrap();
+        assert_eq!(loaded.manifest.schema_version, 3);
+        assert!(loaded.manifest.motion.is_none());
+    }
+
+    #[test]
+    fn schema3_round_trips_motion_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        create_project(&snapshot(None), &root).unwrap();
+
+        // Write schema 3 with motion
+        let mut val: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("project.json")).unwrap()).unwrap();
+        val["motion"] = motion_asset_json();
+        std::fs::write(
+            root.join("project.json"),
+            serde_json::to_vec_pretty(&val).unwrap(),
+        )
+        .unwrap();
+
+        // Write the motion file
+        std::fs::create_dir_all(root.join("assets/motion")).unwrap();
+        std::fs::write(root.join("assets/motion/recording.mp4"), b"fake mp4 content").unwrap();
+
+        // Update sha256 to match
+        use sha2::Digest;
+        let bytes = std::fs::read(root.join("assets/motion/recording.mp4")).unwrap();
+        let hash = sha2::Sha256::digest(&bytes);
+        val["motion"]["sha256"] = serde_json::json!(format!("{hash:x}"));
+        std::fs::write(
+            root.join("project.json"),
+            serde_json::to_vec_pretty(&val).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = load_project(&root, None).unwrap();
+        let motion = loaded.manifest.motion.as_ref().unwrap();
+        assert_eq!(motion.relative_path, "assets/motion/recording.mp4");
+        assert_eq!(motion.duration_ms, 1000);
+        assert_eq!(motion.width, 1920);
+        assert_eq!(motion.height, 1080);
+        assert_eq!(motion.fps_numerator, 30);
+        assert_eq!(motion.fps_denominator, 1);
+        assert_eq!(motion.codec, "h264");
+        assert_eq!(motion.audio, "none");
+        assert!(matches!(loaded.motion, MotionAssetLoad::Available(_)));
+    }
+
+    #[test]
+    fn motion_unknown_codec_fails_structure_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        create_project(&snapshot(None), &root).unwrap();
+
+        let mut val: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("project.json")).unwrap()).unwrap();
+        let mut m = motion_asset_json();
+        m["codec"] = serde_json::json!("vp9");
+        val["motion"] = m;
+        std::fs::write(
+            root.join("project.json"),
+            serde_json::to_vec_pretty(&val).unwrap(),
+        )
+        .unwrap();
+
+        let error = load_project(&root, None).unwrap_err();
+        assert_eq!(error.category(), "invalid-motion");
+    }
+
+    #[test]
+    fn motion_unknown_audio_fails_structure_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        create_project(&snapshot(None), &root).unwrap();
+
+        let mut val: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("project.json")).unwrap()).unwrap();
+        let mut m = motion_asset_json();
+        m["audio"] = serde_json::json!("aac");
+        val["motion"] = m;
+        std::fs::write(
+            root.join("project.json"),
+            serde_json::to_vec_pretty(&val).unwrap(),
+        )
+        .unwrap();
+
+        let error = load_project(&root, None).unwrap_err();
+        assert_eq!(error.category(), "invalid-motion");
+    }
+
+    #[test]
+    fn motion_path_traversal_fails_structure_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        create_project(&snapshot(None), &root).unwrap();
+
+        let mut val: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("project.json")).unwrap()).unwrap();
+        let mut m = motion_asset_json();
+        m["relative_path"] = serde_json::json!("../../../etc/passwd");
+        val["motion"] = m;
+        std::fs::write(
+            root.join("project.json"),
+            serde_json::to_vec_pretty(&val).unwrap(),
+        )
+        .unwrap();
+
+        let error = load_project(&root, None).unwrap_err();
+        assert_eq!(error.category(), "invalid-motion");
+    }
+
+    #[test]
+    fn motion_absolute_path_fails_structure_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        create_project(&snapshot(None), &root).unwrap();
+
+        let mut val: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("project.json")).unwrap()).unwrap();
+        let mut m = motion_asset_json();
+        m["relative_path"] = serde_json::json!("/etc/passwd");
+        val["motion"] = m;
+        std::fs::write(
+            root.join("project.json"),
+            serde_json::to_vec_pretty(&val).unwrap(),
+        )
+        .unwrap();
+
+        let error = load_project(&root, None).unwrap_err();
+        assert_eq!(error.category(), "invalid-motion");
+    }
+
+    #[test]
+    fn motion_backslash_path_fails_structure_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        create_project(&snapshot(None), &root).unwrap();
+
+        let mut val: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("project.json")).unwrap()).unwrap();
+        let mut m = motion_asset_json();
+        m["relative_path"] = serde_json::json!("assets\\motion\\recording.mp4");
+        val["motion"] = m;
+        std::fs::write(
+            root.join("project.json"),
+            serde_json::to_vec_pretty(&val).unwrap(),
+        )
+        .unwrap();
+
+        let error = load_project(&root, None).unwrap_err();
+        assert_eq!(error.category(), "invalid-motion");
+    }
+
+    #[test]
+    fn motion_zero_dimensions_fails_structure_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        create_project(&snapshot(None), &root).unwrap();
+
+        let mut val: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("project.json")).unwrap()).unwrap();
+        let mut m = motion_asset_json();
+        m["width"] = serde_json::json!(0);
+        val["motion"] = m;
+        std::fs::write(
+            root.join("project.json"),
+            serde_json::to_vec_pretty(&val).unwrap(),
+        )
+        .unwrap();
+
+        let error = load_project(&root, None).unwrap_err();
+        assert_eq!(error.category(), "invalid-motion");
+    }
+
+    #[test]
+    fn motion_zero_fps_fails_structure_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        create_project(&snapshot(None), &root).unwrap();
+
+        let mut val: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("project.json")).unwrap()).unwrap();
+        let mut m = motion_asset_json();
+        m["fps_numerator"] = serde_json::json!(0);
+        val["motion"] = m;
+        std::fs::write(
+            root.join("project.json"),
+            serde_json::to_vec_pretty(&val).unwrap(),
+        )
+        .unwrap();
+
+        let error = load_project(&root, None).unwrap_err();
+        assert_eq!(error.category(), "invalid-motion");
+    }
+
+    #[test]
+    fn motion_zero_duration_fails_structure_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        create_project(&snapshot(None), &root).unwrap();
+
+        let mut val: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("project.json")).unwrap()).unwrap();
+        let mut m = motion_asset_json();
+        m["duration_ms"] = serde_json::json!(0);
+        val["motion"] = m;
+        std::fs::write(
+            root.join("project.json"),
+            serde_json::to_vec_pretty(&val).unwrap(),
+        )
+        .unwrap();
+
+        let error = load_project(&root, None).unwrap_err();
+        assert_eq!(error.category(), "invalid-motion");
+    }
+
+    #[test]
+    fn motion_non_canonical_sha256_fails_structure_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        create_project(&snapshot(None), &root).unwrap();
+
+        let mut val: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("project.json")).unwrap()).unwrap();
+        let mut m = motion_asset_json();
+        m["sha256"] = serde_json::json!("not-a-valid-sha256");
+        val["motion"] = m;
+        std::fs::write(
+            root.join("project.json"),
+            serde_json::to_vec_pretty(&val).unwrap(),
+        )
+        .unwrap();
+
+        let error = load_project(&root, None).unwrap_err();
+        assert_eq!(error.category(), "invalid-motion");
+    }
+
+    // ---- Fail-closed load RED tests ----
+
+    fn write_schema3_with_motion(
+        root: &std::path::Path,
+        motion: Option<serde_json::Value>,
+    ) {
+        let mut val: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("project.json")).unwrap()).unwrap();
+        val["motion"] = motion.unwrap_or(serde_json::Value::Null);
+        std::fs::write(
+            root.join("project.json"),
+            serde_json::to_vec_pretty(&val).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn write_motion_file(root: &std::path::Path, content: &[u8]) -> String {
+        use sha2::Digest;
+        std::fs::create_dir_all(root.join("assets/motion")).unwrap();
+        std::fs::write(root.join("assets/motion/recording.mp4"), content).unwrap();
+        let hash = sha2::Sha256::digest(content);
+        format!("{hash:x}")
+    }
+
+    #[test]
+    fn motion_missing_file_returns_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        create_project(&snapshot(None), &root).unwrap();
+
+        let mut m = motion_asset_json();
+        m["sha256"] = serde_json::json!("a".repeat(64));
+        write_schema3_with_motion(&root, Some(m));
+
+        let loaded = load_project(&root, None).unwrap();
+        assert!(matches!(
+            loaded.motion,
+            MotionAssetLoad::Unavailable(MotionFailureCategory::Filesystem)
+        ));
+    }
+
+    #[test]
+    fn motion_symlink_asset_returns_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        create_project(&snapshot(None), &root).unwrap();
+
+        let content = b"fake mp4";
+        let sha256 = write_motion_file(&root, content);
+
+        // Replace with symlink
+        let target = root.join("assets/motion/real.mp4");
+        std::fs::write(&target, content).unwrap();
+        std::fs::remove_file(root.join("assets/motion/recording.mp4")).unwrap();
+        std::os::unix::fs::symlink(&target, root.join("assets/motion/recording.mp4")).unwrap();
+
+        let mut m = motion_asset_json();
+        m["sha256"] = serde_json::json!(sha256);
+        write_schema3_with_motion(&root, Some(m));
+
+        let loaded = load_project(&root, None).unwrap();
+        assert!(matches!(
+            loaded.motion,
+            MotionAssetLoad::Unavailable(MotionFailureCategory::Filesystem)
+        ));
+    }
+
+    #[test]
+    fn motion_digest_mismatch_returns_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        create_project(&snapshot(None), &root).unwrap();
+
+        write_motion_file(&root, b"original content");
+
+        let mut m = motion_asset_json();
+        m["sha256"] = serde_json::json!("a".repeat(64)); // wrong hash
+        write_schema3_with_motion(&root, Some(m));
+
+        let loaded = load_project(&root, None).unwrap();
+        assert!(matches!(
+            loaded.motion,
+            MotionAssetLoad::Unavailable(MotionFailureCategory::Digest)
+        ));
+    }
+
+    #[test]
+    fn motion_codec_mismatch_returns_unavailable() {
+        // This test requires ffprobe; skip if not available
+        if std::process::Command::new("ffprobe")
+            .arg("-version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        create_project(&snapshot(None), &root).unwrap();
+
+        // Write a minimal file (not a real video)
+        let sha256 = write_motion_file(&root, b"not a real video");
+        let mut m = motion_asset_json();
+        m["sha256"] = serde_json::json!(sha256);
+        write_schema3_with_motion(&root, Some(m));
+
+        // With toolchain, probe should fail
+        let tc = crate::video_import::VideoToolchain {
+            ffmpeg: std::path::PathBuf::from("ffmpeg"),
+            ffprobe: std::path::PathBuf::from("ffprobe"),
+        };
+        let loaded = load_project(&root, Some(&tc)).unwrap();
+        assert!(matches!(
+            loaded.motion,
+            MotionAssetLoad::Unavailable(MotionFailureCategory::Probe)
+        ));
+    }
+
+    #[test]
+    fn motion_audio_stream_returns_unavailable() {
+        // Same as codec mismatch — probe rejects any audio
+        if std::process::Command::new("ffprobe")
+            .arg("-version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        create_project(&snapshot(None), &root).unwrap();
+
+        let sha256 = write_motion_file(&root, b"not a real video");
+        let mut m = motion_asset_json();
+        m["sha256"] = serde_json::json!(sha256);
+        write_schema3_with_motion(&root, Some(m));
+
+        let tc = crate::video_import::VideoToolchain {
+            ffmpeg: std::path::PathBuf::from("ffmpeg"),
+            ffprobe: std::path::PathBuf::from("ffprobe"),
+        };
+        let loaded = load_project(&root, Some(&tc)).unwrap();
+        assert!(matches!(
+            loaded.motion,
+            MotionAssetLoad::Unavailable(MotionFailureCategory::Probe)
+        ));
+    }
+
+    #[test]
+    fn motion_fps_mismatch_returns_unavailable() {
+        if std::process::Command::new("ffprobe")
+            .arg("-version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        create_project(&snapshot(None), &root).unwrap();
+
+        let sha256 = write_motion_file(&root, b"not a real video");
+        let mut m = motion_asset_json();
+        m["sha256"] = serde_json::json!(sha256);
+        write_schema3_with_motion(&root, Some(m));
+
+        let tc = crate::video_import::VideoToolchain {
+            ffmpeg: std::path::PathBuf::from("ffmpeg"),
+            ffprobe: std::path::PathBuf::from("ffprobe"),
+        };
+        let loaded = load_project(&root, Some(&tc)).unwrap();
+        assert!(matches!(
+            loaded.motion,
+            MotionAssetLoad::Unavailable(MotionFailureCategory::Probe)
+        ));
+    }
+
+    #[test]
+    fn motion_dimensions_mismatch_returns_unavailable() {
+        if std::process::Command::new("ffprobe")
+            .arg("-version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        create_project(&snapshot(None), &root).unwrap();
+
+        let sha256 = write_motion_file(&root, b"not a real video");
+        let mut m = motion_asset_json();
+        m["sha256"] = serde_json::json!(sha256);
+        write_schema3_with_motion(&root, Some(m));
+
+        let tc = crate::video_import::VideoToolchain {
+            ffmpeg: std::path::PathBuf::from("ffmpeg"),
+            ffprobe: std::path::PathBuf::from("ffprobe"),
+        };
+        let loaded = load_project(&root, Some(&tc)).unwrap();
+        assert!(matches!(
+            loaded.motion,
+            MotionAssetLoad::Unavailable(MotionFailureCategory::Probe)
+        ));
+    }
+
+    #[test]
+    fn motion_duration_mismatch_returns_unavailable() {
+        if std::process::Command::new("ffprobe")
+            .arg("-version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        create_project(&snapshot(None), &root).unwrap();
+
+        let sha256 = write_motion_file(&root, b"not a real video");
+        let mut m = motion_asset_json();
+        m["sha256"] = serde_json::json!(sha256);
+        write_schema3_with_motion(&root, Some(m));
+
+        let tc = crate::video_import::VideoToolchain {
+            ffmpeg: std::path::PathBuf::from("ffmpeg"),
+            ffprobe: std::path::PathBuf::from("ffprobe"),
+        };
+        let loaded = load_project(&root, Some(&tc)).unwrap();
+        assert!(matches!(
+            loaded.motion,
+            MotionAssetLoad::Unavailable(MotionFailureCategory::Probe)
+        ));
+    }
+
+    #[test]
+    fn motion_available_without_toolchain() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        create_project(&snapshot(None), &root).unwrap();
+
+        let content = b"fake mp4 content for testing";
+        let sha256 = write_motion_file(&root, content);
+
+        let mut m = motion_asset_json();
+        m["sha256"] = serde_json::json!(sha256);
+        write_schema3_with_motion(&root, Some(m));
+
+        let loaded = load_project(&root, None).unwrap();
+        assert!(matches!(loaded.motion, MotionAssetLoad::Available(_)));
+    }
+
+    #[test]
+    fn motion_non_regular_file_returns_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("guide.rollshot-guide");
+        create_project(&snapshot(None), &root).unwrap();
+
+        // Create a directory instead of a file
+        std::fs::create_dir_all(root.join("assets/motion/recording.mp4")).unwrap();
+
+        let mut m = motion_asset_json();
+        m["sha256"] = serde_json::json!("a".repeat(64));
+        write_schema3_with_motion(&root, Some(m));
+
+        let loaded = load_project(&root, None).unwrap();
+        assert!(matches!(
+            loaded.motion,
+            MotionAssetLoad::Unavailable(MotionFailureCategory::Filesystem)
+        ));
     }
 }

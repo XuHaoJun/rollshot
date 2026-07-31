@@ -7,11 +7,13 @@
 use std::path::Path;
 use std::process::Command;
 
+use serde::{Deserialize, Serialize};
+
 use super::error::MotionFailureCategory;
 use crate::video_import::VideoToolchain;
 
 /// Closed set of video codecs the motion pipeline can produce.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MotionCodec {
     H264,
 }
@@ -26,9 +28,17 @@ impl MotionCodec {
 }
 
 /// Closed set of audio codecs. Currently the motion pipeline is always silent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MotionAudio {
     None,
+}
+
+impl MotionAudio {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+        }
+    }
 }
 
 /// Metadata extracted from a successfully probed motion recording.

@@ -353,7 +353,7 @@ mod tests {
         };
 
         create_project(&snapshot, &root).unwrap();
-        let loaded = load_project(&root).unwrap();
+        let loaded = load_project(&root, None).unwrap();
         (dir, loaded)
     }
 
@@ -407,7 +407,7 @@ mod tests {
             crate::project::store::save_project(&make_snapshot(Some(rev - 1)), &root).unwrap();
         }
 
-        let loaded = load_project(&root).unwrap();
+        let loaded = load_project(&root, None).unwrap();
         (dir, loaded)
     }
 
@@ -433,7 +433,7 @@ mod tests {
         let first = ActionGuideContextProjectionV1::from_loaded_project(&loaded).unwrap();
         let project_root = loaded.root.clone();
         drop(loaded);
-        let reopened = load_project(&project_root).unwrap();
+        let reopened = load_project(&project_root, None).unwrap();
         let second = ActionGuideContextProjectionV1::from_loaded_project(&reopened).unwrap();
         assert_eq!(first.canonical_bytes(), second.canonical_bytes());
         assert_eq!(first.digest(), second.digest());
@@ -543,7 +543,7 @@ mod tests {
         };
 
         create_project(&snapshot, &root).unwrap();
-        let loaded = load_project(&root).unwrap();
+        let loaded = load_project(&root, None).unwrap();
         let projection = ActionGuideContextProjectionV1::from_loaded_project(&loaded).unwrap();
         assert_eq!(projection.title(), &title);
     }
@@ -587,7 +587,7 @@ mod tests {
         };
 
         create_project(&snapshot, &root).unwrap();
-        let loaded = load_project(&root).unwrap();
+        let loaded = load_project(&root, None).unwrap();
         let projection = ActionGuideContextProjectionV1::from_loaded_project(&loaded).unwrap();
         assert_eq!(projection.steps()[0].title, title_4096);
     }
@@ -631,7 +631,7 @@ mod tests {
         };
 
         create_project(&snapshot, &root).unwrap();
-        let loaded = load_project(&root).unwrap();
+        let loaded = load_project(&root, None).unwrap();
         let projection = ActionGuideContextProjectionV1::from_loaded_project(&loaded).unwrap();
         assert_eq!(
             projection.steps()[0].caption.as_deref(),
@@ -691,7 +691,7 @@ mod tests {
         };
 
         create_project(&snapshot, &root).unwrap();
-        let loaded = load_project(&root).unwrap();
+        let loaded = load_project(&root, None).unwrap();
         let projection = ActionGuideContextProjectionV1::from_loaded_project(&loaded).unwrap();
 
         assert_eq!(projection.steps()[0].kind, CandidateKind::Click);
@@ -763,7 +763,7 @@ mod tests {
         };
 
         create_project(&snapshot, &root).unwrap();
-        let loaded = load_project(&root).unwrap();
+        let loaded = load_project(&root, None).unwrap();
         let err = ActionGuideContextProjectionV1::from_loaded_project(&loaded).unwrap_err();
         assert!(matches!(
             err,
@@ -810,7 +810,7 @@ mod tests {
         };
 
         create_project(&snapshot, &root).unwrap();
-        let loaded = load_project(&root).unwrap();
+        let loaded = load_project(&root, None).unwrap();
         let err = ActionGuideContextProjectionV1::from_loaded_project(&loaded).unwrap_err();
         assert!(matches!(
             err,
@@ -860,7 +860,7 @@ mod tests {
         };
 
         create_project(&snapshot, &root).unwrap();
-        let loaded = load_project(&root).unwrap();
+        let loaded = load_project(&root, None).unwrap();
         let err = ActionGuideContextProjectionV1::from_loaded_project(&loaded).unwrap_err();
         assert!(matches!(
             err,

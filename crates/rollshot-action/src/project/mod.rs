@@ -12,9 +12,10 @@ pub use continuity::{
 };
 pub use error::{ProjectError, ProjectErrorCategory};
 pub use model::{
-    EnabledOutputs, LoadedProject, PersistedStepAnnotations, ProjectCommit, ProjectFrame,
-    ProjectManifestV1, ProjectManifestV2, ProjectSnapshot, ProjectStep, ProjectStepId,
-    SnapshotFrame, SnapshotFramePayload, PROJECT_SCHEMA_VERSION,
+    EnabledOutputs, LoadedProject, MotionAsset, MotionAssetLoad, PersistedStepAnnotations,
+    ProjectCommit, ProjectFrame, ProjectManifestV1, ProjectManifestV2, ProjectManifestV3,
+    ProjectSnapshot, ProjectStep, ProjectStepId, SnapshotFrame, SnapshotFramePayload,
+    PROJECT_SCHEMA_VERSION,
 };
 pub use publish::{
     load_publish_state, write_publish_state, PublishCancellation, PublishCancelled,

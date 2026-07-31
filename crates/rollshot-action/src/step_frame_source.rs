@@ -296,8 +296,8 @@ mod tests {
 
         LoadedProject {
             root,
-            manifest: crate::project::ProjectManifestV2 {
-                schema_version: 2,
+            manifest: crate::project::ProjectManifestV3 {
+                schema_version: 3,
                 revision: 1,
                 title: "Test".into(),
                 capture_region: crate::models::CaptureRegion {
@@ -314,7 +314,9 @@ mod tests {
                 frames,
                 steps: Vec::new(),
                 import_warnings: Vec::new(),
+                motion: None,
             },
+            motion: crate::project::MotionAssetLoad::None,
         }
     }
 
