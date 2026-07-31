@@ -1586,6 +1586,8 @@ mod tests {
             &config,
             #[cfg(feature = "action-guide")]
             None,
+            #[cfg(feature = "action-guide")]
+            None,
         );
         assert!(result.is_err(), "fullscreen scope must be rejected");
         let err = match result {
@@ -1608,7 +1610,13 @@ mod tests {
             request: rollshot_capture::CaptureRequest::action_guide_fullscreen(),
             target_output_name: None,
         };
-        let err = match Component::new(&config, None) {
+        let err = match Component::new(
+            &config,
+            #[cfg(feature = "action-guide")]
+            None,
+            #[cfg(feature = "action-guide")]
+            None,
+        ) {
             Err(err) => err.to_string(),
             Ok(_) => panic!("test factory must reject streaming acquisition"),
         };
