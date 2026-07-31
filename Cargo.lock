@@ -6194,6 +6194,7 @@ dependencies = [
 name = "rollshot-action"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-channel",
  "ffmpeg-sidecar",
  "image",
  "rollshot-image-document",

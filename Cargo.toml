@@ -92,6 +92,7 @@ ffmpeg-sidecar = { version = "2.5.2", default-features = false, features = ["dow
 rustix = { version = "1.1", features = ["fs"] }
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
+crossbeam-channel = "0.5"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

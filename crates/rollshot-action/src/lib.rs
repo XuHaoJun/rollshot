@@ -7,6 +7,7 @@
 //! or device paths. See `docs/superpowers/specs/2026-06-15-action-guide-capture-design.md`.
 
 pub mod caption_proposal;
+pub mod motion;
 mod detector;
 mod diagnostics;
 mod error;
