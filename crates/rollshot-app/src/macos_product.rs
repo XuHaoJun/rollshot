@@ -1721,7 +1721,10 @@ mod tests {
             ..DetectorConfig::default()
         };
         let mut rec = ActionRecorder::new(region, StoreConfig::default(), det);
-        rec.ingest_frame(RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255])), 0);
+        rec.ingest_frame(
+            Arc::new(RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255]))),
+            0,
+        );
         for i in 1..=6 {
             let mut img = RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255]));
             for y in 0..16 {
@@ -1729,7 +1732,7 @@ mod tests {
                     img.put_pixel(x, y, Rgba([255, 255, 255, 255]));
                 }
             }
-            rec.ingest_frame(img, i * 100);
+            rec.ingest_frame(Arc::new(img), i * 100);
         }
         let recording = rec.finish();
 
@@ -1835,7 +1838,10 @@ mod tests {
                 ..DetectorConfig::default()
             };
             let mut rec = ActionRecorder::new(region, StoreConfig::default(), det);
-            rec.ingest_frame(RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255])), 0);
+            rec.ingest_frame(
+                Arc::new(RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255]))),
+                0,
+            );
             for i in 1..=6 {
                 let mut img = RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255]));
                 for y in 0..16 {
@@ -1843,7 +1849,7 @@ mod tests {
                         img.put_pixel(x, y, Rgba([255, 255, 255, 255]));
                     }
                 }
-                rec.ingest_frame(img, i * 100);
+                rec.ingest_frame(Arc::new(img), i * 100);
             }
             rec.finish()
         }
