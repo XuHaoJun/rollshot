@@ -121,9 +121,7 @@ pub(crate) fn failure_category_copy(cat: MotionFailureCategory) -> &'static str 
         MotionFailureCategory::Digest => {
             "Screen recording could not be saved: integrity check failed."
         }
-        MotionFailureCategory::Cancelled => {
-            "Screen recording was cancelled."
-        }
+        MotionFailureCategory::Cancelled => "Screen recording was cancelled.",
     }
 }
 
@@ -143,11 +141,7 @@ pub(crate) fn motion_metadata_line(asset: &ValidatedMotionAsset) -> String {
     let fps = if asset.fps_denominator() == 1 {
         format!("{} fps", asset.fps_numerator())
     } else {
-        format!(
-            "{}/{} fps",
-            asset.fps_numerator(),
-            asset.fps_denominator()
-        )
+        format!("{}/{} fps", asset.fps_numerator(), asset.fps_denominator())
     };
     let audio = match asset.audio() {
         rollshot_action::motion::MotionAudio::None => "Silent",
@@ -181,7 +175,9 @@ pub(crate) fn motion_metadata_line(asset: &ValidatedMotionAsset) -> String {
 #[derive(Debug, Clone)]
 pub(crate) enum SaveRecordingState {
     Idle,
-    PickingDestination { operation_id: u64 },
+    PickingDestination {
+        operation_id: u64,
+    },
     Exporting {
         operation_id: u64,
         #[allow(dead_code)]
@@ -394,16 +390,11 @@ mod tests {
         assert!(!ws.is_ready());
         assert!(ws.is_failed_or_unavailable());
         // The failure category is stable copy.
-        let copy = failure_category_copy(
-            *match &ws {
-                WorkspaceMotion::Failed(cat) => cat,
-                _ => panic!("expected Failed"),
-            },
-        );
-        assert!(
-            copy.contains("encoder failed to finalize"),
-            "copy: {copy}"
-        );
+        let copy = failure_category_copy(*match &ws {
+            WorkspaceMotion::Failed(cat) => cat,
+            _ => panic!("expected Failed"),
+        });
+        assert!(copy.contains("encoder failed to finalize"), "copy: {copy}");
     }
 
     #[test]

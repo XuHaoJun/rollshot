@@ -526,9 +526,7 @@ fn update(product: &mut MacosProduct, message: Message) -> Task<Message> {
                     product.phase = Phase::Opening(home);
                     Task::perform(inspect_and_open(path), |msg| msg)
                 }
-                action_guide_home::Effect::StartRecording {
-                    motion_toolchain,
-                } => {
+                action_guide_home::Effect::StartRecording { motion_toolchain } => {
                     start_action_guide_recording(product, false, motion_toolchain)
                 }
                 action_guide_home::Effect::OpenProject(path) => {
@@ -854,9 +852,7 @@ fn apply_capture_host_effect(product: &mut MacosProduct, effect: HostEffect) -> 
         HostEffect::Task(task) => task.map(Message::Capture),
         HostEffect::Completed(result) => complete_capture(product, result),
         #[cfg(feature = "action-guide")]
-        HostEffect::ActionRecorded(result) => {
-            complete_action_recording(product, result)
-        }
+        HostEffect::ActionRecorded(result) => complete_action_recording(product, result),
         HostEffect::Cancelled => {
             #[cfg(feature = "action-guide")]
             {
@@ -1313,7 +1309,10 @@ pub fn run_action_guide(initial: ActionGuideIntent) -> Result<(), String> {
 
         match boot_initial {
             ActionGuideIntent::Home => {}
-            ActionGuideIntent::Record { fullscreen, keep_motion: _ } => {
+            ActionGuideIntent::Record {
+                fullscreen,
+                keep_motion: _,
+            } => {
                 tasks.push(start_action_guide_recording(&mut product, fullscreen));
             }
             ActionGuideIntent::Open { path: Some(path) } => {
@@ -1350,7 +1349,10 @@ pub fn run_action_guide(initial: ActionGuideIntent) -> Result<(), String> {
 
 #[cfg(feature = "action-guide")]
 fn action_guide_record_config(fullscreen: bool) -> OverlayConfig {
-    let intent = ActionGuideIntent::Record { fullscreen, keep_motion: false };
+    let intent = ActionGuideIntent::Record {
+        fullscreen,
+        keep_motion: false,
+    };
     OverlayConfig {
         backend: "auto".to_string(),
         fps: 5,
@@ -1370,20 +1372,16 @@ fn start_action_guide_recording(
 ) -> Task<Message> {
     let config = action_guide_record_config(fullscreen);
     let action_input_source = Some(crate::action_input::create_input_source());
-    let component = match Component::new(
-        &config,
-        action_input_source,
-        motion_toolchain,
-    )
-    .map_err(|error| error.to_string())
+    let component = match Component::new(&config, action_input_source, motion_toolchain)
+        .map_err(|error| error.to_string())
     {
-            Ok(Some(component)) => component,
-            Ok(None) => return Task::none(),
-            Err(error) => {
-                tracing::error!(target: TARGET_APP, %error, "action guide capture setup failed");
-                return Task::none();
-            }
-        };
+        Ok(Some(component)) => component,
+        Ok(None) => return Task::none(),
+        Err(error) => {
+            tracing::error!(target: TARGET_APP, %error, "action guide capture setup failed");
+            return Task::none();
+        }
+    };
     let (component, open_task) = match open_capture_window(component, &config) {
         Ok(pair) => pair,
         Err(error) => {
@@ -2238,10 +2236,13 @@ mod tests {
                 fullscreen: true,
                 keep_motion: false,
             };
-            assert_eq!(intent, ActionGuideIntent::Record {
-                fullscreen: true,
-                keep_motion: false,
-            });
+            assert_eq!(
+                intent,
+                ActionGuideIntent::Record {
+                    fullscreen: true,
+                    keep_motion: false,
+                }
+            );
             // With no toolchain, motion is disabled.
             let off = rollshot_action::motion::MotionRuntimeStatus::Off;
             assert_eq!(off, rollshot_action::motion::MotionRuntimeStatus::Off);
@@ -2318,7 +2319,10 @@ mod tests {
             };
             match &ws.motion {
                 crate::timeline_workspace::motion::WorkspaceMotion::Failed(cat) => {
-                    assert_eq!(*cat, rollshot_action::motion::MotionFailureCategory::BrokenPipe);
+                    assert_eq!(
+                        *cat,
+                        rollshot_action::motion::MotionFailureCategory::BrokenPipe
+                    );
                 }
                 other => panic!("expected Failed, got {other:?}"),
             }

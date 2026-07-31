@@ -225,16 +225,16 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), GifError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frame_store::SharedActionFrame;
     use crate::detector::DetectorConfig;
+    use crate::frame_store::SharedActionFrame;
     use crate::frame_store::StoreConfig;
     use crate::models::{CandidateKind, CandidateStep, CaptureRegion, DetectReason};
     use crate::recorder::{ActionRecorder, Recording};
     use image::codecs::gif::GifDecoder;
     use image::{AnimationDecoder, Rgba};
     use std::path::PathBuf;
-    use std::sync::Arc;
     use std::sync::atomic::Ordering;
+    use std::sync::Arc;
 
     fn region() -> CaptureRegion {
         CaptureRegion {

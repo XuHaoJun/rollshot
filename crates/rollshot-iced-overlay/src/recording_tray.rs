@@ -48,14 +48,19 @@ impl ksni::Tray for RecordingItem {
         "rollshot-recording".into()
     }
     fn title(&self) -> String {
-        self.title_override.clone().unwrap_or_else(|| "Rollshot is recording".into())
+        self.title_override
+            .clone()
+            .unwrap_or_else(|| "Rollshot is recording".into())
     }
     fn icon_name(&self) -> String {
         "media-record".into()
     }
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
-            title: self.tooltip_title.clone().unwrap_or_else(|| "Rollshot is recording \u{2014} click to finish".into()),
+            title: self
+                .tooltip_title
+                .clone()
+                .unwrap_or_else(|| "Rollshot is recording \u{2014} click to finish".into()),
             description: self.tooltip_description.clone().unwrap_or_default(),
             icon_name: "media-record".into(),
             icon_pixmap: Vec::new(),
@@ -115,7 +120,7 @@ pub(crate) fn create_recording_tray() -> Result<Box<dyn RecordingTray>, OverlayE
         tooltip_title: None,
         tooltip_description: None,
     })
-        .map_err(|e| OverlayError::Capture(format!("failed to spawn tray service: {e}")))?;
+    .map_err(|e| OverlayError::Capture(format!("failed to spawn tray service: {e}")))?;
     tracing::info!(target: TARGET_TRAY, "recording tray item registered");
     Ok(Box::new(KsniTray { finish_rx, handle }))
 }

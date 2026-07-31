@@ -493,7 +493,9 @@ impl Component {
     /// Return the motion status if it changed since the last call, updating
     /// the cached value. Used by the host to project live status to the tray.
     #[cfg(feature = "action-guide")]
-    pub fn take_motion_status_change(&mut self) -> Option<rollshot_action::motion::MotionRuntimeStatus> {
+    pub fn take_motion_status_change(
+        &mut self,
+    ) -> Option<rollshot_action::motion::MotionRuntimeStatus> {
         let current = self.motion_status();
         if current != self.last_motion_status {
             self.last_motion_status = current;
@@ -920,13 +922,17 @@ impl Component {
                             rollshot_action::DegradedReason::SourceStartFailed,
                         ))
                     });
-                    capability = Some(driver.begin_action_recording(
-                        action_region,
-                        source,
-                        crate::driver::ActionGuideRecordingOptions {
-                            motion_toolchain: self.motion_toolchain.clone(),
-                        },
-                    ).capability);
+                    capability = Some(
+                        driver
+                            .begin_action_recording(
+                                action_region,
+                                source,
+                                crate::driver::ActionGuideRecordingOptions {
+                                    motion_toolchain: self.motion_toolchain.clone(),
+                                },
+                            )
+                            .capability,
+                    );
                 }
                 self.overlay.recording_started = Some(std::time::Instant::now());
                 self.overlay.recording_capability = capability.map(crate::app::capability_label);
@@ -936,19 +942,17 @@ impl Component {
             OverlayEffect::FinishRecording => {
                 tracing::info!(target: TARGET_OVERLAY, "finish recording requested");
                 match self.driver.take() {
-                    Some(driver) => {
-                        match driver.finalize_action() {
-                            Ok(result) => {
-                                self.overlay.recording_started = None;
-                                self.overlay.recording_capability = None;
-                                EffectOutcome::Terminal(HostEffect::ActionRecorded(result))
-                            }
-                            Err(e) => {
-                                self.overlay.transient_error = Some(e);
-                                EffectOutcome::Task(Task::none())
-                            }
+                    Some(driver) => match driver.finalize_action() {
+                        Ok(result) => {
+                            self.overlay.recording_started = None;
+                            self.overlay.recording_capability = None;
+                            EffectOutcome::Terminal(HostEffect::ActionRecorded(result))
                         }
-                    }
+                        Err(e) => {
+                            self.overlay.transient_error = Some(e);
+                            EffectOutcome::Task(Task::none())
+                        }
+                    },
                     None => EffectOutcome::Terminal(HostEffect::Cancelled),
                 }
             }

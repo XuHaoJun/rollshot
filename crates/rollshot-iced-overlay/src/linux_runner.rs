@@ -823,9 +823,7 @@ pub fn run_action_guide_fullscreen(
             let _capability = driver.begin_action_recording(
                 region,
                 input_source,
-                crate::driver::ActionGuideRecordingOptions {
-                    motion_toolchain,
-                },
+                crate::driver::ActionGuideRecordingOptions { motion_toolchain },
             );
 
             // Update motion status for tray display.
@@ -849,8 +847,7 @@ pub fn run_action_guide_fullscreen(
             // Clear motion status before finalizing.
             *MOTION_STATUS_SLOT.lock().unwrap() = None;
 
-            let result =
-                driver.finalize_action().map_err(OverlayError::Capture)?;
+            let result = driver.finalize_action().map_err(OverlayError::Capture)?;
             Ok(Some(result))
         },
     )

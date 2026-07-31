@@ -644,8 +644,8 @@ mod tests {
     #[cfg(feature = "action-guide")]
     #[test]
     fn keep_motion_opt_in() {
-        let mode = parse(&["rollshot-app", "action-guide", "--record", "--keep-motion"])
-            .expect("parse");
+        let mode =
+            parse(&["rollshot-app", "action-guide", "--record", "--keep-motion"]).expect("parse");
         assert_eq!(
             mode,
             LaunchMode::ActionGuide(ActionGuideLaunch::Record {

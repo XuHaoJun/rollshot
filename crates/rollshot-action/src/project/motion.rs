@@ -249,13 +249,13 @@ mod tests {
 
     #[test]
     fn create_project_promotes_session_asset_to_project_tree() {
-        use super::super::store::create_project;
-        use crate::models::{CaptureRegion, InputCapability, InputSourceKind};
         use super::super::model::{
             EnabledOutputs, ProjectSnapshot, ProjectStep, ProjectStepId, SnapshotFrame,
             SnapshotFramePayload,
         };
+        use super::super::store::create_project;
         use crate::models::{CandidateKind, DetectReason};
+        use crate::models::{CaptureRegion, InputCapability, InputSourceKind};
         use image::{Rgba, RgbaImage};
         use std::sync::Arc;
 
@@ -315,13 +315,13 @@ mod tests {
 
     #[test]
     fn save_project_as_copies_validated_project_asset() {
-        use super::super::store::{create_project, save_project_as};
-        use crate::models::{CaptureRegion, InputCapability, InputSourceKind};
         use super::super::model::{
             EnabledOutputs, ProjectSnapshot, ProjectStep, ProjectStepId, SnapshotFrame,
             SnapshotFramePayload,
         };
+        use super::super::store::{create_project, save_project_as};
         use crate::models::{CandidateKind, DetectReason};
+        use crate::models::{CaptureRegion, InputCapability, InputSourceKind};
         use image::{Rgba, RgbaImage};
         use std::sync::Arc;
 
@@ -383,13 +383,13 @@ mod tests {
 
     #[test]
     fn existing_save_retains_same_motion_asset() {
-        use super::super::store::{create_project, save_project};
-        use crate::models::{CaptureRegion, InputCapability, InputSourceKind};
         use super::super::model::{
             EnabledOutputs, ProjectSnapshot, ProjectStep, ProjectStepId, SnapshotFrame,
             SnapshotFramePayload,
         };
+        use super::super::store::{create_project, save_project};
         use crate::models::{CandidateKind, DetectReason};
+        use crate::models::{CaptureRegion, InputCapability, InputSourceKind};
         use image::{Rgba, RgbaImage};
         use std::sync::Arc;
 
@@ -449,13 +449,13 @@ mod tests {
 
     #[test]
     fn promotion_records_digest_and_metadata_from_validated_object() {
-        use super::super::store::create_project;
-        use crate::models::{CaptureRegion, InputCapability, InputSourceKind};
         use super::super::model::{
             EnabledOutputs, ProjectSnapshot, ProjectStep, ProjectStepId, SnapshotFrame,
             SnapshotFramePayload,
         };
+        use super::super::store::create_project;
         use crate::models::{CandidateKind, DetectReason};
+        use crate::models::{CaptureRegion, InputCapability, InputSourceKind};
         use image::{Rgba, RgbaImage};
         use std::sync::Arc;
 
@@ -522,13 +522,13 @@ mod tests {
         // Verify that a failed promotion doesn't corrupt the session source.
         // We test this by ensuring the source file still exists after a
         // simulated failure (incomplete manifest data).
-        use super::super::store::create_project;
-        use crate::models::{CaptureRegion, InputCapability, InputSourceKind};
         use super::super::model::{
             EnabledOutputs, ProjectSnapshot, ProjectStep, ProjectStepId, SnapshotFrame,
             SnapshotFramePayload,
         };
+        use super::super::store::create_project;
         use crate::models::{CandidateKind, DetectReason};
+        use crate::models::{CaptureRegion, InputCapability, InputSourceKind};
         use image::{Rgba, RgbaImage};
         use std::sync::Arc;
 
@@ -588,13 +588,13 @@ mod tests {
 
     #[test]
     fn manifest_json_never_contains_source_or_temp_paths() {
-        use super::super::store::create_project;
-        use crate::models::{CaptureRegion, InputCapability, InputSourceKind};
         use super::super::model::{
             EnabledOutputs, ProjectSnapshot, ProjectStep, ProjectStepId, SnapshotFrame,
             SnapshotFramePayload,
         };
+        use super::super::store::create_project;
         use crate::models::{CandidateKind, DetectReason};
+        use crate::models::{CaptureRegion, InputCapability, InputSourceKind};
         use image::{Rgba, RgbaImage};
         use std::sync::Arc;
 
@@ -721,13 +721,13 @@ mod tests {
 
     #[test]
     fn export_preserves_project_state_and_source() {
-        use super::super::store::create_project;
-        use crate::models::{CaptureRegion, InputCapability, InputSourceKind};
         use super::super::model::{
             EnabledOutputs, ProjectSnapshot, ProjectStep, ProjectStepId, SnapshotFrame,
             SnapshotFramePayload,
         };
+        use super::super::store::create_project;
         use crate::models::{CandidateKind, DetectReason};
+        use crate::models::{CaptureRegion, InputCapability, InputSourceKind};
         use image::{Rgba, RgbaImage};
         use std::sync::Arc;
 
@@ -783,8 +783,7 @@ mod tests {
         export_motion_asset(&asset, &destination).unwrap();
 
         // Project state is unchanged
-        let loaded =
-            super::super::store::load_project(&root, None).unwrap();
+        let loaded = super::super::store::load_project(&root, None).unwrap();
         let loaded_sha = loaded.manifest.motion.as_ref().unwrap().sha256.clone();
         assert_eq!(loaded_sha, project_motion_sha);
 
@@ -807,9 +806,6 @@ mod tests {
             .filter_map(|e| e.ok())
             .collect();
         assert_eq!(entries.len(), 1, "extra files in export dir: {:?}", entries);
-        assert_eq!(
-            entries[0].file_name().to_str().unwrap(),
-            "final.mp4"
-        );
+        assert_eq!(entries[0].file_name().to_str().unwrap(), "final.mp4");
     }
 }

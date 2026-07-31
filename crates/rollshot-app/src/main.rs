@@ -24,10 +24,10 @@ use std::process::ExitCode;
 // helpers compile and unit-test on Linux. Only its `view` is macOS-gated.
 #[cfg(target_os = "macos")]
 mod macos_product;
-#[cfg(all(target_os = "macos", feature = "action-guide"))]
-mod macos_recording_tray;
 #[cfg(feature = "action-guide")]
 mod macos_recording_status;
+#[cfg(all(target_os = "macos", feature = "action-guide"))]
+mod macos_recording_tray;
 // Registered on every target so the pure drag placement/result helpers compile
 // and unit-test on Linux; the AppKit bridge inside it is macOS-gated.
 mod issue_pack;
@@ -177,10 +177,9 @@ fn run_action_guide_record(fullscreen: bool, keep_motion: bool) -> Result<(), St
         match crate::managed_ffmpeg::resolve_video_import_toolchain() {
             crate::managed_ffmpeg::VideoImportToolchainResolution::Available(tc) => Some(tc),
             crate::managed_ffmpeg::VideoImportToolchainResolution::NeedsSetup(_) => {
-                return Err(
-                    "FFmpeg is not available; cannot start motion recording. \
-                     Run `rollshot setup` or install ffmpeg.".to_string(),
-                );
+                return Err("FFmpeg is not available; cannot start motion recording. \
+                     Run `rollshot setup` or install ffmpeg."
+                    .to_string());
             }
         }
     } else {
@@ -212,7 +211,12 @@ fn run_action_guide_record(fullscreen: bool, keep_motion: bool) -> Result<(), St
                 result.capability,
                 crate::storage::Platform::Linux,
             );
-            crate::timeline_workspace::run(result.recording, result.region, result.capability, source_kind)
+            crate::timeline_workspace::run(
+                result.recording,
+                result.region,
+                result.capability,
+                source_kind,
+            )
         }
         None => Ok(()),
     }
@@ -241,9 +245,10 @@ fn run_action_guide_launch(launch: launch::ActionGuideLaunch) -> Result<(), Stri
         launch::ActionGuideLaunch::Record {
             fullscreen,
             keep_motion: _,
-        } => {
-            macos_product::run_action_guide(ActionGuideIntent::Record { fullscreen, keep_motion: false })
-        }
+        } => macos_product::run_action_guide(ActionGuideIntent::Record {
+            fullscreen,
+            keep_motion: false,
+        }),
         launch::ActionGuideLaunch::Open { path } => {
             macos_product::run_action_guide(ActionGuideIntent::Open { path })
         }

@@ -111,9 +111,7 @@ fn update(state: &mut State, message: Message) -> iced::Task<Message> {
                     state.phase = Phase::Opening;
                     iced::Task::perform(inspect_and_open(path), |msg| msg)
                 }
-                action_guide_home::Effect::StartRecording {
-                    motion_toolchain,
-                } => {
+                action_guide_home::Effect::StartRecording { motion_toolchain } => {
                     let keep_motion = motion_toolchain.is_some();
                     let _ = crate::platform_actions::spawn_action_guide_record(false, keep_motion);
                     iced::Task::none()
@@ -427,7 +425,10 @@ pub(crate) fn run(initial: ActionGuideIntent) -> Result<(), String> {
 
         match boot_initial {
             ActionGuideIntent::Home => {}
-            ActionGuideIntent::Record { fullscreen, keep_motion } => {
+            ActionGuideIntent::Record {
+                fullscreen,
+                keep_motion,
+            } => {
                 let _ = crate::platform_actions::spawn_action_guide_record(fullscreen, keep_motion);
             }
             ActionGuideIntent::Open { path: Some(path) } => {
@@ -661,7 +662,10 @@ mod tests {
             ..DetectorConfig::default()
         };
         let mut rec = ActionRecorder::new(region, StoreConfig::default(), det);
-        rec.ingest_frame(std::sync::Arc::new(RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255]))), 0);
+        rec.ingest_frame(
+            std::sync::Arc::new(RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255]))),
+            0,
+        );
         for i in 1..=6 {
             let mut img = RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255]));
             for y in 0..16 {

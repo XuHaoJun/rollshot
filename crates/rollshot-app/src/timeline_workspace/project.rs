@@ -226,8 +226,8 @@ pub(crate) async fn load_project_worker(
                     return Ok(OpenProjectWorkerResult::WriterLocked { root: request.root });
                 }
                 ProjectLockResult::Acquired(guard) => {
-                    let loaded =
-                        rollshot_action::project::load_project(&request.root, None).map_err(|e| {
+                    let loaded = rollshot_action::project::load_project(&request.root, None)
+                        .map_err(|e| {
                             tracing::event!(
                                 target: "rollshot::project",
                                 tracing::Level::ERROR,

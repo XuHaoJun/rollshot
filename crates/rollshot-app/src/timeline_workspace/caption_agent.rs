@@ -148,11 +148,12 @@ pub(crate) async fn prepare_caption_context_task(
             root,
             expected_revision,
         } => {
-            let loaded =
-                tokio::task::spawn_blocking(move || rollshot_action::project::load_project(&root, None))
-                    .await
-                    .map_err(|_| "Project load task panicked.".to_string())?
-                    .map_err(|e| e.to_string())?;
+            let loaded = tokio::task::spawn_blocking(move || {
+                rollshot_action::project::load_project(&root, None)
+            })
+            .await
+            .map_err(|_| "Project load task panicked.".to_string())?
+            .map_err(|e| e.to_string())?;
 
             if loaded.manifest.revision != expected_revision {
                 return Err(format!(

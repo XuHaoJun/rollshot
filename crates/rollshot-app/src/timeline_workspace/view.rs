@@ -1584,25 +1584,16 @@ fn motion_panel(state: &TimelineWorkspace) -> Element<'_, Message> {
         }
         motion::WorkspaceMotion::Failed(cat) => {
             let copy = motion::failure_category_copy(*cat);
-            container(
-                text(format!(
-                    "Guide created; {copy}"
-                ))
-                .size(13),
-            )
-            .padding(8)
-            .into()
+            container(text(format!("Guide created; {copy}")).size(13))
+                .padding(8)
+                .into()
         }
         motion::WorkspaceMotion::Unavailable(cat) => {
             let copy = motion::failure_category_copy(*cat);
             container(
                 row![
-                    text(format!(
-                        "Guide created; {copy}"
-                    ))
-                    .size(13),
-                    button(text("Save recording…"))
-                        .style(button::secondary),
+                    text(format!("Guide created; {copy}")).size(13),
+                    button(text("Save recording…")).style(button::secondary),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
@@ -2504,8 +2495,10 @@ mod tests {
 
         // Define scenarios: (name, viewport, motion_state, expected_texts)
         let ready_metadata = "0:12.3 · 1920×1080 · 30 fps · Silent H.264";
-        let failed_copy = "Guide created; Screen recording could not be saved: recording validation failed.";
-        let unavailable_copy = "Guide created; Screen recording could not be saved: FFmpeg is not available.";
+        let failed_copy =
+            "Guide created; Screen recording could not be saved: recording validation failed.";
+        let unavailable_copy =
+            "Guide created; Screen recording could not be saved: FFmpeg is not available.";
 
         let scenarios: Vec<(&str, IcedSize, &str, Vec<&str>)> = vec![
             (
@@ -2557,8 +2550,7 @@ mod tests {
                     state.motion = WorkspaceMotion::Ready(dummy_asset());
                 }
                 "failed" => {
-                    state.motion =
-                        WorkspaceMotion::Failed(MotionFailureCategory::Probe);
+                    state.motion = WorkspaceMotion::Failed(MotionFailureCategory::Probe);
                 }
                 "unavailable" => {
                     state.motion =
@@ -2567,11 +2559,7 @@ mod tests {
                 _ => unreachable!(),
             }
 
-            let mut ui = Simulator::with_size(
-                iced::Settings::default(),
-                *size,
-                view(&state),
-            );
+            let mut ui = Simulator::with_size(iced::Settings::default(), *size, view(&state));
 
             // Structural assertions.
             for label in expected_texts {
@@ -2621,7 +2609,10 @@ mod tests {
         if let Some(scenarios_arr) = manifest.get_mut("scenarios").and_then(|v| v.as_array_mut()) {
             scenarios_arr.extend(manifest_rows);
         }
-        std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap())
-            .expect("write manifest");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .expect("write manifest");
     }
 }

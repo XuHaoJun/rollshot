@@ -15,12 +15,12 @@ pub enum ActionGuideIntent {
 impl ActionGuideIntent {
     pub fn capture_request(&self) -> Option<rollshot_capture::CaptureRequest> {
         match self {
-            Self::Record { fullscreen: true, .. } => {
-                Some(rollshot_capture::CaptureRequest::action_guide_fullscreen())
-            }
-            Self::Record { fullscreen: false, .. } => {
-                Some(rollshot_capture::CaptureRequest::action_guide_region())
-            }
+            Self::Record {
+                fullscreen: true, ..
+            } => Some(rollshot_capture::CaptureRequest::action_guide_fullscreen()),
+            Self::Record {
+                fullscreen: false, ..
+            } => Some(rollshot_capture::CaptureRequest::action_guide_region()),
             Self::Home | Self::Open { .. } => None,
         }
     }
@@ -745,18 +745,17 @@ fn import_admission_message(error: rollshot_agent::jobs::JobAdmissionError) -> S
 fn resolve_recording_toolchain_task() -> Task<Message> {
     Task::perform(
         async {
-            let resolution = tokio::task::spawn_blocking(
-                crate::managed_ffmpeg::resolve_video_import_toolchain,
-            )
-            .await
-            .unwrap_or(
-                crate::managed_ffmpeg::VideoImportToolchainResolution::NeedsSetup(
-                    crate::managed_ffmpeg::FfmpegSetupInfo {
-                        managed_download: None,
-                        install_location: std::path::PathBuf::new(),
-                    },
-                ),
-            );
+            let resolution =
+                tokio::task::spawn_blocking(crate::managed_ffmpeg::resolve_video_import_toolchain)
+                    .await
+                    .unwrap_or(
+                        crate::managed_ffmpeg::VideoImportToolchainResolution::NeedsSetup(
+                            crate::managed_ffmpeg::FfmpegSetupInfo {
+                                managed_download: None,
+                                install_location: std::path::PathBuf::new(),
+                            },
+                        ),
+                    );
             Message::PreflightToolchainResolved(resolution)
         },
         |msg| msg,
@@ -767,12 +766,11 @@ fn resolve_recording_toolchain_task() -> Task<Message> {
 fn setup_recording_toolchain_task() -> Task<Message> {
     Task::perform(
         async {
-            let result = tokio::task::spawn_blocking(
-                crate::managed_ffmpeg::download_managed_ffmpeg,
-            )
-            .await
-            .map_err(|e| format!("Setup worker panicked: {e}"))
-            .and_then(|r| r);
+            let result =
+                tokio::task::spawn_blocking(crate::managed_ffmpeg::download_managed_ffmpeg)
+                    .await
+                    .map_err(|e| format!("Setup worker panicked: {e}"))
+                    .and_then(|r| r);
             Message::PreflightSetupFinished(result.map(|_| ()))
         },
         |msg| msg,
@@ -1045,9 +1043,7 @@ mod tests {
         home.update(Message::ConfirmRecordPreflight);
         let toolchain = toolchain_fixture();
         let update = home.update(Message::PreflightToolchainResolved(
-            crate::managed_ffmpeg::VideoImportToolchainResolution::Available(
-                toolchain.clone(),
-            ),
+            crate::managed_ffmpeg::VideoImportToolchainResolution::Available(toolchain.clone()),
         ));
         assert!(matches!(
             update.effect,
@@ -1530,11 +1526,19 @@ mod tests {
     #[test]
     fn record_intent_builds_region_or_fullscreen_request() {
         assert_eq!(
-            ActionGuideIntent::Record { fullscreen: false, keep_motion: false }.capture_request(),
+            ActionGuideIntent::Record {
+                fullscreen: false,
+                keep_motion: false
+            }
+            .capture_request(),
             Some(rollshot_capture::CaptureRequest::action_guide_region())
         );
         assert_eq!(
-            ActionGuideIntent::Record { fullscreen: true, keep_motion: false }.capture_request(),
+            ActionGuideIntent::Record {
+                fullscreen: true,
+                keep_motion: false
+            }
+            .capture_request(),
             Some(rollshot_capture::CaptureRequest::action_guide_fullscreen())
         );
         assert_eq!(ActionGuideIntent::Home.capture_request(), None);

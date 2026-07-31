@@ -70,7 +70,8 @@ fn preflight_view<'a>(state: &'a ActionGuideHome) -> Element<'a, Message> {
     )
     .size(14);
 
-    let no_limit = text("No duration or file-size limit. Disk use is shown before saving.").size(12);
+    let no_limit =
+        text("No duration or file-size limit. Disk use is shown before saving.").size(12);
 
     let motion_checkbox = checkbox(preflight.keep_motion)
         .label("Keep a silent screen recording")
@@ -281,17 +282,11 @@ mod tests {
 
     fn home_with_preflight(keep_motion: bool, phase: RecordPreflightPhase) -> ActionGuideHome {
         let mut home = ActionGuideHome::new_empty();
-        home.preflight = Some(RecordPreflight {
-            keep_motion,
-            phase,
-        });
+        home.preflight = Some(RecordPreflight { keep_motion, phase });
         home
     }
 
-    fn simulator_at<'a>(
-        state: &'a ActionGuideHome,
-        size: IcedSize,
-    ) -> Simulator<'a, Message> {
+    fn simulator_at<'a>(state: &'a ActionGuideHome, size: IcedSize) -> Simulator<'a, Message> {
         Simulator::with_size(iced::Settings::default(), size, view(state))
     }
 
@@ -471,7 +466,10 @@ mod tests {
         if let Some(scenarios_arr) = manifest.get_mut("scenarios").and_then(|v| v.as_array_mut()) {
             scenarios_arr.extend(manifest_rows);
         }
-        std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap())
-            .expect("write manifest");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .expect("write manifest");
     }
 }

@@ -18,12 +18,12 @@ pub use model::{
     ProjectSnapshot, ProjectStep, ProjectStepId, SnapshotFrame, SnapshotFramePayload,
     PROJECT_SCHEMA_VERSION,
 };
+pub use motion::export_motion_asset;
 pub use publish::{
     load_publish_state, write_publish_state, PublishCancellation, PublishCancelled,
     PublishFreshness, PublishOutputKind, PublishStateLoad, PublishStateV1, PublishedOutputV1,
 };
 pub use store::{create_project, load_project, save_project, save_project_as};
-pub use motion::export_motion_asset;
 pub use validate::{validate_manifest_structure, validate_snapshot_structure};
 
 #[allow(unused_imports)]

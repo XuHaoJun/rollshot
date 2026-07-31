@@ -79,8 +79,10 @@ pub fn probe_motion(
 ) -> Result<MotionMetadata, MotionFailureCategory> {
     let output = Command::new(&toolchain.ffprobe)
         .args([
-            "-v", "quiet",
-            "-print_format", "json",
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
             "-show_format",
             "-show_streams",
             &path.to_string_lossy(),
@@ -201,9 +203,7 @@ pub fn parse_motion_probe_json(
 }
 
 /// Parse the `r_frame_rate` field (e.g. "30/1").
-fn parse_frame_rate(
-    stream: &serde_json::Value,
-) -> Result<(u32, u32), MotionFailureCategory> {
+fn parse_frame_rate(stream: &serde_json::Value) -> Result<(u32, u32), MotionFailureCategory> {
     let fps_str = stream
         .get("r_frame_rate")
         .and_then(|f| f.as_str())

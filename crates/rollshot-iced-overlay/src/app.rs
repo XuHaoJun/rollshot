@@ -211,9 +211,8 @@ fn recording_controls(state: &OverlayState) -> Element<'_, OverlayMessage> {
             content = content.push(text("Motion recording on").size(12));
         }
         MotionIndicatorStatus::Failed(_) => {
-            content = content.push(
-                text("Screen recording failed; Action Guide is still recording.").size(12),
-            );
+            content = content
+                .push(text("Screen recording failed; Action Guide is still recording.").size(12));
         }
         MotionIndicatorStatus::Disabled => {}
     }
@@ -1567,7 +1566,10 @@ mod tests {
         let _element = super::recording_controls(&state);
         // Failed should never equal On.
         assert_ne!(state.motion_status, super::MotionIndicatorStatus::On);
-        assert!(matches!(state.motion_status, super::MotionIndicatorStatus::Failed(_)));
+        assert!(matches!(
+            state.motion_status,
+            super::MotionIndicatorStatus::Failed(_)
+        ));
     }
 
     #[cfg(feature = "action-guide")]
@@ -1579,9 +1581,13 @@ mod tests {
             ..OverlayState::default()
         };
         // Simulate failure.
-        state.motion_status = super::MotionIndicatorStatus::Failed(MotionFailureCategory::BrokenPipe);
+        state.motion_status =
+            super::MotionIndicatorStatus::Failed(MotionFailureCategory::BrokenPipe);
         // Once failed, it stays failed (no automatic recovery to On).
-        assert!(matches!(state.motion_status, super::MotionIndicatorStatus::Failed(_)));
+        assert!(matches!(
+            state.motion_status,
+            super::MotionIndicatorStatus::Failed(_)
+        ));
     }
 
     /// Deterministic iced UI scenario tests for overlay motion indicators.
@@ -1627,7 +1633,8 @@ mod tests {
                 ..super::OverlayState::default()
             };
             state.workspace.begin_recording();
-            let mut ui = Simulator::with_size(iced::Settings::default(), *size, super::view(&state));
+            let mut ui =
+                Simulator::with_size(iced::Settings::default(), *size, super::view(&state));
 
             // Structural assertions.
             for label in expected_texts {
@@ -1677,7 +1684,10 @@ mod tests {
         if let Some(scenarios_arr) = manifest.get_mut("scenarios").and_then(|v| v.as_array_mut()) {
             scenarios_arr.extend(manifest_rows);
         }
-        std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap())
-            .expect("write manifest");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .expect("write manifest");
     }
 }

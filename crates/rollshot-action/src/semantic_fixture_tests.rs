@@ -15,7 +15,14 @@ fn base() -> SharedActionFrame {
     Arc::new(RgbaImage::from_pixel(W, H, Rgba([24, 24, 24, 255])))
 }
 
-fn paint_rect(image: SharedActionFrame, x: u32, y: u32, w: u32, h: u32, v: u8) -> SharedActionFrame {
+fn paint_rect(
+    image: SharedActionFrame,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    v: u8,
+) -> SharedActionFrame {
     let mut image = image;
     for py in y..(y + h).min(H) {
         for px in x..(x + w).min(W) {

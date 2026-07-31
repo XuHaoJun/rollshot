@@ -1400,12 +1400,12 @@ mod tests {
                         annotations: None,
                     },
                 ],
-            import_warnings: Vec::new(),
+                import_warnings: Vec::new(),
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root: std::path::PathBuf::from("/tmp/test-project"),
                 manifest: manifest.into(),
-            motion: rollshot_action::project::MotionAssetLoad::None,
+                motion: rollshot_action::project::MotionAssetLoad::None,
             };
             let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
             crate::timeline_workspace::project::from_loaded_project(
@@ -1478,12 +1478,12 @@ mod tests {
                         annotations: None,
                     },
                 ],
-            import_warnings: Vec::new(),
+                import_warnings: Vec::new(),
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root: std::path::PathBuf::from("/tmp/test-project"),
                 manifest: manifest.into(),
-            motion: rollshot_action::project::MotionAssetLoad::None,
+                motion: rollshot_action::project::MotionAssetLoad::None,
             };
             crate::timeline_workspace::project::from_loaded_project(loaded, ProjectAccess::ReadOnly)
                 .expect("ok")
@@ -2039,12 +2039,12 @@ mod tests {
                     nearby: vec![1, 2, 3],
                     annotations: None,
                 }],
-            import_warnings: Vec::new(),
+                import_warnings: Vec::new(),
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root,
                 manifest: manifest.into(),
-            motion: rollshot_action::project::MotionAssetLoad::None,
+                motion: rollshot_action::project::MotionAssetLoad::None,
             };
             let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
             let ws = crate::timeline_workspace::project::from_loaded_project(
@@ -2238,12 +2238,12 @@ mod tests {
                     nearby: vec![1, 2, 3, 4, 5],
                     annotations: None,
                 }],
-            import_warnings: Vec::new(),
+                import_warnings: Vec::new(),
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root,
                 manifest: manifest.into(),
-            motion: rollshot_action::project::MotionAssetLoad::None,
+                motion: rollshot_action::project::MotionAssetLoad::None,
             };
             let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
             let mut ws = crate::timeline_workspace::project::from_loaded_project(
@@ -2308,12 +2308,12 @@ mod tests {
                     nearby: vec![1, 2, 3, 4, 5],
                     annotations: None,
                 }],
-            import_warnings: Vec::new(),
+                import_warnings: Vec::new(),
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root,
                 manifest: manifest.into(),
-            motion: rollshot_action::project::MotionAssetLoad::None,
+                motion: rollshot_action::project::MotionAssetLoad::None,
             };
             let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
             let mut ws = crate::timeline_workspace::project::from_loaded_project(
@@ -2401,12 +2401,12 @@ mod tests {
                     nearby: vec![1],
                     annotations: None,
                 }],
-            import_warnings: Vec::new(),
+                import_warnings: Vec::new(),
             };
             let loaded = rollshot_action::project::LoadedProject {
                 root: std::path::PathBuf::from("/tmp/test-project"),
                 manifest: manifest.into(),
-            motion: rollshot_action::project::MotionAssetLoad::None,
+                motion: rollshot_action::project::MotionAssetLoad::None,
             };
             let guard = crate::timeline_workspace::project::ProjectWriterGuard::for_test();
             let mut ws = crate::timeline_workspace::project::from_loaded_project(

@@ -236,9 +236,7 @@ impl MotionRecorder {
             return Err(MotionFailureCategory::Cancelled);
         }
         match self.frame_tx.offer(frame) {
-            super::queue::MotionOfferResult::Disconnected => {
-                Err(MotionFailureCategory::BrokenPipe)
-            }
+            super::queue::MotionOfferResult::Disconnected => Err(MotionFailureCategory::BrokenPipe),
             super::queue::MotionOfferResult::Queued
             | super::queue::MotionOfferResult::ReplacedOldest => Ok(()),
         }
@@ -485,10 +483,7 @@ fn worker_loop(
         }
     };
 
-    let final_metadata = MotionMetadata {
-        sha256,
-        ..metadata
-    };
+    let final_metadata = MotionMetadata { sha256, ..metadata };
 
     MotionRecordingOutcome::Ready(ValidatedMotionAsset::new(
         final_metadata,
@@ -593,7 +588,10 @@ pub(crate) mod tests {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
-            panic!("fake ffmpeg at {} did not respond to -version", path.display());
+            panic!(
+                "fake ffmpeg at {} did not respond to -version",
+                path.display()
+            );
         }
     }
 
@@ -779,8 +777,7 @@ pub(crate) mod tests {
         let tc = toolchain_with(&ffmpeg);
         let err = MotionRecorder::start(&tc, 640, 480).unwrap_err();
         assert!(
-            err == MotionFailureCategory::ToolUnavailable
-                || err == MotionFailureCategory::Spawn,
+            err == MotionFailureCategory::ToolUnavailable || err == MotionFailureCategory::Spawn,
             "unexpected category: {err:?}"
         );
     }

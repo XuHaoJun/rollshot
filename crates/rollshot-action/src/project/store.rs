@@ -437,9 +437,13 @@ pub fn load_project(
 
     let motion = match manifest.motion {
         None => MotionAssetLoad::None,
-        Some(ref asset) => {
-            load_motion_asset(project_root, asset, manifest.capture_region.width, manifest.capture_region.height, toolchain)
-        }
+        Some(ref asset) => load_motion_asset(
+            project_root,
+            asset,
+            manifest.capture_region.width,
+            manifest.capture_region.height,
+            toolchain,
+        ),
     };
 
     Ok(LoadedProject {
@@ -488,12 +492,10 @@ fn load_motion_asset(
     // Probe validation when a toolchain is available.
     if let Some(tc) = toolchain {
         match probe_motion(&file_path, tc, expected_width, expected_height) {
-            Ok(_meta) => {
-                match create_scratch_asset(&file_path, &_meta) {
-                    Ok(validated) => MotionAssetLoad::Available(validated),
-                    Err(_) => MotionAssetLoad::Unavailable(MotionFailureCategory::Filesystem),
-                }
-            }
+            Ok(_meta) => match create_scratch_asset(&file_path, &_meta) {
+                Ok(validated) => MotionAssetLoad::Available(validated),
+                Err(_) => MotionAssetLoad::Unavailable(MotionFailureCategory::Filesystem),
+            },
             Err(category) => MotionAssetLoad::Unavailable(category),
         }
     } else {
@@ -525,9 +527,7 @@ fn create_scratch_asset(
 ) -> Result<crate::motion::asset::ValidatedMotionAsset, std::io::Error> {
     let pid = std::process::id();
     let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let scratch_dir = std::env::temp_dir().join(format!(
-        "rollshot-motion-{pid}-{counter}"
-    ));
+    let scratch_dir = std::env::temp_dir().join(format!("rollshot-motion-{pid}-{counter}"));
     std::fs::create_dir_all(&scratch_dir)?;
     let scratch_file = scratch_dir.join("recording.mp4");
     std::fs::copy(source, &scratch_file)?;
@@ -1306,7 +1306,11 @@ mod tests {
 
         // Write the motion file
         std::fs::create_dir_all(root.join("assets/motion")).unwrap();
-        std::fs::write(root.join("assets/motion/recording.mp4"), b"fake mp4 content").unwrap();
+        std::fs::write(
+            root.join("assets/motion/recording.mp4"),
+            b"fake mp4 content",
+        )
+        .unwrap();
 
         // Update sha256 to match
         use sha2::Digest;
@@ -1523,10 +1527,7 @@ mod tests {
 
     // ---- Fail-closed load RED tests ----
 
-    fn write_schema3_with_motion(
-        root: &std::path::Path,
-        motion: Option<serde_json::Value>,
-    ) {
+    fn write_schema3_with_motion(root: &std::path::Path, motion: Option<serde_json::Value>) {
         let mut val: serde_json::Value =
             serde_json::from_slice(&std::fs::read(root.join("project.json")).unwrap()).unwrap();
         val["motion"] = motion.unwrap_or(serde_json::Value::Null);

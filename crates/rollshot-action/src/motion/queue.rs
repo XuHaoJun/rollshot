@@ -107,9 +107,7 @@ impl Drop for MotionFrameReceiver {
 /// The sender retains a receiver clone for non-blocking eviction. A shared
 /// `AtomicBool` tracks primary-receiver liveness so the sender can report
 /// `Disconnected` even though the clone keeps the channel technically open.
-pub fn motion_frame_mailbox(
-    capacity: usize,
-) -> (MotionFrameSender, MotionFrameReceiver) {
+pub fn motion_frame_mailbox(capacity: usize) -> (MotionFrameSender, MotionFrameReceiver) {
     let (tx, rx) = crossbeam_channel::bounded::<MotionFrame>(capacity);
     let rx_clone = rx.clone();
     let disconnected = Arc::new(AtomicBool::new(true));
@@ -119,10 +117,7 @@ pub fn motion_frame_mailbox(
             rx_clone,
             disconnected: Arc::clone(&disconnected),
         },
-        MotionFrameReceiver {
-            rx,
-            disconnected,
-        },
+        MotionFrameReceiver { rx, disconnected },
     )
 }
 

@@ -219,9 +219,7 @@ pub struct Driver {
     #[cfg(feature = "action-guide")]
     action_thread: Option<JoinHandle<()>>,
     #[cfg(feature = "action-guide")]
-    action_result: Option<
-        std::sync::mpsc::Receiver<ActionGuideCaptureResult>,
-    >,
+    action_result: Option<std::sync::mpsc::Receiver<ActionGuideCaptureResult>>,
     /// Shared motion runtime status: set to `On` after MotionRecorder::start
     /// succeeds, `Off` after runtime failure or finish.
     #[cfg(feature = "action-guide")]
@@ -614,9 +612,7 @@ impl Driver {
 
     /// Signal the action thread to stop and collect the finished
     /// ActionGuideCaptureResult.
-    pub(crate) fn finalize_action(
-        mut self,
-    ) -> Result<ActionGuideCaptureResult, String> {
+    pub(crate) fn finalize_action(mut self) -> Result<ActionGuideCaptureResult, String> {
         self.action_stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.action_thread.take() {
             let _ = handle.join();
@@ -646,16 +642,15 @@ impl ActionRecording {
         options: &ActionGuideRecordingOptions,
     ) -> Self {
         use rollshot_action::{DetectorConfig, StoreConfig};
-        let motion = options
-            .motion_toolchain
-            .as_ref()
-            .and_then(|toolchain| match MotionRecorder::start(toolchain, region.width, region.height) {
+        let motion = options.motion_toolchain.as_ref().and_then(|toolchain| {
+            match MotionRecorder::start(toolchain, region.width, region.height) {
                 Ok(recorder) => Some(recorder),
                 Err(e) => {
                     tracing::warn!(target: TARGET_CAPTURE, %e, "motion recorder start failed");
                     None
                 }
-            });
+            }
+        });
         Self {
             recorder: rollshot_action::ActionRecorder::new(
                 region,
@@ -674,11 +669,7 @@ impl ActionRecording {
     /// `at_ms` is session-relative milliseconds (monotonic from 0).
     /// `image` is a shared frame (zero-copy tee: the guide recorder and motion
     /// sink observe the same `Arc` allocation).
-    pub(crate) fn push_frame(
-        &mut self,
-        image: rollshot_action::SharedActionFrame,
-        at_ms: u64,
-    ) {
+    pub(crate) fn push_frame(&mut self, image: rollshot_action::SharedActionFrame, at_ms: u64) {
         self.recorder.ingest_frame(image, at_ms);
     }
 
@@ -688,10 +679,7 @@ impl ActionRecording {
             return;
         }
         if let Some(ref motion) = self.motion {
-            let frame = MotionFrame {
-                at_ms,
-                image,
-            };
+            let frame = MotionFrame { at_ms, image };
             if let Err(e) = motion.offer(frame) {
                 tracing::warn!(target: TARGET_CAPTURE, %e, "motion offer failed");
                 self.motion_failure = Some(e);
@@ -855,7 +843,11 @@ mod action_tests {
             &no_motion_options(),
         );
         let black = Arc::new(RgbaImage::from_pixel(64, 64, image::Rgba([0, 0, 0, 255])));
-        let white = Arc::new(RgbaImage::from_pixel(64, 64, image::Rgba([255, 255, 255, 255])));
+        let white = Arc::new(RgbaImage::from_pixel(
+            64,
+            64,
+            image::Rgba([255, 255, 255, 255]),
+        ));
         rec.push_frame(Arc::clone(&black), 0);
         // Multiple white frames to satisfy stable_frames settle.
         rec.push_frame(Arc::clone(&white), 500);
@@ -1028,7 +1020,10 @@ mod action_tests {
         );
         let result = rec.finalize_with_region(100, region);
         assert!(
-            matches!(result.capability, rollshot_action::InputCapability::VisualOnly { .. }),
+            matches!(
+                result.capability,
+                rollshot_action::InputCapability::VisualOnly { .. }
+            ),
             "capability must reflect the source"
         );
     }
@@ -1058,7 +1053,10 @@ mod action_tests {
     #[test]
     fn tee_shares_arc_pointer_between_recorder_and_motion() {
         // Requires FFmpeg. Skipped in environments without it.
-        let ffmpeg = match std::process::Command::new("ffmpeg").arg("-version").output() {
+        let ffmpeg = match std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+        {
             Ok(o) if o.status.success() => std::path::PathBuf::from("ffmpeg"),
             _ => {
                 eprintln!("SKIPPED: FFmpeg not available");
@@ -1092,10 +1090,16 @@ mod action_tests {
             MotionRuntimeStatus::On,
             "motion status must be On after successful start"
         );
-        let f1: rollshot_action::SharedActionFrame =
-            Arc::new(RgbaImage::from_pixel(64, 64, image::Rgba([10, 20, 30, 255])));
-        let f2: rollshot_action::SharedActionFrame =
-            Arc::new(RgbaImage::from_pixel(64, 64, image::Rgba([40, 50, 60, 255])));
+        let f1: rollshot_action::SharedActionFrame = Arc::new(RgbaImage::from_pixel(
+            64,
+            64,
+            image::Rgba([10, 20, 30, 255]),
+        ));
+        let f2: rollshot_action::SharedActionFrame = Arc::new(RgbaImage::from_pixel(
+            64,
+            64,
+            image::Rgba([40, 50, 60, 255]),
+        ));
         rec.push_frame(Arc::clone(&f1), 0);
         rec.offer_motion(Arc::clone(&f1), 0);
         rec.push_frame(Arc::clone(&f2), 100);
@@ -1108,7 +1112,10 @@ mod action_tests {
         // Motion outcome should be Ready if FFmpeg processed successfully.
         match result.motion {
             MotionRecordingOutcome::Ready(asset) => {
-                assert!(!asset.sha256().is_empty(), "validated asset must have a sha256 digest");
+                assert!(
+                    !asset.sha256().is_empty(),
+                    "validated asset must have a sha256 digest"
+                );
             }
             MotionRecordingOutcome::Failure(e) => {
                 // FFmpeg may fail in CI; record the failure but don't panic.
@@ -1155,7 +1162,10 @@ mod action_tests {
 
     #[test]
     fn motion_success_produces_ready_outcome() {
-        let ffmpeg = match std::process::Command::new("ffmpeg").arg("-version").output() {
+        let ffmpeg = match std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+        {
             Ok(o) if o.status.success() => std::path::PathBuf::from("ffmpeg"),
             _ => {
                 eprintln!("SKIPPED: FFmpeg not available");
@@ -1193,7 +1203,10 @@ mod action_tests {
         let result = rec.finalize_with_region(330, region);
         match result.motion {
             MotionRecordingOutcome::Ready(asset) => {
-                assert!(!asset.sha256().is_empty(), "validated asset must have a sha256 digest");
+                assert!(
+                    !asset.sha256().is_empty(),
+                    "validated asset must have a sha256 digest"
+                );
             }
             MotionRecordingOutcome::Failure(e) => {
                 panic!("motion recording should succeed with valid frames: {e}");
@@ -1203,7 +1216,10 @@ mod action_tests {
 
     #[test]
     fn cancel_motion_cleans_encoder() {
-        let ffmpeg = match std::process::Command::new("ffmpeg").arg("-version").output() {
+        let ffmpeg = match std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+        {
             Ok(o) if o.status.success() => std::path::PathBuf::from("ffmpeg"),
             _ => {
                 eprintln!("SKIPPED: FFmpeg not available");
@@ -1241,7 +1257,9 @@ mod action_tests {
         assert!(
             matches!(
                 result.motion,
-                MotionRecordingOutcome::Failure(rollshot_action::motion::MotionFailureCategory::Cancelled)
+                MotionRecordingOutcome::Failure(
+                    rollshot_action::motion::MotionFailureCategory::Cancelled
+                )
             ),
             "cancelled motion must produce Failure(Cancelled)"
         );

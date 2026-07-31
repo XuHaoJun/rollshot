@@ -2,7 +2,9 @@ use iced::futures::channel::mpsc::{self, UnboundedReceiver};
 use iced::futures::StreamExt;
 use std::sync::Mutex;
 
-use crate::macos_recording_status::{recording_status, status_title, status_tooltip, RecordingStatus};
+use crate::macos_recording_status::{
+    recording_status, status_title, status_tooltip, RecordingStatus,
+};
 
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
 use tray_icon::{TrayIcon, TrayIconBuilder};
@@ -61,10 +63,7 @@ impl Guard {
     }
 
     /// Update the tray to reflect a new motion runtime status.
-    pub fn set_motion_status(
-        &mut self,
-        status: rollshot_action::motion::MotionRuntimeStatus,
-    ) {
+    pub fn set_motion_status(&mut self, status: rollshot_action::motion::MotionRuntimeStatus) {
         let new = recording_status(status, self.status);
         if new == self.status {
             return;

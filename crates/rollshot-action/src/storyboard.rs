@@ -592,11 +592,11 @@ fn write_png_atomic(path: &Path, image: &RgbaImage) -> Result<(), StoryboardErro
 mod tests {
     use super::*;
     use crate::detector::DetectorConfig;
+    use crate::frame_store::SharedActionFrame;
     use crate::frame_store::StoreConfig;
     use crate::models::{CandidateKind, CandidateStep, CaptureRegion, DetectReason};
     use crate::recorder::{ActionRecorder, Recording};
     use image::{ImageReader, Rgba, RgbaImage};
-    use crate::frame_store::SharedActionFrame;
     use rollshot_image_document::measure_block;
     use std::sync::Arc;
 

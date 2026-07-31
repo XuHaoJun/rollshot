@@ -3406,8 +3406,9 @@ fn handle_save_recording_requested(state: &mut TimelineWorkspace) -> Update {
     }
     state.next_save_recording_operation_id += 1;
     let op_id = state.next_save_recording_operation_id;
-    state.save_recording_state =
-        super::motion::SaveRecordingState::PickingDestination { operation_id: op_id };
+    state.save_recording_state = super::motion::SaveRecordingState::PickingDestination {
+        operation_id: op_id,
+    };
     Update::task(iced::Task::perform(
         pick_mp4_save_path(picker_default_dir()),
         move |path| Message::SaveRecordingPickerChosen(path),
@@ -3465,8 +3466,7 @@ fn handle_save_recording_worker_finished(
 ) -> Update {
     let current_id = match &state.save_recording_state {
         super::motion::SaveRecordingState::Exporting {
-            operation_id: id,
-            ..
+            operation_id: id, ..
         } => *id,
         _ => return Update::none(),
     };

@@ -662,7 +662,10 @@ mod tests {
         );
         let img1 = RgbaImage::from_pixel(8, 8, image::Rgba([10, 20, 30, 255]));
         let img2 = RgbaImage::from_pixel(8, 8, image::Rgba([40, 50, 60, 255]));
-        rec.ingest_frame(std::sync::Arc::new(RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 0, 255]))), 0);
+        rec.ingest_frame(
+            std::sync::Arc::new(RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 0, 255]))),
+            0,
+        );
         rec.ingest_frame(std::sync::Arc::new(img1.clone()), 100);
         rec.ingest_frame(std::sync::Arc::new(img1.clone()), 200);
         rec.ingest_frame(std::sync::Arc::new(img1.clone()), 300);

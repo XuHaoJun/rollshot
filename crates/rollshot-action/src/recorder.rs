@@ -176,8 +176,8 @@ impl ActionRecorder {
 mod tests {
     use super::*;
     use crate::detector::DetectorConfig;
-    use crate::frame_store::StoreConfig;
     use crate::frame_store::SharedActionFrame;
+    use crate::frame_store::StoreConfig;
     use crate::models::{
         CandidateKind, CaptureRegion, MouseButton, SemanticAction, TimedSemanticAction,
     };

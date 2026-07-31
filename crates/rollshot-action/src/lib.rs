@@ -7,7 +7,6 @@
 //! or device paths. See `docs/superpowers/specs/2026-06-15-action-guide-capture-design.md`.
 
 pub mod caption_proposal;
-pub mod motion;
 mod detector;
 mod diagnostics;
 mod error;
@@ -19,6 +18,7 @@ mod guide;
 mod input;
 mod metrics;
 mod models;
+pub mod motion;
 pub mod project;
 mod recorder;
 #[cfg(test)]
@@ -55,6 +55,12 @@ pub use models::{
     DetectReason, FrameId, FrameRef, GuideStep, ImportWarning, InputCapability, InputSourceKind,
     Millis, MouseButton, Point, SemanticAction, SemanticKey, TimedSemanticAction,
 };
+pub use motion::{
+    motion_frame_mailbox, CfrEmission, CfrScheduler, MotionAudio, MotionCodec,
+    MotionFailureCategory, MotionFrame, MotionFrameReceiver, MotionFrameSender, MotionMetadata,
+    MotionOfferResult, MotionRecorder, MotionRecordingOutcome, MotionRuntimeStatus,
+    ValidatedMotionAsset,
+};
 pub use recorder::{ActionRecorder, Recording};
 pub use step_frame_source::{
     load_step_frame, LoadedStepFrame, ProjectFrameSource, StepFrameLoadRequest, StepFrameSource,
@@ -66,12 +72,6 @@ pub use storyboard::{
     StoryboardExportResult, StoryboardOptions, StoryboardRenderResult, StoryboardStep,
 };
 pub use video::{export_reviewed_video, export_video, VideoOptions};
-pub use motion::{
-    motion_frame_mailbox, CfrEmission, CfrScheduler, MotionAudio, MotionCodec,
-    MotionFailureCategory, MotionFrame, MotionFrameReceiver, MotionFrameSender,
-    MotionMetadata, MotionOfferResult, MotionRecorder, MotionRecordingOutcome,
-    MotionRuntimeStatus, ValidatedMotionAsset,
-};
 pub use video_import::{
     cleanup_stale_import_scratch, import_video, ImportedScratch, ImportedWorkspaceSeed,
     VideoImportCancellation, VideoImportError, VideoImportPass, VideoImportProgress,

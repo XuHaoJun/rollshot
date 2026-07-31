@@ -189,9 +189,9 @@ pub fn render_import_notices(warnings: &[crate::models::ImportWarning]) -> Strin
 mod tests {
     use super::*;
     use crate::detector::DetectorConfig;
+    use crate::frame_store::SharedActionFrame;
     use crate::frame_store::{FrameStore, StoreConfig};
     use crate::guide::Guide;
-    use crate::frame_store::SharedActionFrame;
     use crate::models::{
         CandidateKind, CandidateStep, CaptureRegion, DetectReason, InputCapability, InputSourceKind,
     };
