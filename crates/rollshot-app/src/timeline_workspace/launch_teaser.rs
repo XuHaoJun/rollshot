@@ -1,4 +1,5 @@
 //! Launch teaser workspace state, eligibility, and lifecycle.
+#![allow(dead_code)]
 //!
 //! Manages the teaser creation → review → agent → preview → render → complete
 //! state machine inside the Timeline Workspace. A teaser can only be created

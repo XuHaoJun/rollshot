@@ -38,6 +38,8 @@ impl Update {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
+#[allow(clippy::large_enum_variant)]
 pub enum Message {
     SelectStep(usize),
     TitleChanged(String),
@@ -3080,7 +3082,7 @@ fn handle_teaser_preview_finished(
     // Only handle if we're in PreviewRendering with matching ID
     if let super::launch_teaser::LaunchTeaserState::PreviewRendering {
         operation_id: id,
-        review,
+        review: _review,
     } = &state.launch_teaser
     {
         if *id != operation_id {
@@ -3170,7 +3172,7 @@ fn handle_teaser_save_picker_chosen(
         super::launch_teaser::LaunchTeaserState::Closed,
     ) {
         let op_id = review.next_operation_id;
-        let plan = review.plan.clone();
+        let _plan = review.plan.clone();
         state.launch_teaser = super::launch_teaser::LaunchTeaserState::FinalRendering {
             operation_id: op_id,
             review,
@@ -3218,8 +3220,8 @@ fn handle_teaser_render_finished(
 ) -> Update {
     if let super::launch_teaser::LaunchTeaserState::FinalRendering {
         operation_id: id,
-        review,
-        destination,
+        review: _review,
+        destination: _destination,
     } = &state.launch_teaser
     {
         if *id != operation_id {
@@ -3255,12 +3257,8 @@ fn handle_teaser_render_finished(
                 // Persist sidecar if project root is available.
                 let sidecar_persisted = if let Some(root) = state.project_root() {
                     let plan_sha256 =
-                        match rollshot_action::launch_teaser::persistence::compute_plan_sha256(
-                            &plan,
-                        ) {
-                            Ok(h) => h,
-                            Err(_) => String::new(),
-                        };
+                        rollshot_action::launch_teaser::persistence::compute_plan_sha256(&plan)
+                            .unwrap_or_default();
                     let now_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()

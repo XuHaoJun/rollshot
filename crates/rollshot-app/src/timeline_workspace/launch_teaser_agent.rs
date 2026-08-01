@@ -1,4 +1,5 @@
 //! Optional repository scope and durable agent proposal for launch teasers.
+#![allow(dead_code)]
 //!
 //! Provides repository-scope selection, agent orchestration for
 //! `suggest_launch_teaser_task`, durable ReadyForReview artifact promotion,
@@ -118,6 +119,7 @@ pub(crate) enum ScopeError {
 /// States for the agent proposal lifecycle.
 #[derive(Debug)]
 #[allow(dead_code)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum LaunchTeaserAgentState {
     /// No agent run active.
     Idle,

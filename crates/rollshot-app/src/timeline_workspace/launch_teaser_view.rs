@@ -1,4 +1,5 @@
 //! Launch teaser review surface view.
+#![allow(dead_code)]
 //!
 //! Renders the Create teaser entry control, the full review layout (shot cards,
 //! keyframe preview, controls, validation, provenance, agent diff), and the
@@ -51,7 +52,7 @@ fn seeding_view<'a>() -> Element<'a, Message> {
 }
 
 fn review_view<'a>(
-    ws: &'a TimelineWorkspace,
+    _ws: &'a TimelineWorkspace,
     review: &'a LaunchTeaserReviewState,
 ) -> Element<'a, Message> {
     let header = row![
