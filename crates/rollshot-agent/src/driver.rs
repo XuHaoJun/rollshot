@@ -208,6 +208,30 @@ pub(crate) fn compose_caption_prompt(
 pub const CAPTION_SYSTEM_ENVELOPE: &str =
     "You produce compact structured suggestions for Rollshot Action Guide captions.";
 
+/// System envelope for a launch teaser run.
+pub const LAUNCH_TEASER_SYSTEM_ENVELOPE: &str =
+    "You propose bounded changes to a Rollshot launch teaser plan from reviewed Action Guide evidence.";
+
+/// Compose a full launch teaser system prompt from the bundled skill body
+/// and the authoritative envelope.
+pub(crate) fn compose_launch_teaser_prompt(
+    skill_use: &crate::skills::SkillUse,
+) -> Result<String, DriverError> {
+    if skill_use.package_id().as_str() != crate::skills::ACTION_GUIDE_LAUNCH_TEASER_PACKAGE_ID {
+        return Err(DriverError::AgentProtocolFailure(
+            "expected launch teaser skill".to_string(),
+        ));
+    }
+    Ok(format!(
+        "{envelope}\n\n<rollshot-skill package=\"{pkg}\" digest=\"{digest}\" declared_version=\"{ver}\">\n{body}\n</rollshot-skill>",
+        envelope = LAUNCH_TEASER_SYSTEM_ENVELOPE,
+        pkg = skill_use.package_id().as_str(),
+        digest = skill_use.digest(),
+        ver = skill_use.declared_version().unwrap_or("unknown"),
+        body = skill_use.body(),
+    ))
+}
+
 /// Frozen profile for a visual annotation run.
 ///
 /// Wraps the resolved bundled skill and exposes the exact system prompt
