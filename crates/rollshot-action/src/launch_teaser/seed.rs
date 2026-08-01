@@ -10,9 +10,9 @@ use crate::project::{LoadedProject, MotionAssetLoad, ProjectStepId};
 
 use super::error::{LaunchTeaserBindingError, LaunchTeaserSeedError};
 use super::plan::{
-    FocusPathV1, LaunchTeaserPlanV1,
-    LaunchTeaserProvenanceV1, LaunchTeaserShotV1, LaunchTeaserSourceV1, NormalizedPointV1,
-    SpeedV1, TransitionV1, LAUNCH_TEASER_SCHEMA_VERSION, MAX_SHOTS,
+    FocusPathV1, LaunchTeaserPlanV1, LaunchTeaserProvenanceV1, LaunchTeaserShotV1,
+    LaunchTeaserSourceV1, NormalizedPointV1, SpeedV1, TransitionV1, LAUNCH_TEASER_SCHEMA_VERSION,
+    MAX_SHOTS,
 };
 
 /// Deterministic seed algorithm version.
@@ -46,7 +46,9 @@ fn selected_indices(step_count: usize) -> Vec<usize> {
 }
 
 /// Generate a deterministic launch teaser plan from a loaded project.
-pub fn seed_launch_teaser(loaded: &LoadedProject) -> Result<LaunchTeaserPlanV1, LaunchTeaserSeedError> {
+pub fn seed_launch_teaser(
+    loaded: &LoadedProject,
+) -> Result<LaunchTeaserPlanV1, LaunchTeaserSeedError> {
     let manifest = &loaded.manifest;
 
     // Need at least MIN_SHOTS reviewed steps.
@@ -66,10 +68,8 @@ pub fn seed_launch_teaser(loaded: &LoadedProject) -> Result<LaunchTeaserPlanV1, 
     let motion_sha256 = motion.sha256().to_string();
 
     // Build projection for digest.
-    let projection =
-        ActionGuideContextProjectionV1::from_loaded_project(loaded).map_err(|_| {
-            LaunchTeaserSeedError::InsufficientSteps
-        })?;
+    let projection = ActionGuideContextProjectionV1::from_loaded_project(loaded)
+        .map_err(|_| LaunchTeaserSeedError::InsufficientSteps)?;
 
     // Select steps.
     let indices = selected_indices(manifest.steps.len());
@@ -77,12 +77,7 @@ pub fn seed_launch_teaser(loaded: &LoadedProject) -> Result<LaunchTeaserPlanV1, 
     let durations = target_durations(shot_count);
 
     // Allocate source windows around each step's at_ms.
-    let windows = allocate_windows(
-        &indices,
-        &durations,
-        &manifest.steps,
-        motion_duration_ms,
-    )?;
+    let windows = allocate_windows(&indices, &durations, &manifest.steps, motion_duration_ms)?;
 
     // Build shots.
     let shots: Vec<LaunchTeaserShotV1> = indices
@@ -91,10 +86,7 @@ pub fn seed_launch_teaser(loaded: &LoadedProject) -> Result<LaunchTeaserPlanV1, 
         .zip(durations.iter())
         .map(|((&idx, &(start, end)), _dur)| {
             let step = &manifest.steps[idx];
-            let caption = step
-                .caption
-                .clone()
-                .unwrap_or_else(|| step.title.clone());
+            let caption = step.caption.clone().unwrap_or_else(|| step.title.clone());
             LaunchTeaserShotV1 {
                 reviewed_step_id: step.id,
                 source_start_ms: start,
@@ -199,10 +191,8 @@ pub fn validate_launch_teaser_binding(
     }
 
     // Rebuild projection and compare digest.
-    let projection =
-        ActionGuideContextProjectionV1::from_loaded_project(loaded).map_err(|_| {
-            LaunchTeaserBindingError::StaleProject
-        })?;
+    let projection = ActionGuideContextProjectionV1::from_loaded_project(loaded)
+        .map_err(|_| LaunchTeaserBindingError::StaleProject)?;
     if plan.source.projection_digest != projection.digest() {
         return Err(LaunchTeaserBindingError::StaleProject);
     }
@@ -336,7 +326,11 @@ mod tests {
     fn seed_keeps_first_last_and_evenly_samples_interior() {
         let loaded = loaded_project_with_steps(8);
         let plan = seed_launch_teaser(&loaded).unwrap();
-        let ids: Vec<u64> = plan.shots.iter().map(|shot| shot.reviewed_step_id.0).collect();
+        let ids: Vec<u64> = plan
+            .shots
+            .iter()
+            .map(|shot| shot.reviewed_step_id.0)
+            .collect();
         assert_eq!(ids, vec![1, 2, 4, 6, 8]);
     }
 
@@ -451,7 +445,9 @@ mod tests {
         let mut plan = seed_launch_teaser(&loaded).unwrap();
         plan.source.motion_sha256 = "f".repeat(64);
         assert_eq!(
-            validate_launch_teaser_binding(&plan, &loaded).unwrap_err().category(),
+            validate_launch_teaser_binding(&plan, &loaded)
+                .unwrap_err()
+                .category(),
             "stale-motion"
         );
     }
@@ -462,7 +458,9 @@ mod tests {
         let mut plan = seed_launch_teaser(&loaded).unwrap();
         plan.source.project_revision = 999;
         assert_eq!(
-            validate_launch_teaser_binding(&plan, &loaded).unwrap_err().category(),
+            validate_launch_teaser_binding(&plan, &loaded)
+                .unwrap_err()
+                .category(),
             "stale-project"
         );
     }
@@ -473,7 +471,9 @@ mod tests {
         let mut plan = seed_launch_teaser(&loaded).unwrap();
         plan.source.projection_digest = "f".repeat(64);
         assert_eq!(
-            validate_launch_teaser_binding(&plan, &loaded).unwrap_err().category(),
+            validate_launch_teaser_binding(&plan, &loaded)
+                .unwrap_err()
+                .category(),
             "stale-project"
         );
     }
@@ -484,7 +484,9 @@ mod tests {
         let mut plan = seed_launch_teaser(&loaded).unwrap();
         plan.shots[0].reviewed_step_id = ProjectStepId(999);
         assert_eq!(
-            validate_launch_teaser_binding(&plan, &loaded).unwrap_err().category(),
+            validate_launch_teaser_binding(&plan, &loaded)
+                .unwrap_err()
+                .category(),
             "missing-step"
         );
     }

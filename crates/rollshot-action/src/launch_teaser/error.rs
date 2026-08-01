@@ -187,50 +187,110 @@ mod tests {
 
     #[test]
     fn error_categories_are_stable() {
-        assert_eq!(LaunchTeaserError::UnsupportedSchema.category(), "unsupported-schema");
+        assert_eq!(
+            LaunchTeaserError::UnsupportedSchema.category(),
+            "unsupported-schema"
+        );
         assert_eq!(LaunchTeaserError::ShotCount.category(), "shot-count");
-        assert_eq!(LaunchTeaserError::SourceBinding.category(), "source-binding");
+        assert_eq!(
+            LaunchTeaserError::SourceBinding.category(),
+            "source-binding"
+        );
         assert_eq!(LaunchTeaserError::SourceRange.category(), "source-range");
         assert_eq!(LaunchTeaserError::FocusPath.category(), "focus-path");
         assert_eq!(LaunchTeaserError::Speed.category(), "speed");
         assert_eq!(LaunchTeaserError::Transition.category(), "transition");
         assert_eq!(LaunchTeaserError::Text.category(), "text");
         assert_eq!(LaunchTeaserError::Duration.category(), "duration");
-        assert_eq!(LaunchTeaserError::ArithmeticOverflow.category(), "arithmetic-overflow");
+        assert_eq!(
+            LaunchTeaserError::ArithmeticOverflow.category(),
+            "arithmetic-overflow"
+        );
     }
 
     #[test]
     fn seed_error_categories_are_stable() {
-        assert_eq!(LaunchTeaserSeedError::InsufficientSteps.category(), "insufficient-steps");
-        assert_eq!(LaunchTeaserSeedError::InsufficientMotion.category(), "insufficient-motion");
+        assert_eq!(
+            LaunchTeaserSeedError::InsufficientSteps.category(),
+            "insufficient-steps"
+        );
+        assert_eq!(
+            LaunchTeaserSeedError::InsufficientMotion.category(),
+            "insufficient-motion"
+        );
     }
 
     #[test]
     fn binding_error_categories_are_stable() {
-        assert_eq!(LaunchTeaserBindingError::StaleProject.category(), "stale-project");
-        assert_eq!(LaunchTeaserBindingError::StaleMotion.category(), "stale-motion");
-        assert_eq!(LaunchTeaserBindingError::MissingStep.category(), "missing-step");
+        assert_eq!(
+            LaunchTeaserBindingError::StaleProject.category(),
+            "stale-project"
+        );
+        assert_eq!(
+            LaunchTeaserBindingError::StaleMotion.category(),
+            "stale-motion"
+        );
+        assert_eq!(
+            LaunchTeaserBindingError::MissingStep.category(),
+            "missing-step"
+        );
     }
 
     #[test]
     fn persistence_error_categories_are_stable() {
         assert_eq!(LaunchTeaserPersistenceError::Io.category(), "io");
-        assert_eq!(LaunchTeaserPersistenceError::Encoding.category(), "encoding");
-        assert_eq!(LaunchTeaserPersistenceError::DigestMismatch.category(), "digest-mismatch");
+        assert_eq!(
+            LaunchTeaserPersistenceError::Encoding.category(),
+            "encoding"
+        );
+        assert_eq!(
+            LaunchTeaserPersistenceError::DigestMismatch.category(),
+            "digest-mismatch"
+        );
     }
 
     #[test]
     fn render_error_categories_are_stable() {
         assert_eq!(LaunchTeaserRenderError::Cancelled.category(), "cancelled");
-        assert_eq!(LaunchTeaserRenderError::ToolchainUnavailable.category(), "toolchain-unavailable");
-        assert_eq!(LaunchTeaserRenderError::BindingFailed.category(), "binding-failed");
-        assert_eq!(LaunchTeaserRenderError::PlanValidationFailed.category(), "plan-validation-failed");
-        assert_eq!(LaunchTeaserRenderError::FfmpegSpawnFailed.category(), "ffmpeg-spawn-failed");
-        assert_eq!(LaunchTeaserRenderError::FfmpegExecutionFailed.category(), "ffmpeg-execution-failed");
-        assert_eq!(LaunchTeaserRenderError::FfprobeFailed.category(), "ffprobe-failed");
-        assert_eq!(LaunchTeaserRenderError::OutputVerificationFailed.category(), "output-verification-failed");
-        assert_eq!(LaunchTeaserRenderError::OverlayFailed.category(), "overlay-failed");
-        assert_eq!(LaunchTeaserRenderError::GraphCompilationFailed.category(), "graph-compilation-failed");
-        assert_eq!(LaunchTeaserRenderError::ScratchFailed.category(), "scratch-failed");
+        assert_eq!(
+            LaunchTeaserRenderError::ToolchainUnavailable.category(),
+            "toolchain-unavailable"
+        );
+        assert_eq!(
+            LaunchTeaserRenderError::BindingFailed.category(),
+            "binding-failed"
+        );
+        assert_eq!(
+            LaunchTeaserRenderError::PlanValidationFailed.category(),
+            "plan-validation-failed"
+        );
+        assert_eq!(
+            LaunchTeaserRenderError::FfmpegSpawnFailed.category(),
+            "ffmpeg-spawn-failed"
+        );
+        assert_eq!(
+            LaunchTeaserRenderError::FfmpegExecutionFailed.category(),
+            "ffmpeg-execution-failed"
+        );
+        assert_eq!(
+            LaunchTeaserRenderError::FfprobeFailed.category(),
+            "ffprobe-failed"
+        );
+        assert_eq!(
+            LaunchTeaserRenderError::OutputVerificationFailed.category(),
+            "output-verification-failed"
+        );
+        assert_eq!(
+            LaunchTeaserRenderError::OverlayFailed.category(),
+            "overlay-failed"
+        );
+        assert_eq!(
+            LaunchTeaserRenderError::GraphCompilationFailed.category(),
+            "graph-compilation-failed"
+        );
+        assert_eq!(
+            LaunchTeaserRenderError::ScratchFailed.category(),
+            "scratch-failed"
+        );
     }
 }

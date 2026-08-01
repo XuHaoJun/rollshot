@@ -101,24 +101,16 @@ pub fn compile_ffmpeg_graph(
         let cy_end = (shot.focus_path.end.y as f64 / 10_000.0) * src_h as f64;
 
         let source_dur = shot.source_end_ms - shot.source_start_ms;
-        let displayed_dur_ms = (source_dur * 1_000) / (shot.speed.permille() as u64);
+        let displayed_dur_ms = (source_dur * 1_000) / (shot.speed.permille());
         let displayed_dur_s = displayed_dur_ms as f64 / 1_000.0;
 
         // Interpolated crop position.
-        let crop_x_expr = format!(
-            "'({cx_start})+(({cx_end})-({cx_start}))*t/{displayed_dur_s}'"
-        );
-        let crop_y_expr = format!(
-            "'({cy_start})+(({cy_end})-({cy_start}))*t/{displayed_dur_s}'"
-        );
+        let crop_x_expr = format!("'({cx_start})+(({cx_end})-({cx_start}))*t/{displayed_dur_s}'");
+        let crop_y_expr = format!("'({cy_start})+(({cy_end})-({cy_start}))*t/{displayed_dur_s}'");
 
         // Clamp crop to stay within source bounds.
-        let crop_x_expr = format!(
-            "'min(max({crop_x_expr}-({crop_w}/2),0),{src_w}-{crop_w})'"
-        );
-        let crop_y_expr = format!(
-            "'min(max({crop_y_expr}-({crop_h}/2),0),{src_h}-{crop_h})'"
-        );
+        let crop_x_expr = format!("'min(max({crop_x_expr}-({crop_w}/2),0),{src_w}-{crop_w})'");
+        let crop_y_expr = format!("'min(max({crop_y_expr}-({crop_h}/2),0),{src_h}-{crop_h})'");
 
         filters.push(format!(
             "[trim{i}]crop={crop_w}:{crop_h}:{crop_x_expr}:{crop_y_expr}[crop{i}]"
@@ -216,13 +208,14 @@ pub fn compile_ffmpeg_graph(
         .map_err(|_| LaunchTeaserRenderError::GraphCompilationFailed)?;
 
     // Build FFmpeg arguments.
-    let mut args: Vec<OsString> = Vec::new();
-    args.push(OsStr::new("-y").into());
-    args.push(OsStr::new("-nostdin").into());
-    args.push(OsStr::new("-i").into());
-    args.push(motion_path.into());
-    args.push(OsStr::new("-filter_complex_script").into());
-    args.push(filter_path.into());
+    let mut args: Vec<OsString> = vec![
+        OsStr::new("-y").into(),
+        OsStr::new("-nostdin").into(),
+        OsStr::new("-i").into(),
+        motion_path.into(),
+        OsStr::new("-filter_complex_script").into(),
+        filter_path.into(),
+    ];
 
     // Map the final output label.
     args.push(OsStr::new("-map").into());
@@ -253,7 +246,7 @@ fn cumulative_start_ms(plan: &super::plan::LaunchTeaserPlanV1, index: usize) -> 
             return total;
         }
         let source_dur = shot.source_end_ms.saturating_sub(shot.source_start_ms);
-        let displayed = (source_dur.saturating_mul(1_000)) / (shot.speed.permille() as u64);
+        let displayed = (source_dur.saturating_mul(1_000)) / (shot.speed.permille());
         total = total.saturating_add(displayed);
         if i + 1 < plan.shots.len() {
             total = total.saturating_sub(shot.transition.overlap_ms());
@@ -365,12 +358,16 @@ mod tests {
     fn graph_uses_profile_dimensions() {
         let plan = valid_plan().validate().unwrap();
         let scratch = tempfile::tempdir().unwrap();
-        let assets =
-            prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
+        let assets = prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
         let motion = Path::new("/tmp/fake.mp4");
         let output = Path::new("/tmp/out.mp4");
-        let graph = compile_ffmpeg_graph(
-            &plan, motion, &assets, output, RenderProfile::Final, scratch.path(),
+        let _graph = compile_ffmpeg_graph(
+            &plan,
+            motion,
+            &assets,
+            output,
+            RenderProfile::Final,
+            scratch.path(),
         )
         .unwrap();
         let filter = std::fs::read_to_string(scratch.path().join("filter.txt")).unwrap();
@@ -382,12 +379,16 @@ mod tests {
     fn preview_graph_uses_smaller_dimensions() {
         let plan = valid_plan().validate().unwrap();
         let scratch = tempfile::tempdir().unwrap();
-        let assets =
-            prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Preview).unwrap();
+        let assets = prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Preview).unwrap();
         let motion = Path::new("/tmp/fake.mp4");
         let output = Path::new("/tmp/out.mp4");
-        let graph = compile_ffmpeg_graph(
-            &plan, motion, &assets, output, RenderProfile::Preview, scratch.path(),
+        let _graph = compile_ffmpeg_graph(
+            &plan,
+            motion,
+            &assets,
+            output,
+            RenderProfile::Preview,
+            scratch.path(),
         )
         .unwrap();
         let filter = std::fs::read_to_string(scratch.path().join("filter.txt")).unwrap();
@@ -399,12 +400,16 @@ mod tests {
     fn graph_contains_no_audio_mapping() {
         let plan = valid_plan().validate().unwrap();
         let scratch = tempfile::tempdir().unwrap();
-        let assets =
-            prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
+        let assets = prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
         let motion = Path::new("/tmp/fake.mp4");
         let output = Path::new("/tmp/out.mp4");
         let graph = compile_ffmpeg_graph(
-            &plan, motion, &assets, output, RenderProfile::Final, scratch.path(),
+            &plan,
+            motion,
+            &assets,
+            output,
+            RenderProfile::Final,
+            scratch.path(),
         )
         .unwrap();
         let args: Vec<String> = graph
@@ -419,12 +424,16 @@ mod tests {
     fn graph_uses_h264_codec() {
         let plan = valid_plan().validate().unwrap();
         let scratch = tempfile::tempdir().unwrap();
-        let assets =
-            prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
+        let assets = prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
         let motion = Path::new("/tmp/fake.mp4");
         let output = Path::new("/tmp/out.mp4");
         let graph = compile_ffmpeg_graph(
-            &plan, motion, &assets, output, RenderProfile::Final, scratch.path(),
+            &plan,
+            motion,
+            &assets,
+            output,
+            RenderProfile::Final,
+            scratch.path(),
         )
         .unwrap();
         let args: Vec<String> = graph
@@ -440,12 +449,16 @@ mod tests {
     fn graph_uses_30fps() {
         let plan = valid_plan().validate().unwrap();
         let scratch = tempfile::tempdir().unwrap();
-        let assets =
-            prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
+        let assets = prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
         let motion = Path::new("/tmp/fake.mp4");
         let output = Path::new("/tmp/out.mp4");
         let graph = compile_ffmpeg_graph(
-            &plan, motion, &assets, output, RenderProfile::Final, scratch.path(),
+            &plan,
+            motion,
+            &assets,
+            output,
+            RenderProfile::Final,
+            scratch.path(),
         )
         .unwrap();
         let args: Vec<String> = graph
@@ -460,12 +473,16 @@ mod tests {
     fn filter_graph_written_to_scratch_file() {
         let plan = valid_plan().validate().unwrap();
         let scratch = tempfile::tempdir().unwrap();
-        let assets =
-            prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
+        let assets = prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
         let motion = Path::new("/tmp/fake.mp4");
         let output = Path::new("/tmp/out.mp4");
         let _graph = compile_ffmpeg_graph(
-            &plan, motion, &assets, output, RenderProfile::Final, scratch.path(),
+            &plan,
+            motion,
+            &assets,
+            output,
+            RenderProfile::Final,
+            scratch.path(),
         )
         .unwrap();
         let filter_path = scratch.path().join("filter.txt");
@@ -480,12 +497,16 @@ mod tests {
     fn graph_args_contain_nostdin() {
         let plan = valid_plan().validate().unwrap();
         let scratch = tempfile::tempdir().unwrap();
-        let assets =
-            prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
+        let assets = prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
         let motion = Path::new("/tmp/fake.mp4");
         let output = Path::new("/tmp/out.mp4");
         let graph = compile_ffmpeg_graph(
-            &plan, motion, &assets, output, RenderProfile::Final, scratch.path(),
+            &plan,
+            motion,
+            &assets,
+            output,
+            RenderProfile::Final,
+            scratch.path(),
         )
         .unwrap();
         let args: Vec<String> = graph
@@ -500,12 +521,16 @@ mod tests {
     fn graph_args_contain_filter_complex_script() {
         let plan = valid_plan().validate().unwrap();
         let scratch = tempfile::tempdir().unwrap();
-        let assets =
-            prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
+        let assets = prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
         let motion = Path::new("/tmp/fake.mp4");
         let output = Path::new("/tmp/out.mp4");
         let graph = compile_ffmpeg_graph(
-            &plan, motion, &assets, output, RenderProfile::Final, scratch.path(),
+            &plan,
+            motion,
+            &assets,
+            output,
+            RenderProfile::Final,
+            scratch.path(),
         )
         .unwrap();
         let args: Vec<String> = graph
@@ -549,18 +574,26 @@ mod tests {
     fn shot0_filter_contains_both_hook_and_caption_overlay() {
         let plan = valid_plan().validate().unwrap();
         let scratch = tempfile::tempdir().unwrap();
-        let assets =
-            prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
+        let assets = prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
         let motion = Path::new("/tmp/fake.mp4");
         let output = Path::new("/tmp/out.mp4");
         let _graph = compile_ffmpeg_graph(
-            &plan, motion, &assets, output, RenderProfile::Final, scratch.path(),
+            &plan,
+            motion,
+            &assets,
+            output,
+            RenderProfile::Final,
+            scratch.path(),
         )
         .unwrap();
         let filter = std::fs::read_to_string(scratch.path().join("filter.txt")).unwrap();
         // Shot 0 has hook + caption = two overlays chained.
         let shot0_overlays: Vec<_> = assets.iter().filter(|a| a.shot_index == 0).collect();
-        assert_eq!(shot0_overlays.len(), 2, "expected hook + caption for shot 0");
+        assert_eq!(
+            shot0_overlays.len(),
+            2,
+            "expected hook + caption for shot 0"
+        );
         // Both overlay files must appear in the filter graph.
         for overlay in &shot0_overlays {
             let fname = overlay.path.file_name().unwrap().to_string_lossy();
@@ -577,18 +610,26 @@ mod tests {
     fn shot2_filter_contains_both_caption_and_outro_overlay() {
         let plan = valid_plan().validate().unwrap();
         let scratch = tempfile::tempdir().unwrap();
-        let assets =
-            prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
+        let assets = prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
         let motion = Path::new("/tmp/fake.mp4");
         let output = Path::new("/tmp/out.mp4");
         let _graph = compile_ffmpeg_graph(
-            &plan, motion, &assets, output, RenderProfile::Final, scratch.path(),
+            &plan,
+            motion,
+            &assets,
+            output,
+            RenderProfile::Final,
+            scratch.path(),
         )
         .unwrap();
         let filter = std::fs::read_to_string(scratch.path().join("filter.txt")).unwrap();
         // Shot 2 has caption + outro = two overlays chained.
         let shot2_overlays: Vec<_> = assets.iter().filter(|a| a.shot_index == 2).collect();
-        assert_eq!(shot2_overlays.len(), 2, "expected caption + outro for shot 2");
+        assert_eq!(
+            shot2_overlays.len(),
+            2,
+            "expected caption + outro for shot 2"
+        );
         for overlay in &shot2_overlays {
             let fname = overlay.path.file_name().unwrap().to_string_lossy();
             assert!(

@@ -110,7 +110,7 @@ pub fn prepare_overlay_assets(
 /// Compute the displayed duration of a single shot.
 fn shot_displayed_ms(shot: &super::plan::LaunchTeaserShotV1) -> u64 {
     let source_dur = shot.source_end_ms.saturating_sub(shot.source_start_ms);
-    (source_dur.saturating_mul(1_000)) / (shot.speed.permille() as u64)
+    (source_dur.saturating_mul(1_000)) / (shot.speed.permille())
 }
 
 /// Compute the cumulative start time of shot `index`.
@@ -237,8 +237,7 @@ mod tests {
     fn overlay_assets_created_for_all_shots() {
         let plan = valid_plan().validate().unwrap();
         let scratch = tempfile::tempdir().unwrap();
-        let assets =
-            prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
+        let assets = prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
         // 3 captions + 1 hook + 1 outro = 5 overlays
         assert_eq!(assets.len(), 5);
     }
@@ -247,8 +246,7 @@ mod tests {
     fn overlay_files_are_unique() {
         let plan = valid_plan().validate().unwrap();
         let scratch = tempfile::tempdir().unwrap();
-        let assets =
-            prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
+        let assets = prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
         let paths: Vec<_> = assets.iter().map(|a| &a.path).collect();
         let unique_len = paths.iter().collect::<std::collections::HashSet<_>>().len();
         assert_eq!(unique_len, paths.len());
@@ -258,8 +256,7 @@ mod tests {
     fn overlay_files_exist_on_disk() {
         let plan = valid_plan().validate().unwrap();
         let scratch = tempfile::tempdir().unwrap();
-        let assets =
-            prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
+        let assets = prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
         for asset in &assets {
             assert!(asset.path.is_file(), "missing overlay: {:?}", asset.path);
         }
@@ -269,8 +266,7 @@ mod tests {
     fn preview_overlays_use_smaller_dimensions() {
         let plan = valid_plan().validate().unwrap();
         let scratch = tempfile::tempdir().unwrap();
-        let assets =
-            prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Preview).unwrap();
+        let assets = prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Preview).unwrap();
         // Verify at least one file is created and readable.
         let img = image::open(&assets[0].path).unwrap();
         assert_eq!(img.width(), PREVIEW_WIDTH);
@@ -281,8 +277,7 @@ mod tests {
     fn final_overlays_use_full_dimensions() {
         let plan = valid_plan().validate().unwrap();
         let scratch = tempfile::tempdir().unwrap();
-        let assets =
-            prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
+        let assets = prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
         let img = image::open(&assets[0].path).unwrap();
         assert_eq!(img.width(), FINAL_WIDTH);
         assert_eq!(img.height(), FINAL_HEIGHT);
@@ -293,9 +288,11 @@ mod tests {
         let plan = valid_plan().validate().unwrap();
         let total = plan.duration_ms();
         let scratch = tempfile::tempdir().unwrap();
-        let assets =
-            prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
-        let outro = assets.iter().find(|a| a.path.to_string_lossy().contains("outro")).unwrap();
+        let assets = prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
+        let outro = assets
+            .iter()
+            .find(|a| a.path.to_string_lossy().contains("outro"))
+            .unwrap();
         assert_eq!(outro.start_ms, total - OUTRO_DURATION_MS);
         assert_eq!(outro.end_ms, total);
     }

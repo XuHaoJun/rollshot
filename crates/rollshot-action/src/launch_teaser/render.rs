@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
-use crate::project::LoadedProject;
 use crate::project::publish::PublishCancellation;
+use crate::project::LoadedProject;
 use crate::video_import::VideoToolchain;
 
 use super::error::LaunchTeaserRenderError;
@@ -122,11 +122,7 @@ pub fn render_launch_teaser(
     )?;
 
     // 6. Spawn FFmpeg with periodic cancellation checks.
-    run_ffmpeg_cancellable(
-        &request.toolchain.ffmpeg,
-        graph,
-        request.cancellation,
-    )?;
+    run_ffmpeg_cancellable(&request.toolchain.ffmpeg, graph, request.cancellation)?;
 
     // 7. Verify output with ffprobe.
     let verified = verify_launch_teaser_output(
@@ -140,8 +136,8 @@ pub fn render_launch_teaser(
     match request.profile {
         RenderProfile::Final => {
             // Compute output digest.
-            let output_bytes =
-                std::fs::read(&temp_output).map_err(|_| LaunchTeaserRenderError::FfmpegExecutionFailed)?;
+            let output_bytes = std::fs::read(&temp_output)
+                .map_err(|_| LaunchTeaserRenderError::FfmpegExecutionFailed)?;
             let mut hasher = Sha256::new();
             hasher.update(&output_bytes);
             let output_sha256 = format!("{:x}", hasher.finalize());
@@ -231,7 +227,11 @@ fn run_ffmpeg_cancellable(
                             use std::io::Read;
                             let mut buf = String::new();
                             let _ = s.read_to_string(&mut buf);
-                            if buf.is_empty() { None } else { Some(buf) }
+                            if buf.is_empty() {
+                                None
+                            } else {
+                                Some(buf)
+                            }
                         })
                         .unwrap_or_default();
                     tracing::error!(stderr = %stderr, "ffmpeg execution failed");
@@ -251,29 +251,28 @@ fn run_ffmpeg_cancellable(
 
 /// Atomic rename: write to temp sibling, sync, rename, sync dir.
 fn atomic_rename(from: &Path, to: &Path) -> Result<(), LaunchTeaserRenderError> {
-    let parent = to
-        .parent()
-        .ok_or(LaunchTeaserRenderError::ScratchFailed)?;
+    let parent = to.parent().ok_or(LaunchTeaserRenderError::ScratchFailed)?;
     std::fs::create_dir_all(parent).map_err(|_| LaunchTeaserRenderError::ScratchFailed)?;
 
     // Temp sibling in same directory.
     let pid = std::process::id();
-    let temp_sibling = parent.join(format!(
-        ".launch-teaser-render-{pid}.tmp"
-    ));
+    let temp_sibling = parent.join(format!(".launch-teaser-render-{pid}.tmp"));
 
     std::fs::copy(from, &temp_sibling).map_err(|_| LaunchTeaserRenderError::ScratchFailed)?;
 
     // Sync the temp file.
-    let file = std::fs::File::open(&temp_sibling).map_err(|_| LaunchTeaserRenderError::ScratchFailed)?;
-    file.sync_all().map_err(|_| LaunchTeaserRenderError::ScratchFailed)?;
+    let file =
+        std::fs::File::open(&temp_sibling).map_err(|_| LaunchTeaserRenderError::ScratchFailed)?;
+    file.sync_all()
+        .map_err(|_| LaunchTeaserRenderError::ScratchFailed)?;
 
     // Atomic rename.
     std::fs::rename(&temp_sibling, to).map_err(|_| LaunchTeaserRenderError::ScratchFailed)?;
 
     // Sync the directory.
     let dir = std::fs::File::open(parent).map_err(|_| LaunchTeaserRenderError::ScratchFailed)?;
-    dir.sync_all().map_err(|_| LaunchTeaserRenderError::ScratchFailed)?;
+    dir.sync_all()
+        .map_err(|_| LaunchTeaserRenderError::ScratchFailed)?;
 
     Ok(())
 }
@@ -285,7 +284,6 @@ fn atomic_rename(from: &Path, to: &Path) -> Result<(), LaunchTeaserRenderError> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::launch_teaser::plan::*;
     use crate::launch_teaser::seed::seed_launch_teaser;
     use crate::models::*;
     use crate::motion::asset::ValidatedMotionAsset;
@@ -362,7 +360,7 @@ mod tests {
                 caption: Some(format!("Caption {i}")),
                 kind: CandidateKind::Click,
                 reason: DetectReason::VisualChange,
-                at_ms: (i as u64) * 3_000,
+                at_ms: i * 3_000,
                 keyframe: i as FrameId,
                 nearby: vec![i as FrameId],
                 annotations: None,
@@ -372,7 +370,7 @@ mod tests {
         let frames: Vec<ProjectFrame> = (1..=3)
             .map(|i| ProjectFrame {
                 id: i as FrameId,
-                at_ms: (i as u64 * 3_000) as Millis,
+                at_ms: i * 3_000,
                 sha256: "b".repeat(64),
                 width: 1920,
                 height: 1080,

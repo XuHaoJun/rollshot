@@ -95,8 +95,8 @@ pub fn verify_launch_teaser_output(
         return Err(LaunchTeaserRenderError::FfprobeFailed);
     }
 
-    let probe: FfprobeOutput =
-        serde_json::from_slice(&probe_out.stdout).map_err(|_| LaunchTeaserRenderError::FfprobeFailed)?;
+    let probe: FfprobeOutput = serde_json::from_slice(&probe_out.stdout)
+        .map_err(|_| LaunchTeaserRenderError::FfprobeFailed)?;
 
     // Exactly one video stream.
     let video_streams: Vec<_> = probe
@@ -153,8 +153,7 @@ pub fn verify_launch_teaser_output(
         .or_else(|| probe.format.as_ref().and_then(|f| f.duration.as_deref()))
         .and_then(|s| s.parse::<f64>().ok());
 
-    let duration_secs =
-        duration_secs.ok_or(LaunchTeaserRenderError::OutputVerificationFailed)?;
+    let duration_secs = duration_secs.ok_or(LaunchTeaserRenderError::OutputVerificationFailed)?;
     if !duration_secs.is_finite() || duration_secs <= 0.0 {
         return Err(LaunchTeaserRenderError::OutputVerificationFailed);
     }

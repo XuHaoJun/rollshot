@@ -21,9 +21,10 @@ use super::seed::validate_launch_teaser_binding;
 pub const SIDECAR_RELATIVE_PATH: &str = "publish/launch-teaser-plan-v1.json";
 
 /// Compute the canonical plan digest with domain separator.
-pub fn compute_plan_sha256(plan: &LaunchTeaserPlanV1) -> Result<String, LaunchTeaserPersistenceError> {
-    let canonical =
-        serde_json::to_vec(plan).map_err(|_| LaunchTeaserPersistenceError::Encoding)?;
+pub fn compute_plan_sha256(
+    plan: &LaunchTeaserPlanV1,
+) -> Result<String, LaunchTeaserPersistenceError> {
+    let canonical = serde_json::to_vec(plan).map_err(|_| LaunchTeaserPersistenceError::Encoding)?;
     let mut hasher = Sha256::new();
     hasher.update(PLAN_DOMAIN_SEPARATOR);
     hasher.update(&canonical);
@@ -97,7 +98,8 @@ pub fn write_launch_teaser_sidecar(
 
     // Sync the directory.
     let dir = std::fs::File::open(&publish_dir).map_err(|_| LaunchTeaserPersistenceError::Io)?;
-    dir.sync_all().map_err(|_| LaunchTeaserPersistenceError::Io)?;
+    dir.sync_all()
+        .map_err(|_| LaunchTeaserPersistenceError::Io)?;
 
     Ok(())
 }
@@ -137,18 +139,18 @@ pub fn load_launch_teaser_sidecar(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::launch_teaser::plan::*;
+    use crate::launch_teaser::seed::seed_launch_teaser;
     use crate::models::{
-        CandidateKind, CaptureRegion, DetectReason, DegradedReason, FrameId, InputCapability,
+        CandidateKind, CaptureRegion, DegradedReason, DetectReason, FrameId, InputCapability,
         InputSourceKind, Millis,
     };
     use crate::motion::asset::ValidatedMotionAsset;
     use crate::motion::probe::{MotionAudio, MotionCodec, MotionMetadata};
     use crate::project::{
-    EnabledOutputs, MotionAsset, MotionAssetLoad, ProjectFrame, ProjectManifestV3, ProjectStep,
-    ProjectStepId,
-};
-    use crate::launch_teaser::plan::*;
-    use crate::launch_teaser::seed::seed_launch_teaser;
+        EnabledOutputs, MotionAsset, MotionAssetLoad, ProjectFrame, ProjectManifestV3, ProjectStep,
+        ProjectStepId,
+    };
 
     fn test_motion_metadata() -> MotionMetadata {
         MotionMetadata {
@@ -253,7 +255,7 @@ mod tests {
                 caption: Some(format!("Caption {i}")),
                 kind: CandidateKind::Click,
                 reason: DetectReason::VisualChange,
-                at_ms: (i as u64) * 3_000,
+                at_ms: i * 3_000,
                 keyframe: i as FrameId,
                 nearby: vec![i as FrameId],
                 annotations: None,
@@ -330,7 +332,9 @@ mod tests {
         let d2 = compute_plan_sha256(&plan).unwrap();
         assert_eq!(d1, d2);
         assert_eq!(d1.len(), 64);
-        assert!(d1.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
+        assert!(d1
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
     }
 
     #[test]
@@ -397,7 +401,10 @@ mod tests {
             .unwrap()
             .insert("extra".into(), serde_json::json!(true));
         let bad_json = serde_json::to_vec_pretty(&value).unwrap();
-        let sidecar_path = dir.path().join("publish").join("launch-teaser-plan-v1.json");
+        let sidecar_path = dir
+            .path()
+            .join("publish")
+            .join("launch-teaser-plan-v1.json");
         std::fs::create_dir_all(dir.path().join("publish")).unwrap();
         std::fs::write(&sidecar_path, &bad_json).unwrap();
 
@@ -407,7 +414,12 @@ mod tests {
                 schema_version: 3,
                 revision: 1,
                 title: "".into(),
-                capture_region: CaptureRegion { x: 0, y: 0, width: 1, height: 1 },
+                capture_region: CaptureRegion {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                },
                 input_source: InputSourceKind::VisualOnly,
                 input_capability: InputCapability::VisualOnly {
                     reason: DegradedReason::SourceStartFailed,
@@ -435,7 +447,12 @@ mod tests {
                 schema_version: 3,
                 revision: 1,
                 title: "".into(),
-                capture_region: CaptureRegion { x: 0, y: 0, width: 1, height: 1 },
+                capture_region: CaptureRegion {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                },
                 input_source: InputSourceKind::VisualOnly,
                 input_capability: InputCapability::VisualOnly {
                     reason: DegradedReason::SourceStartFailed,
@@ -467,7 +484,12 @@ mod tests {
                 schema_version: 3,
                 revision: 1,
                 title: "".into(),
-                capture_region: CaptureRegion { x: 0, y: 0, width: 1, height: 1 },
+                capture_region: CaptureRegion {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                },
                 input_source: InputSourceKind::VisualOnly,
                 input_capability: InputCapability::VisualOnly {
                     reason: DegradedReason::SourceStartFailed,

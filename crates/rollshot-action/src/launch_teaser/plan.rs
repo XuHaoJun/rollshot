@@ -231,7 +231,7 @@ impl LaunchTeaserPlanV1 {
 
         let duration_ms = compute_displayed_duration(&self.shots)?;
 
-        if duration_ms < MIN_DURATION_MS || duration_ms > MAX_DURATION_MS {
+        if !(MIN_DURATION_MS..=MAX_DURATION_MS).contains(&duration_ms) {
             return Err(LaunchTeaserError::Duration);
         }
 
@@ -437,7 +437,10 @@ mod tests {
     fn rejects_wrong_schema_version() {
         let mut plan = valid_plan();
         plan.schema_version = 99;
-        assert_eq!(plan.validate().unwrap_err().category(), "unsupported-schema");
+        assert_eq!(
+            plan.validate().unwrap_err().category(),
+            "unsupported-schema"
+        );
     }
 
     #[test]
@@ -446,7 +449,7 @@ mod tests {
         for i in 4..=6 {
             let mut shot = plan.shots[0].clone();
             shot.reviewed_step_id = ProjectStepId(i);
-            shot.source_start_ms = 15_000 + (i as u64 - 4) * 2_500;
+            shot.source_start_ms = 15_000 + (i - 4) * 2_500;
             shot.source_end_ms = shot.source_start_ms + 2_500;
             plan.shots.push(shot);
         }
@@ -459,7 +462,7 @@ mod tests {
         let mut plan = valid_plan();
         plan.shots.clear();
         for i in 1..=5 {
-            let start = (i as u64 - 1) * 3_500;
+            let start = (i - 1) * 3_500;
             plan.shots.push(LaunchTeaserShotV1 {
                 reviewed_step_id: ProjectStepId(i),
                 source_start_ms: start,
@@ -643,7 +646,10 @@ mod tests {
     fn validated_plan_exposes_inner_plan() {
         let plan = valid_plan();
         let validated = plan.validate().unwrap();
-        assert_eq!(validated.plan().schema_version, LAUNCH_TEASER_SCHEMA_VERSION);
+        assert_eq!(
+            validated.plan().schema_version,
+            LAUNCH_TEASER_SCHEMA_VERSION
+        );
         assert_eq!(validated.plan().shots.len(), 3);
     }
 
