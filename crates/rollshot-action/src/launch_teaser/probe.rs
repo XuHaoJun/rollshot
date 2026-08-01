@@ -136,7 +136,7 @@ pub fn verify_launch_teaser_output(
         if parts.len() == 2 {
             let num: u64 = parts[0].parse().unwrap_or(0);
             let den: u64 = parts[1].parse().unwrap_or(1);
-            if den == 0 || num / den != FINAL_FPS as u64 {
+            if den == 0 || num != FINAL_FPS as u64 * den {
                 return Err(LaunchTeaserRenderError::OutputVerificationFailed);
             }
         } else {
