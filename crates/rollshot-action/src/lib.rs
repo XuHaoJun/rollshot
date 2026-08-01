@@ -27,6 +27,7 @@ pub mod step_frame_source;
 mod storyboard;
 mod video;
 pub mod video_import;
+pub mod launch_teaser;
 pub mod visual_annotation_proposal;
 
 pub use caption_proposal::{
