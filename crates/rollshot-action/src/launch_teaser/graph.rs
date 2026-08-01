@@ -129,21 +129,32 @@ pub fn compile_ffmpeg_graph(
             "[crop{i}]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2[scaled{i}]"
         ));
 
-        // Overlay PNG if present.
-        let has_overlay = overlays.iter().any(|o| o.shot_index == i);
-        if has_overlay {
-            // Find the first overlay for this shot (caption).
-            if let Some(overlay) = overlays.iter().find(|o| o.shot_index == i) {
-                let overlay_path = overlay.path.to_string_lossy();
-                filters.push(format!(
-                    "movie={overlay_path}[ovr{i}];[scaled{i}][ovr{i}]overlay=0:0[shot{i}]"
-                ));
-            }
+        // Apply ALL overlays for this shot, chained sequentially.
+        // Shot 0 may have hook + caption; final shot may have caption + outro.
+        let shot_overlays: Vec<&OverlayAsset> =
+            overlays.iter().filter(|o| o.shot_index == i).collect();
+        for (k, overlay) in shot_overlays.iter().enumerate() {
+            let overlay_path = overlay.path.to_string_lossy();
+            let input = if k == 0 {
+                format!("[scaled{i}]")
+            } else {
+                let prev = k - 1;
+                format!("[ovr{i}_{prev}]")
+            };
+            let output = if k == shot_overlays.len() - 1 {
+                format!("[shot{i}]")
+            } else {
+                format!("[ovr{i}_{k}]")
+            };
+            filters.push(format!(
+                "movie={overlay_path}[ovr{i}_{k}];{input}[ovr{i}_{k}]overlay=0:0{output}"
+            ));
         }
     }
 
-    // Concatenate shots.
+    // Concatenate shots. Determine the final label per shot.
     let mut concat_inputs = String::new();
+    let mut shot_labels = Vec::new();
     for i in 0..shot_count {
         let has_overlay = overlays.iter().any(|o| o.shot_index == i);
         let label = if has_overlay {
@@ -152,6 +163,7 @@ pub fn compile_ffmpeg_graph(
             format!("[scaled{i}]")
         };
         concat_inputs.push_str(&label);
+        shot_labels.push(label);
     }
 
     // Check for crossfades between adjacent shots.
@@ -162,20 +174,29 @@ pub fn compile_ffmpeg_graph(
 
     if has_any_crossfade {
         // Use xfade chain for crossfade transitions.
-        let mut current = format!("[xfade0]");
-        filters.push(format!(
-            "{concat_inputs}concat=n={shot_count}:v=1:a=0[xfade0]"
-        ));
-
+        let mut current = shot_labels[0].clone();
         for (i, shot) in plan_inner.shots.iter().enumerate().skip(1) {
             if let super::plan::TransitionV1::Crossfade { duration_ms } = shot.transition {
                 let offset_s = cumulative_start_ms(plan_inner, i) as f64 / 1_000.0
                     - (duration_ms as f64 / 1_000.0);
-                let next = format!("[xfade{i}]");
+                let next = if i == shot_count - 1 {
+                    "[outv]".to_string()
+                } else {
+                    format!("[xfade{i}]")
+                };
                 filters.push(format!(
-                    "{current}[scaled{i}]xfade=transition=fade:duration={dur}:offset={offset}{next}",
+                    "{current}{next_input}xfade=transition=fade:duration={dur}:offset={offset}{next}",
+                    next_input = shot_labels[i],
                     dur = duration_ms as f64 / 1_000.0,
                     offset = offset_s.max(0.0),
+                ));
+                current = next;
+            } else {
+                // Cut: concat current + this shot, then continue.
+                let next = format!("[xfade{i}]");
+                filters.push(format!(
+                    "{current}{label}concat=n=2:v=1:a=0{next}",
+                    label = shot_labels[i],
                 ));
                 current = next;
             }
@@ -204,20 +225,8 @@ pub fn compile_ffmpeg_graph(
     args.push(filter_path.into());
 
     // Map the final output label.
-    if has_any_crossfade {
-        // Find the last xfade label.
-        let last_xfade = plan_inner
-            .shots
-            .len()
-            .checked_sub(1)
-            .map(|i| format!("[xfade{i}]"))
-            .unwrap_or_else(|| "[outv]".into());
-        args.push(OsStr::new("-map").into());
-        args.push(last_xfade.into());
-    } else {
-        args.push(OsStr::new("-map").into());
-        args.push(OsStr::new("[outv]").into());
-    }
+    args.push(OsStr::new("-map").into());
+    args.push(OsStr::new("[outv]").into());
 
     // Video codec settings.
     args.push(OsStr::new("-c:v").into());
@@ -534,5 +543,59 @@ mod tests {
         .unwrap();
         let filter = std::fs::read_to_string(scratch.path().join("filter.txt")).unwrap();
         assert!(filter.contains("xfade"));
+    }
+
+    #[test]
+    fn shot0_filter_contains_both_hook_and_caption_overlay() {
+        let plan = valid_plan().validate().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let assets =
+            prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
+        let motion = Path::new("/tmp/fake.mp4");
+        let output = Path::new("/tmp/out.mp4");
+        let _graph = compile_ffmpeg_graph(
+            &plan, motion, &assets, output, RenderProfile::Final, scratch.path(),
+        )
+        .unwrap();
+        let filter = std::fs::read_to_string(scratch.path().join("filter.txt")).unwrap();
+        // Shot 0 has hook + caption = two overlays chained.
+        let shot0_overlays: Vec<_> = assets.iter().filter(|a| a.shot_index == 0).collect();
+        assert_eq!(shot0_overlays.len(), 2, "expected hook + caption for shot 0");
+        // Both overlay files must appear in the filter graph.
+        for overlay in &shot0_overlays {
+            let fname = overlay.path.file_name().unwrap().to_string_lossy();
+            assert!(
+                filter.contains(&*fname),
+                "filter graph missing overlay reference: {fname}"
+            );
+        }
+        // The chain must produce a [shot0] label.
+        assert!(filter.contains("[shot0]"));
+    }
+
+    #[test]
+    fn shot2_filter_contains_both_caption_and_outro_overlay() {
+        let plan = valid_plan().validate().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let assets =
+            prepare_overlay_assets(&plan, scratch.path(), RenderProfile::Final).unwrap();
+        let motion = Path::new("/tmp/fake.mp4");
+        let output = Path::new("/tmp/out.mp4");
+        let _graph = compile_ffmpeg_graph(
+            &plan, motion, &assets, output, RenderProfile::Final, scratch.path(),
+        )
+        .unwrap();
+        let filter = std::fs::read_to_string(scratch.path().join("filter.txt")).unwrap();
+        // Shot 2 has caption + outro = two overlays chained.
+        let shot2_overlays: Vec<_> = assets.iter().filter(|a| a.shot_index == 2).collect();
+        assert_eq!(shot2_overlays.len(), 2, "expected caption + outro for shot 2");
+        for overlay in &shot2_overlays {
+            let fname = overlay.path.file_name().unwrap().to_string_lossy();
+            assert!(
+                filter.contains(&*fname),
+                "filter graph missing overlay reference: {fname}"
+            );
+        }
+        assert!(filter.contains("[shot2]"));
     }
 }
