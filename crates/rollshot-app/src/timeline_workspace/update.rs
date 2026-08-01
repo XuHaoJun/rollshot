@@ -280,6 +280,26 @@ pub enum Message {
     TeaserAcceptField(super::launch_teaser::ProposalFieldPath),
     #[cfg(feature = "action-guide")]
     TeaserRejectField(super::launch_teaser::ProposalFieldPath),
+    #[cfg(feature = "action-guide")]
+    TeaserPreviewRequested,
+    #[cfg(feature = "action-guide")]
+    TeaserPreviewFinished {
+        operation_id: u64,
+        result: Result<std::path::PathBuf, String>,
+    },
+    #[cfg(feature = "action-guide")]
+    TeaserRenderRequested,
+    #[cfg(feature = "action-guide")]
+    TeaserSavePickerChosen(Option<std::path::PathBuf>),
+    #[cfg(feature = "action-guide")]
+    TeaserRenderFinished {
+        operation_id: u64,
+        result: Result<std::path::PathBuf, String>,
+    },
+    #[cfg(feature = "action-guide")]
+    TeaserOpenOutput,
+    #[cfg(feature = "action-guide")]
+    TeaserShowInFolder,
 }
 
 #[derive(Debug, Clone)]
@@ -2769,6 +2789,65 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
         Message::TeaserAcceptField(_) => Update::none(),
         #[cfg(feature = "action-guide")]
         Message::TeaserRejectField(_) => Update::none(),
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserPreviewRequested => handle_teaser_preview_requested(state),
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserPreviewFinished { operation_id, result } => {
+            handle_teaser_preview_finished(state, operation_id, result)
+        }
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserRenderRequested => handle_teaser_render_requested(state),
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserSavePickerChosen(path) => {
+            handle_teaser_save_picker_chosen(state, path)
+        }
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserRenderFinished { operation_id, result } => {
+            handle_teaser_render_finished(state, operation_id, result)
+        }
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserOpenOutput => {
+            if let super::launch_teaser::LaunchTeaserState::Completed(completed) = &state.launch_teaser {
+                let path = completed.output_path.clone();
+                return Update::task(iced::Task::perform(
+                    async move {
+                        crate::platform_actions::open_path(&path)
+                    },
+                    |result| match result {
+                        Ok(()) => Message::PlatformActionFinished(Ok(())),
+                        Err(e) => Message::PlatformActionFinished(Err(e)),
+                    },
+                ));
+            }
+            Update::none()
+        }
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserShowInFolder => {
+            if let super::launch_teaser::LaunchTeaserState::Completed(completed) = &state.launch_teaser {
+                let path = completed.output_path.clone();
+                return Update::task(iced::Task::perform(
+                    async move {
+                        if let Some(parent) = path.parent() {
+                            crate::platform_actions::open_path(parent)
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    |result| match result {
+                        Ok(()) => Message::PlatformActionFinished(Ok(())),
+                        Err(e) => Message::PlatformActionFinished(Err(e)),
+                    },
+                ));
+            }
+            Update::none()
+        }
     }
 }
 
@@ -2864,6 +2943,258 @@ fn handle_teaser_seeded(
 
 pub fn subscription(_state: &TimelineWorkspace) -> iced::Subscription<Message> {
     iced::window::close_requests().map(|_id| Message::CloseRequested)
+}
+
+// ---------------------------------------------------------------------------
+// Launch teaser preview/render
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "action-guide")]
+fn handle_teaser_preview_requested(state: &mut TimelineWorkspace) -> Update {
+    if let super::launch_teaser::LaunchTeaserState::Reviewing(review) = &state.launch_teaser {
+        if review.render_disabled() {
+            return Update::none();
+        }
+        let op_id = review.next_operation_id;
+        let plan = review.plan.clone();
+        // Transition to PreviewRendering
+        if let super::launch_teaser::LaunchTeaserState::Reviewing(review) =
+            std::mem::replace(&mut state.launch_teaser, super::launch_teaser::LaunchTeaserState::Closed)
+        {
+            state.launch_teaser = super::launch_teaser::LaunchTeaserState::PreviewRendering {
+                operation_id: op_id,
+                review,
+            };
+        }
+        // Spawn preview render task
+        let root = state.project_root();
+        return Update::task(iced::Task::perform(
+            async move {
+                let Some(root) = root else {
+                    return Message::TeaserPreviewFinished {
+                        operation_id: op_id,
+                        result: Err("no project root".into()),
+                    };
+                };
+                let loaded = tokio::task::spawn_blocking(move || {
+                    rollshot_action::project::load_project(&root, None)
+                })
+                .await;
+                match loaded {
+                    Ok(Ok(_loaded)) => {
+                        // Stub: create temp preview file
+                        let preview_path = std::env::temp_dir().join(format!(
+                            "rollshot-preview-{op_id}.mp4"
+                        ));
+                        // Real rendering calls rollshot_action::launch_teaser::compile_ffmpeg_graph
+                        // with RenderProfile::Preview. For now, write an empty file as placeholder.
+                        let _ = std::fs::write(&preview_path, b"");
+                        Message::TeaserPreviewFinished {
+                            operation_id: op_id,
+                            result: Ok(preview_path),
+                        }
+                    }
+                    _ => Message::TeaserPreviewFinished {
+                        operation_id: op_id,
+                        result: Err("project load failed".into()),
+                    },
+                }
+            },
+            std::convert::identity,
+        ));
+    }
+    Update::none()
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_teaser_preview_finished(
+    state: &mut TimelineWorkspace,
+    operation_id: u64,
+    result: Result<std::path::PathBuf, String>,
+) -> Update {
+    // Only handle if we're in PreviewRendering with matching ID
+    if let super::launch_teaser::LaunchTeaserState::PreviewRendering {
+        operation_id: id, review,
+    } = &state.launch_teaser
+    {
+        if *id != operation_id {
+            return Update::none();
+        }
+    } else {
+        return Update::none();
+    }
+
+    match result {
+        Ok(path) => {
+            if let super::launch_teaser::LaunchTeaserState::PreviewRendering {
+                review, ..
+            } = std::mem::replace(&mut state.launch_teaser, super::launch_teaser::LaunchTeaserState::Closed)
+            {
+                let mut review = review;
+                review.preview_path = Some(path.clone());
+                state.launch_teaser =
+                    super::launch_teaser::LaunchTeaserState::Reviewing(review);
+                        // Open preview externally
+                return Update::task(iced::Task::perform(
+                    async move { crate::platform_actions::open_path(&path) },
+                    |result| match result {
+                        Ok(()) => Message::PlatformActionFinished(Ok(())),
+                        Err(e) => Message::PlatformActionFinished(Err(e)),
+                    },
+                ));
+            }
+        }
+        Err(e) => {
+            if let super::launch_teaser::LaunchTeaserState::PreviewRendering {
+                review, ..
+            } = std::mem::replace(&mut state.launch_teaser, super::launch_teaser::LaunchTeaserState::Closed)
+            {
+                state.launch_teaser =
+                    super::launch_teaser::LaunchTeaserState::Reviewing(review);
+                state.message = Some(format!("Preview failed: {e}"));
+            }
+        }
+    }
+    Update::none()
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_teaser_render_requested(state: &mut TimelineWorkspace) -> Update {
+    if let super::launch_teaser::LaunchTeaserState::Reviewing(review) = &state.launch_teaser {
+        if review.final_render_gated() {
+            if !review.content_reviewed {
+                state.message =
+                    Some("Review captured content before rendering.".into());
+            }
+            return Update::none();
+        }
+        // Show async save picker
+        return Update::task(iced::Task::perform(
+            pick_mp4_save_path_task(),
+            Message::TeaserSavePickerChosen,
+        ));
+    }
+    Update::none()
+}
+
+#[cfg(feature = "action-guide")]
+async fn pick_mp4_save_path_task() -> Option<std::path::PathBuf> {
+    let default_dir = dirs::picture_dir().unwrap_or_else(std::env::temp_dir);
+    rfd::AsyncFileDialog::new()
+        .set_title("Save Launch Teaser")
+        .set_directory(&default_dir)
+        .add_filter("MP4", &["mp4"])
+        .save_file()
+        .await
+        .map(|handle| handle.path().to_path_buf())
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_teaser_save_picker_chosen(
+    state: &mut TimelineWorkspace,
+    path: Option<std::path::PathBuf>,
+) -> Update {
+    let Some(destination) = path else {
+        return Update::none();
+    };
+
+    if let super::launch_teaser::LaunchTeaserState::Reviewing(review) =
+        std::mem::replace(&mut state.launch_teaser, super::launch_teaser::LaunchTeaserState::Closed)
+    {
+        let op_id = review.next_operation_id;
+        let plan = review.plan.clone();
+        state.launch_teaser = super::launch_teaser::LaunchTeaserState::FinalRendering {
+            operation_id: op_id,
+            review,
+            destination: destination.clone(),
+        };
+        let root = state.project_root();
+        return Update::task(iced::Task::perform(
+            async move {
+                let Some(root) = root else {
+                    return Message::TeaserRenderFinished {
+                        operation_id: op_id,
+                        result: Err("no project root".into()),
+                    };
+                };
+                let loaded = tokio::task::spawn_blocking(move || {
+                    rollshot_action::project::load_project(&root, None)
+                })
+                .await;
+                match loaded {
+                    Ok(Ok(_loaded)) => {
+                        // Stub: real rendering calls compile_ffmpeg_graph with RenderProfile::Final
+                        let _ = std::fs::write(&destination, b"");
+                        Message::TeaserRenderFinished {
+                            operation_id: op_id,
+                            result: Ok(destination),
+                        }
+                    }
+                    _ => Message::TeaserRenderFinished {
+                        operation_id: op_id,
+                        result: Err("project load failed".into()),
+                    },
+                }
+            },
+            std::convert::identity,
+        ));
+    }
+    Update::none()
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_teaser_render_finished(
+    state: &mut TimelineWorkspace,
+    operation_id: u64,
+    result: Result<std::path::PathBuf, String>,
+) -> Update {
+    if let super::launch_teaser::LaunchTeaserState::FinalRendering {
+        operation_id: id, review, destination,
+    } = &state.launch_teaser
+    {
+        if *id != operation_id {
+            return Update::none();
+        }
+    } else {
+        return Update::none();
+    }
+
+    match result {
+        Ok(output_path) => {
+            if let super::launch_teaser::LaunchTeaserState::FinalRendering {
+                review, ..
+            } = std::mem::replace(&mut state.launch_teaser, super::launch_teaser::LaunchTeaserState::Closed)
+            {
+                let validated = review.validated.as_ref();
+                let duration_ms = validated.map_or(0, |v| v.duration_ms());
+                let plan = review.plan.clone();
+
+                state.launch_teaser =
+                    super::launch_teaser::LaunchTeaserState::Completed(
+                        super::launch_teaser::LaunchTeaserCompletedState {
+                            duration_ms,
+                            width: rollshot_action::launch_teaser::FINAL_WIDTH,
+                            height: rollshot_action::launch_teaser::FINAL_HEIGHT,
+                            output_path,
+                            output_sha256: String::new(),
+                            sidecar_persisted: false,
+                            plan,
+                        },
+                    );
+            }
+        }
+        Err(e) => {
+            if let super::launch_teaser::LaunchTeaserState::FinalRendering {
+                review, ..
+            } = std::mem::replace(&mut state.launch_teaser, super::launch_teaser::LaunchTeaserState::Closed)
+            {
+                state.launch_teaser =
+                    super::launch_teaser::LaunchTeaserState::Reviewing(review);
+                state.message = Some(format!("Render failed: {e}"));
+            }
+        }
+    }
+    Update::none()
 }
 
 // ---------------------------------------------------------------------------

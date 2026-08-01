@@ -34,6 +34,8 @@ pub(crate) mod project_publish;
 pub(crate) mod share;
 #[cfg(feature = "action-guide")]
 pub(crate) mod launch_teaser;
+#[cfg(feature = "action-guide")]
+mod launch_teaser_view;
 
 #[allow(unused_imports)]
 pub use update::{subscription, update, Message, Update};
