@@ -67,6 +67,7 @@ pub enum RunOperation {
     SubmitReviewCandidate,
     RequestUserInput,
     DiscloseScreenshotAttachment,
+    ReadAuthorizedWorkspaceFile,
 }
 
 // ========================================================================
