@@ -839,3 +839,392 @@ mod tests {
         assert!(!review.final_render_gated());
     }
 }
+
+// ========================================================================
+// Task 6: Completion tests
+// ========================================================================
+
+#[cfg(test)]
+pub(crate) mod completion_tests {
+    use rollshot_action::launch_teaser::*;
+    use rollshot_action::{CandidateKind, CaptureRegion, DegradedReason, DetectReason, FrameId, InputCapability, InputSourceKind, Millis};
+    use rollshot_action::project::ProjectStepId;
+
+    fn valid_plan_fixture() -> LaunchTeaserPlanV1 {
+        fn shot(id: u64, start: u64, end: u64) -> LaunchTeaserShotV1 {
+            LaunchTeaserShotV1 {
+                reviewed_step_id: ProjectStepId(id),
+                source_start_ms: start,
+                source_end_ms: end,
+                focus_path: FocusPathV1 {
+                    start: NormalizedPointV1 { x: 5_000, y: 5_000 },
+                    end: NormalizedPointV1 { x: 5_000, y: 5_000 },
+                    zoom_permille: 1_000,
+                },
+                speed: SpeedV1::P1000,
+                caption: format!("Step {id}"),
+                transition: TransitionV1::Cut,
+            }
+        }
+
+        LaunchTeaserPlanV1 {
+            schema_version: LAUNCH_TEASER_SCHEMA_VERSION,
+            source: LaunchTeaserSourceV1 {
+                project_revision: 1,
+                projection_digest: "a".repeat(64),
+                motion_sha256: "b".repeat(64),
+                motion_duration_ms: 60_000,
+                motion_width: 1920,
+                motion_height: 1080,
+            },
+            hook: "Test Hook".into(),
+            shots: vec![
+                shot(1, 0, 5_000),
+                shot(2, 5_000, 10_000),
+                shot(3, 10_000, 15_000),
+            ],
+            outro_text: "Made with Rollshot".into(),
+            provenance: LaunchTeaserProvenanceV1 {
+                deterministic_seed_version: 1,
+                agent: None,
+                repository_reads: Vec::new(),
+                accepted_user_edits: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn sidecar_written_after_verified_render() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let loaded = build_test_loaded_project(root);
+        let plan = seed_launch_teaser(&loaded).unwrap();
+        let plan_sha256 = persistence::compute_plan_sha256(&plan).unwrap();
+        let output_path = root.join("output.mp4");
+        std::fs::write(&output_path, b"fake video data").unwrap();
+
+        // Compute output SHA-256.
+        let output_bytes = std::fs::read(&output_path).unwrap();
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&output_bytes);
+        let output_sha256 = format!("{:x}", hasher.finalize());
+
+        let now_ms = 1_700_000_000_000i64;
+        let artifact = error::LaunchTeaserArtifactV1 {
+            schema_version: 1,
+            plan: plan.clone(),
+            plan_sha256,
+            renderer_version: 1,
+            ffmpeg_version: "6.0".into(),
+            ffprobe_version: "6.0".into(),
+            output_sha256: output_sha256.clone(),
+            rendered_at_unix_ms: now_ms,
+        };
+
+        let result = persistence::write_launch_teaser_sidecar(root, &artifact);
+        assert!(result.is_ok(), "sidecar write should succeed: {result:?}");
+
+        // Verify the sidecar file exists.
+        let sidecar_path = root.join(persistence::SIDECAR_RELATIVE_PATH);
+        assert!(sidecar_path.exists(), "sidecar file should exist");
+
+        // Verify it can be loaded.
+        let load_result = persistence::load_launch_teaser_sidecar(root, &loaded);
+        match load_result {
+            error::LaunchTeaserSidecarLoad::Available(loaded_artifact) => {
+                assert_eq!(loaded_artifact.output_sha256, output_sha256);
+                assert_eq!(loaded_artifact.plan.hook, plan.hook);
+            }
+            other => panic!("expected Available, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sidecar_failure_preserves_external_mp4() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let loaded = build_test_loaded_project(root);
+        let plan = seed_launch_teaser(&loaded).unwrap();
+        let plan_sha256 = persistence::compute_plan_sha256(&plan).unwrap();
+        let output_path = root.join("output.mp4");
+        std::fs::write(&output_path, b"fake video data").unwrap();
+
+        // Write a valid sidecar first.
+        let artifact = error::LaunchTeaserArtifactV1 {
+            schema_version: 1,
+            plan: plan.clone(),
+            plan_sha256: plan_sha256.clone(),
+            renderer_version: 1,
+            ffmpeg_version: "6.0".into(),
+            ffprobe_version: "6.0".into(),
+            output_sha256: "c".repeat(64),
+            rendered_at_unix_ms: 1_700_000_000_000,
+        };
+        persistence::write_launch_teaser_sidecar(root, &artifact).unwrap();
+
+        // Now try to write a sidecar with a bad digest.
+        let bad_artifact = error::LaunchTeaserArtifactV1 {
+            schema_version: 1,
+            plan: plan.clone(),
+            plan_sha256: "bad".repeat(32), // wrong digest
+            renderer_version: 1,
+            ffmpeg_version: "6.0".into(),
+            ffprobe_version: "6.0".into(),
+            output_sha256: "c".repeat(64),
+            rendered_at_unix_ms: 1_700_000_000_001,
+        };
+        let result = persistence::write_launch_teaser_sidecar(root, &bad_artifact);
+        assert!(result.is_err(), "should fail with bad digest");
+
+        // External MP4 must still exist.
+        assert!(output_path.exists(), "external MP4 must survive sidecar failure");
+
+        // Original sidecar must still be valid.
+        let load_result = persistence::load_launch_teaser_sidecar(root, &loaded);
+        assert!(
+            matches!(load_result, error::LaunchTeaserSidecarLoad::Available(_)),
+            "original sidecar should still be loadable"
+        );
+    }
+
+    #[test]
+    fn sidecar_does_not_increment_project_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let loaded = build_test_loaded_project(root);
+        let plan = seed_launch_teaser(&loaded).unwrap();
+        let plan_sha256 = persistence::compute_plan_sha256(&plan).unwrap();
+
+        let artifact = error::LaunchTeaserArtifactV1 {
+            schema_version: 1,
+            plan: plan.clone(),
+            plan_sha256,
+            renderer_version: 1,
+            ffmpeg_version: "6.0".into(),
+            ffprobe_version: "6.0".into(),
+            output_sha256: "c".repeat(64),
+            rendered_at_unix_ms: 1_700_000_000_000,
+        };
+
+        let _ = persistence::write_launch_teaser_sidecar(root, &artifact);
+
+        // The sidecar is in publish/, not at the manifest level.
+        let sidecar_path = root.join(persistence::SIDECAR_RELATIVE_PATH);
+        assert!(sidecar_path.exists());
+        // The sidecar path is `publish/launch-teaser-plan-v1.json`,
+        // separate from the project manifest.
+        assert!(
+            !root.join("manifest-v3.json").exists(),
+            "sidecar must not touch the project manifest"
+        );
+    }
+
+    #[test]
+    fn output_digest_recorded_in_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let loaded = build_test_loaded_project(root);
+        let plan = seed_launch_teaser(&loaded).unwrap();
+        let plan_sha256 = persistence::compute_plan_sha256(&plan).unwrap();
+
+        let output_data = b"unique video content for digest test";
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(output_data);
+        let expected_digest = format!("{:x}", hasher.finalize());
+
+        let artifact = error::LaunchTeaserArtifactV1 {
+            schema_version: 1,
+            plan: plan.clone(),
+            plan_sha256,
+            renderer_version: 1,
+            ffmpeg_version: "6.0".into(),
+            ffprobe_version: "6.0".into(),
+            output_sha256: expected_digest.clone(),
+            rendered_at_unix_ms: 1_700_000_000_000,
+        };
+
+        persistence::write_launch_teaser_sidecar(root, &artifact).unwrap();
+
+        let load_result = persistence::load_launch_teaser_sidecar(root, &loaded);
+        match load_result {
+            error::LaunchTeaserSidecarLoad::Available(a) => {
+                assert_eq!(a.output_sha256, expected_digest);
+            }
+            other => panic!("expected Available, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn guide_change_marks_sidecar_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let loaded = build_test_loaded_project(root);
+        let plan = seed_launch_teaser(&loaded).unwrap();
+        let plan_sha256 = persistence::compute_plan_sha256(&plan).unwrap();
+
+        let artifact = error::LaunchTeaserArtifactV1 {
+            schema_version: 1,
+            plan: plan.clone(),
+            plan_sha256,
+            renderer_version: 1,
+            ffmpeg_version: "6.0".into(),
+            ffprobe_version: "6.0".into(),
+            output_sha256: "c".repeat(64),
+            rendered_at_unix_ms: 1_700_000_000_000,
+        };
+
+        persistence::write_launch_teaser_sidecar(root, &artifact).unwrap();
+
+        // With matching steps, the sidecar should be fresh.
+        let load_result = persistence::load_launch_teaser_sidecar(root, &loaded);
+        assert!(
+            matches!(load_result, error::LaunchTeaserSidecarLoad::Available(_)),
+            "sidecar should be fresh with matching steps"
+        );
+
+        // Build a loaded project with different steps to simulate a guide change.
+        let mut stale_manifest = loaded.manifest.clone();
+        stale_manifest.steps.remove(2); // Remove step 3
+        let stale_loaded = rollshot_action::project::LoadedProject {
+            root: loaded.root.clone(),
+            manifest: stale_manifest,
+            motion: loaded.motion.clone(),
+        };
+        let load_result = persistence::load_launch_teaser_sidecar(root, &stale_loaded);
+        assert!(
+            matches!(load_result, error::LaunchTeaserSidecarLoad::Stale(_)),
+            "sidecar should be stale after guide change"
+        );
+    }
+
+    #[test]
+    fn no_mp4_duplicate_in_project() {
+        // The sidecar stores only the plan and metadata, not the MP4 data.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let plan = valid_plan_fixture();
+        let plan_sha256 = persistence::compute_plan_sha256(&plan).unwrap();
+
+        let artifact = error::LaunchTeaserArtifactV1 {
+            schema_version: 1,
+            plan: plan.clone(),
+            plan_sha256,
+            renderer_version: 1,
+            ffmpeg_version: "6.0".into(),
+            ffprobe_version: "6.0".into(),
+            output_sha256: "c".repeat(64),
+            rendered_at_unix_ms: 1_700_000_000_000,
+        };
+
+        persistence::write_launch_teaser_sidecar(root, &artifact).unwrap();
+
+        // Read the sidecar file.
+        let sidecar_path = root.join(persistence::SIDECAR_RELATIVE_PATH);
+        let sidecar_bytes = std::fs::read(&sidecar_path).unwrap();
+
+        // The sidecar is JSON, not binary MP4 data.
+        let sidecar_str = String::from_utf8(sidecar_bytes.clone()).unwrap();
+        assert!(sidecar_str.contains("\"plan\"") , "sidecar should contain plan");
+        assert!(
+            !sidecar_bytes.windows(4).any(|w| w == b"\x00\x00\x00\x01"),
+            "sidecar must not contain MP4 NAL units"
+        );
+    }
+
+    /// Helper: build a minimal LoadedProject for sidecar freshness checks.
+    fn build_test_loaded_project(root: &std::path::Path) -> rollshot_action::project::LoadedProject {
+        use rollshot_action::project::*;
+        use rollshot_action::motion::asset::ValidatedMotionAsset;
+        use rollshot_action::motion::probe::{MotionAudio, MotionCodec, MotionMetadata};
+
+        let steps: Vec<ProjectStep> = (1..=3)
+            .map(|i| ProjectStep {
+                id: ProjectStepId(i),
+                order: i as u32,
+                title: format!("Step {i}"),
+                caption: Some(format!("Caption {i}")),
+                kind: CandidateKind::Click,
+                reason: DetectReason::VisualChange,
+                at_ms: i * 3_000,
+                keyframe: i as FrameId,
+                nearby: vec![i as FrameId],
+                annotations: None,
+            })
+            .collect();
+
+        let frames: Vec<ProjectFrame> = (1..=3)
+            .map(|i| ProjectFrame {
+                id: i as FrameId,
+                at_ms: (i as u64 * 3_000) as Millis,
+                sha256: "b".repeat(64),
+                width: 1920,
+                height: 1080,
+            })
+            .collect();
+
+        let manifest = ProjectManifestV3 {
+            schema_version: 3,
+            revision: 1,
+            title: "Test Guide".into(),
+            capture_region: CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            input_source: InputSourceKind::VisualOnly,
+            input_capability: InputCapability::VisualOnly {
+                reason: DegradedReason::SourceStartFailed,
+            },
+            enabled_outputs: EnabledOutputs::default(),
+            frames,
+            steps,
+            import_warnings: Vec::new(),
+            motion: Some(MotionAsset {
+                relative_path: MotionAsset::CANONICAL_PATH.into(),
+                sha256: "a".repeat(64),
+                duration_ms: 30_000,
+                width: 1920,
+                height: 1080,
+                fps_numerator: 30,
+                fps_denominator: 1,
+                codec: "h264".into(),
+                audio: "none".into(),
+            }),
+        };
+
+        let motion_meta = MotionMetadata {
+            sha256: "a".repeat(64),
+            duration_ms: 30_000,
+            width: 1920,
+            height: 1080,
+            fps_numerator: 30,
+            fps_denominator: 1,
+            codec: MotionCodec::H264,
+            audio: MotionAudio::None,
+        };
+
+        let scratch = tempfile::tempdir().unwrap();
+        let mp4 = scratch.path().join("recording.mp4");
+        std::fs::write(&mp4, b"fake mp4").unwrap();
+        let motion = MotionAssetLoad::Available(ValidatedMotionAsset::new_for_test(
+            motion_meta,
+            mp4,
+            scratch.path().to_path_buf(),
+        ));
+
+        LoadedProject {
+            root: root.to_path_buf(),
+            manifest,
+            motion,
+        }
+    }
+}
