@@ -63,8 +63,8 @@ pub fn prepare_overlay_assets(
     for (i, shot) in plan_inner.shots.iter().enumerate() {
         // Caption overlay for every shot.
         if !shot.caption.is_empty() {
-            let start_ms = cumulative_start_ms(plan_inner, i);
-            let end_ms = start_ms + shot_displayed_ms(shot);
+            let start_ms = plan_inner.cumulative_start_ms(i);
+            let end_ms = start_ms + shot.displayed_ms();
             let path = scratch.join(format!("overlay-{i:03}-caption.png"));
             rasterize_overlay(width, height, &shot.caption, &path)
                 .map_err(|_| LaunchTeaserRenderError::OverlayFailed)?;
@@ -85,7 +85,7 @@ pub fn prepare_overlay_assets(
                 shot_index: 0,
                 path,
                 start_ms: 0,
-                end_ms: shot_displayed_ms(&plan_inner.shots[0]),
+                end_ms: plan_inner.shots[0].displayed_ms(),
             });
         }
 
@@ -107,28 +107,7 @@ pub fn prepare_overlay_assets(
     Ok(assets)
 }
 
-/// Compute the displayed duration of a single shot.
-fn shot_displayed_ms(shot: &super::plan::LaunchTeaserShotV1) -> u64 {
-    let source_dur = shot.source_end_ms.saturating_sub(shot.source_start_ms);
-    (source_dur.saturating_mul(1_000)) / (shot.speed.permille())
-}
 
-/// Compute the cumulative start time of shot `index`.
-fn cumulative_start_ms(plan: &super::plan::LaunchTeaserPlanV1, index: usize) -> u64 {
-    let mut total = 0u64;
-    for (i, shot) in plan.shots.iter().enumerate() {
-        if i == index {
-            return total;
-        }
-        let displayed = shot_displayed_ms(shot);
-        total = total.saturating_add(displayed);
-        // Subtract crossfade overlap with next shot.
-        if i + 1 < plan.shots.len() {
-            total = total.saturating_sub(shot.transition.overlap_ms());
-        }
-    }
-    total
-}
 
 /// Rasterize text onto a transparent image and save as PNG.
 fn rasterize_overlay(
@@ -314,9 +293,9 @@ mod tests {
     #[test]
     fn cumulative_start_ms_correct() {
         let plan = valid_plan();
-        assert_eq!(cumulative_start_ms(&plan, 0), 0);
-        assert_eq!(cumulative_start_ms(&plan, 1), 5_000);
-        assert_eq!(cumulative_start_ms(&plan, 2), 10_000);
+        assert_eq!(plan.cumulative_start_ms(0), 0);
+        assert_eq!(plan.cumulative_start_ms(1), 5_000);
+        assert_eq!(plan.cumulative_start_ms(2), 10_000);
     }
 
     #[test]
@@ -324,6 +303,6 @@ mod tests {
         let mut plan = valid_plan();
         plan.shots[0].speed = SpeedV1::P2000;
         // source_dur = 5_000, displayed = 5_000 * 1000 / 2000 = 2_500
-        assert_eq!(shot_displayed_ms(&plan.shots[0]), 2_500);
+        assert_eq!(plan.shots[0].displayed_ms(), 2_500);
     }
 }

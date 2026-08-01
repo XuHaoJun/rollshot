@@ -100,8 +100,7 @@ pub fn compile_ffmpeg_graph(
         let cx_end = (shot.focus_path.end.x as f64 / 10_000.0) * src_w as f64;
         let cy_end = (shot.focus_path.end.y as f64 / 10_000.0) * src_h as f64;
 
-        let source_dur = shot.source_end_ms - shot.source_start_ms;
-        let displayed_dur_ms = (source_dur * 1_000) / (shot.speed.permille());
+        let displayed_dur_ms = shot.displayed_ms();
         let displayed_dur_s = displayed_dur_ms as f64 / 1_000.0;
 
         // Interpolated crop position.
@@ -169,7 +168,7 @@ pub fn compile_ffmpeg_graph(
         let mut current = shot_labels[0].clone();
         for (i, shot) in plan_inner.shots.iter().enumerate().skip(1) {
             if let super::plan::TransitionV1::Crossfade { duration_ms } = shot.transition {
-                let offset_s = cumulative_start_ms(plan_inner, i) as f64 / 1_000.0
+                let offset_s = plan_inner.cumulative_start_ms(i) as f64 / 1_000.0
                     - (duration_ms as f64 / 1_000.0);
                 let next = if i == shot_count - 1 {
                     "[outv]".to_string()
@@ -185,7 +184,11 @@ pub fn compile_ffmpeg_graph(
                 current = next;
             } else {
                 // Cut: concat current + this shot, then continue.
-                let next = format!("[xfade{i}]");
+                let next = if i == shot_count - 1 {
+                    "[outv]".to_string()
+                } else {
+                    format!("[xfade{i}]")
+                };
                 filters.push(format!(
                     "{current}{label}concat=n=2:v=1:a=0{next}",
                     label = shot_labels[i],

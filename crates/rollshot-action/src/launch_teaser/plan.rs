@@ -118,6 +118,14 @@ pub struct LaunchTeaserShotV1 {
     pub transition: TransitionV1,
 }
 
+impl LaunchTeaserShotV1 {
+    /// Compute the displayed duration of this shot after speed adjustment.
+    pub fn displayed_ms(&self) -> u64 {
+        let source_dur = self.source_end_ms.saturating_sub(self.source_start_ms);
+        (source_dur.saturating_mul(1_000)) / (self.speed.permille())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryReadProvenanceV1 {
@@ -197,6 +205,24 @@ impl ValidatedLaunchTeaserPlan {
 // ========================================================================
 
 impl LaunchTeaserPlanV1 {
+    /// Compute the cumulative start time of shot `index`.
+    ///
+    /// Accounts for crossfade overlaps: each Crossfade transition subtracts
+    /// its overlap duration from the adjacent shot's start time.
+    pub fn cumulative_start_ms(&self, index: usize) -> u64 {
+        let mut total = 0u64;
+        for (i, shot) in self.shots.iter().enumerate() {
+            if i == index {
+                return total;
+            }
+            total = total.saturating_add(shot.displayed_ms());
+            if i + 1 < self.shots.len() {
+                total = total.saturating_sub(shot.transition.overlap_ms());
+            }
+        }
+        total
+    }
+
     pub fn validate(&self) -> Result<ValidatedLaunchTeaserPlan, LaunchTeaserError> {
         if self.schema_version != LAUNCH_TEASER_SCHEMA_VERSION {
             return Err(LaunchTeaserError::UnsupportedSchema);
