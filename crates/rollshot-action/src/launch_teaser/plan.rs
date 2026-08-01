@@ -85,6 +85,16 @@ pub enum TransitionV1 {
     Crossfade { duration_ms: u16 },
 }
 
+impl TransitionV1 {
+    /// Overlap in milliseconds subtracted from adjacent shot durations.
+    pub fn overlap_ms(&self) -> u64 {
+        match self {
+            Self::Cut => 0,
+            Self::Crossfade { duration_ms } => *duration_ms as u64,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchTeaserSourceV1 {
