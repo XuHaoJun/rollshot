@@ -418,6 +418,312 @@ fn apply_patch_to_plan(
     Ok(candidate)
 }
 
+// ========================================================================
+// Agent run orchestration
+// ========================================================================
+
+/// Launch teaser submit tool stub. Accepts any valid payload and returns
+/// success so the driver can extract the raw arguments.
+struct TeaserSubmitTool;
+
+impl rollshot_agent::tools::Tool for TeaserSubmitTool {
+    fn name(&self) -> &str {
+        rollshot_agent::launch_teaser::SUBMIT_LAUNCH_TEASER_PLAN_TOOL_NAME
+    }
+
+    fn json_schema(&self) -> serde_json::Value {
+        rollshot_agent::launch_teaser::launch_teaser_submit_definition().parameters
+    }
+
+    fn call<'a>(
+        &'a self,
+        _arguments: &'a serde_json::Value,
+    ) -> rollshot_agent::tools::ToolFuture<'a> {
+        Box::pin(async move {
+            Ok(rollshot_agent::tools::ToolOutcome::Success {
+                result_json: serde_json::json!({"submitted": true}),
+            })
+        })
+    }
+}
+
+fn teaser_submit_tool() -> std::sync::Arc<dyn rollshot_agent::tools::Tool> {
+    std::sync::Arc::new(TeaserSubmitTool)
+}
+
+fn teaser_authority(
+    task_id: ProductTaskId,
+    run_id: rollshot_agent::domain::RunId,
+    subject: rollshot_agent::authority::AuthoritySubject,
+) -> Result<rollshot_agent::authority::AuthoritySnapshot, String> {
+    use rollshot_agent::authority::{
+        AuthorityBinding, AuthoritySnapshot, DisclosureCeiling, RunOperation,
+    };
+
+    let grants = std::collections::BTreeSet::from([
+        RunOperation::SubmitReviewCandidate,
+        RunOperation::ReadAuthorizedWorkspaceFile,
+    ]);
+    let binding = AuthorityBinding::new(task_id, TaskAttemptId::new(1), run_id, subject);
+    AuthoritySnapshot::new(
+        binding,
+        "rollshot-v1".to_owned(),
+        DisclosureCeiling::TextMetadataOnly,
+        false,
+        std::collections::BTreeSet::new(),
+        grants,
+    )
+    .map_err(|e| format!("build teaser authority: {e}"))
+}
+
+/// Result of a successful launch teaser agent run.
+#[derive(Debug, Clone)]
+pub(crate) struct TeaserRunSuccess {
+    pub task_id: ProductTaskId,
+    pub snapshot: ProductTaskSnapshot,
+    pub patch: rollshot_agent::launch_teaser::LaunchTeaserPatchV1,
+    pub patch_json: Vec<u8>,
+}
+
+/// Run the launch teaser agent: resolve provider, build profile, execute
+/// the bounded single-submit run, decode the patch, and promote to
+/// ReadyForReview.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn suggest_launch_teaser_task(
+    operation_id: u64,
+    store: std::sync::Arc<crate::agent_store::TaskStore>,
+    cancellation: rollshot_agent::runtime::RunCancellation,
+    model: String,
+    provider: String,
+    adapter: Box<dyn rollshot_agent::ProviderAdapter>,
+    base_plan: LaunchTeaserPlanV1,
+    scope_root: PathBuf,
+    scope_entries: Vec<String>,
+    source_binding: SourceBinding,
+    task_snapshot: ProductTaskSnapshot,
+    project_root: PathBuf,
+) -> Result<TeaserRunSuccess, String> {
+    use rollshot_agent::authority::AuthoritySubject;
+    use rollshot_agent::driver::{AgentConfig, AgentRunner, SingleSubmitProfile};
+    use rollshot_agent::skills::bundled_action_guide_launch_teaser_use;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+
+    // 1. Start attempt on the task snapshot.
+    let run_id_str = format!("run-{}", uuid::Uuid::new_v4());
+    let run_id = rollshot_agent::domain::RunId::parse(&run_id_str)
+        .map_err(|e| format!("build run id: {e}"))?;
+    let running = start_teaser_attempt(&task_snapshot, run_id.clone(), now)?;
+
+    // 2. Resolve bundled skill.
+    let Some(skill_use) = bundled_action_guide_launch_teaser_use() else {
+        return Err("Launch teaser skill not found.".to_string());
+    };
+
+    // 3. Build authority.
+    let subject = match &source_binding {
+        SourceBinding::ActionGuideLaunchTeaserProject {
+            project_root_sha256,
+            revision,
+            projection_digest,
+            motion_sha256: _,
+        } => AuthoritySubject::ActionGuideProject {
+            project_root_sha256: *project_root_sha256,
+            revision: *revision,
+            projection_digest: projection_digest.clone(),
+        },
+        _ => return Err("unexpected source binding domain for teaser".to_string()),
+    };
+    let authority = teaser_authority(task_snapshot.task_id().clone(), run_id.clone(), subject)?;
+
+    // 4. Bind run contract.
+    let grant_receipt = if !scope_entries.is_empty() {
+        let grant = rollshot_agent::repository::RepositoryReadGrant::open(
+            &scope_root,
+            scope_entries.clone(),
+            rollshot_agent::repository::RepositoryReadLimits::v1(),
+        )
+        .map_err(|e| format!("repository grant: {e}"))?;
+        Some(grant.receipt())
+    } else {
+        None
+    };
+
+    let run_contract = rollshot_agent::product_task::RunContractReceiptV1 {
+        authority: authority.receipt(now),
+        skill_use: skill_use.receipt(),
+        bound_at_unix_ms: now,
+        repository_grant: grant_receipt,
+    };
+    let bound = bind_teaser_run_contract(&running, run_contract, now)?;
+
+    // 5. Build profile with terminal + optional repository reader.
+    let prompt = rollshot_agent::driver::compose_launch_teaser_prompt(&skill_use)
+        .map_err(|e| format!("compose prompt: {e:?}"))?;
+
+    let mut profile = SingleSubmitProfile::from_skill(
+        &skill_use,
+        prompt.clone(),
+        rollshot_agent::launch_teaser::launch_teaser_submit_definition(),
+        teaser_submit_tool(),
+        rollshot_agent::authority::RunOperation::SubmitReviewCandidate,
+        "rollshot::action::launch_teaser_agent",
+    )
+    .map_err(|e| format!("build teaser profile: {e:?}"))?;
+
+    // Add repository reader if scope has entries.
+    if !scope_entries.is_empty() {
+        let grant = rollshot_agent::repository::RepositoryReadGrant::open(
+            &scope_root,
+            scope_entries,
+            rollshot_agent::repository::RepositoryReadLimits::v1(),
+        )
+        .map_err(|e| format!("repository grant: {e}"))?;
+        let reader_handle =
+            rollshot_agent::repository::repository_read_tool(grant, cancellation.clone());
+        let aux = rollshot_agent::driver::SingleSubmitAuxiliaryTool {
+            definition: rollshot_agent::model::ToolDefinition {
+                name: reader_handle.tool().name().to_string(),
+                description: "Read authorized project text files".to_string(),
+                parameters: reader_handle.tool().json_schema(),
+            },
+            tool: reader_handle.tool(),
+        };
+        profile = profile
+            .with_auxiliary_tools(vec![aux])
+            .map_err(|e| format!("add repository reader: {e:?}"))?;
+    }
+
+    // 6. Build authorized model input.
+    let input = rollshot_agent::domain::AuthorizedModelInput::new(
+        provider.clone(),
+        model.clone(),
+        prompt,
+        vec![],
+        vec![],
+    )
+    .map_err(|e| format!("build model input: {e}"))?;
+
+    // 7. Run agent.
+    let runner = AgentRunner::new(AgentConfig::default());
+    let budget = rollshot_agent::launch_teaser::launch_teaser_run_budget();
+    let audit_sink = crate::agent_store::audit_store::TaskAuditSink::new(store.clone());
+    let terminal = runner
+        .run_single_submit_with_provider(
+            profile,
+            input,
+            adapter.as_ref(),
+            budget,
+            &cancellation,
+            &authority,
+            &match &source_binding {
+                SourceBinding::ActionGuideLaunchTeaserProject {
+                    project_root_sha256,
+                    revision,
+                    projection_digest,
+                    motion_sha256: _,
+                } => AuthoritySubject::ActionGuideProject {
+                    project_root_sha256: *project_root_sha256,
+                    revision: *revision,
+                    projection_digest: projection_digest.clone(),
+                },
+                _ => unreachable!(),
+            },
+            Some(&audit_sink),
+        )
+        .await;
+
+    // 8. Decode terminal.
+    let patch_json = match &terminal {
+        rollshot_agent::driver::SingleSubmitTerminal::Submitted { arguments } => {
+            serde_json::to_vec(arguments).unwrap_or_default()
+        }
+        rollshot_agent::driver::SingleSubmitTerminal::Cancelled => {
+            let _ = cancel_teaser_task(&bound, now);
+            return Err("Agent run cancelled.".to_string());
+        }
+        rollshot_agent::driver::SingleSubmitTerminal::BudgetExhausted { dimension } => {
+            let _ = fail_teaser_task(
+                &bound,
+                rollshot_agent::product_task::TaskTerminal::BudgetExhausted {
+                    dimension: format!("{dimension:?}"),
+                },
+                now,
+            );
+            return Err(format!("Agent run exhausted budget: {dimension:?}"));
+        }
+        rollshot_agent::driver::SingleSubmitTerminal::ProviderFailure => {
+            let _ = fail_teaser_task(
+                &bound,
+                rollshot_agent::product_task::TaskTerminal::RuntimeFailure,
+                now,
+            );
+            return Err("Agent run failed: provider error".to_string());
+        }
+        rollshot_agent::driver::SingleSubmitTerminal::AuditFailure { category } => {
+            let _ = fail_teaser_task(
+                &bound,
+                rollshot_agent::product_task::TaskTerminal::AuditFailure {
+                    category: format!("{category:?}"),
+                },
+                now,
+            );
+            return Err(format!("Agent run failed: audit {category:?}"));
+        }
+        rollshot_agent::driver::SingleSubmitTerminal::ProtocolFailure => {
+            let _ = fail_teaser_task(
+                &bound,
+                rollshot_agent::product_task::TaskTerminal::AgentProtocolFailure,
+                now,
+            );
+            return Err("Agent run failed: protocol error".to_string());
+        }
+        rollshot_agent::driver::SingleSubmitTerminal::AuthorityDenied { operation } => {
+            let _ = fail_teaser_task(
+                &bound,
+                rollshot_agent::product_task::TaskTerminal::RuntimeFailure,
+                now,
+            );
+            return Err(format!("Agent run denied: {operation:?}"));
+        }
+        rollshot_agent::driver::SingleSubmitTerminal::TextCompleted { .. } => {
+            let _ = fail_teaser_task(
+                &bound,
+                rollshot_agent::product_task::TaskTerminal::AgentProtocolFailure,
+                now,
+            );
+            return Err("Agent run failed: no tool call".to_string());
+        }
+    };
+
+    // 9. Strict decode the patch.
+    let patch: rollshot_agent::launch_teaser::LaunchTeaserPatchV1 =
+        serde_json::from_slice(&patch_json)
+            .map_err(|e| format!("Agent patch decode failed: {e}"))?;
+
+    // 10. Validate that the patch can produce a valid plan.
+    let _candidate = map_patch_to_review(&base_plan, &patch)?;
+
+    // 11. Promote to ReadyForReview.
+    let promoted = promote_teaser_ready_for_review(
+        &bound,
+        &patch_json,
+        &provider,
+        &model,
+        now,
+    )?;
+
+    Ok(TeaserRunSuccess {
+        task_id: task_snapshot.task_id().clone(),
+        snapshot: promoted,
+        patch,
+        patch_json,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

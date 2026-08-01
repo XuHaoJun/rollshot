@@ -3553,7 +3553,7 @@ fn handle_teaser_agent_scope_confirmed(state: &mut TimelineWorkspace) -> Update 
 
     let snapshot = match super::launch_teaser_agent::create_teaser_task_snapshot(
         task_id.clone(),
-        source_binding,
+        source_binding.clone(),
         now,
     ) {
         Ok(s) => s,
@@ -3562,6 +3562,7 @@ fn handle_teaser_agent_scope_confirmed(state: &mut TimelineWorkspace) -> Update 
             return Update::none();
         }
     };
+    let snapshot_clone = snapshot.clone();
 
     state.launch_teaser_agent = super::launch_teaser_agent::LaunchTeaserAgentState::Running {
         operation_id,
@@ -3571,17 +3572,75 @@ fn handle_teaser_agent_scope_confirmed(state: &mut TimelineWorkspace) -> Update 
         base_review,
     };
 
-    // Spawn agent run task. For now this completes immediately with a no-op.
-    // A real implementation would invoke the bundled profile and decode the patch.
+    // Resolve provider config.
+    let cfg = match crate::daemon::config::rollshot_config_dir()
+        .and_then(|dir| crate::result_workspace::workbench::load_provider_config(&dir))
+    {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            state.launch_teaser_agent = super::launch_teaser_agent::LaunchTeaserAgentState::Idle;
+            state.message = Some(format!("Agent run failed: {e}"));
+            return Update::none();
+        }
+    };
+    if !crate::result_workspace::workbench::has_key(&cfg) {
+        state.launch_teaser_agent = super::launch_teaser_agent::LaunchTeaserAgentState::Idle;
+        state.message = Some("Configure an agent provider before using suggestions.".to_string());
+        return Update::none();
+    }
+    let model = cfg.model.clone();
+    let provider = format!("{}", cfg.provider);
+    let adapter = match crate::result_workspace::workbench::build_adapter(&cfg) {
+        Ok(adapter) => adapter,
+        Err(e) => {
+            state.launch_teaser_agent = super::launch_teaser_agent::LaunchTeaserAgentState::Idle;
+            state.message = Some(format!("Agent run failed: {e}"));
+            return Update::none();
+        }
+    };
+
+    let cancellation = rollshot_agent::runtime::RunCancellation::new();
+    let store = state.task_store.clone().unwrap();
+    let project_root = match &state.project_session {
+        Some(super::project::ProjectSession::Saved { root, .. }) => root.clone(),
+        _ => {
+            state.launch_teaser_agent = super::launch_teaser_agent::LaunchTeaserAgentState::Idle;
+            state.message = Some("Save the project before using agent suggestions.".into());
+            return Update::none();
+        }
+    };
+
+    let scope_root = scope.root.clone();
+    let scope_entries = scope.entries.clone();
+    let base_plan = base_review.plan.clone();
+
+    state.message = Some("Agent improving teaser...".to_string());
+
     Update::task(iced::Task::perform(
-        async move {
-            // Stub: agent run produces no patch.
-            Message::TeaserAgentFinished {
+        super::launch_teaser_agent::suggest_launch_teaser_task(
+            operation_id,
+            store,
+            cancellation,
+            model,
+            provider,
+            adapter,
+            base_plan,
+            scope_root,
+            scope_entries,
+            source_binding,
+            snapshot_clone,
+            project_root,
+        ),
+        move |result| match result {
+            Ok(success) => Message::TeaserAgentFinished {
                 operation_id,
-                result: Err("Agent run not yet implemented.".into()),
-            }
+                result: Ok((success.snapshot, success.patch_json)),
+            },
+            Err(e) => Message::TeaserAgentFinished {
+                operation_id,
+                result: Err(e),
+            },
         },
-        std::convert::identity,
     ))
 }
 
@@ -3603,12 +3662,51 @@ fn handle_teaser_agent_finished(
     }
 
     match result {
-        Ok((_snapshot, _patch_bytes)) => {
-            // A real implementation would decode the patch, map it onto the base plan,
-            // and transition to ProposalReview.
-            // For now, transition back to Idle with a message.
-            state.launch_teaser_agent = super::launch_teaser_agent::LaunchTeaserAgentState::Idle;
-            state.message = Some("Agent proposal received. Review not yet wired.".into());
+        Ok((_snapshot, patch_bytes)) => {
+            // Decode the patch and map it to a field-level review.
+            let patch: rollshot_agent::launch_teaser::LaunchTeaserPatchV1 =
+                match serde_json::from_slice(&patch_bytes) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        state.launch_teaser_agent =
+                            super::launch_teaser_agent::LaunchTeaserAgentState::Idle;
+                        state.message = Some(format!("Agent patch decode failed: {e}"));
+                        return Update::none();
+                    }
+                };
+            // Extract base review from Running state.
+            let (task_id, snapshot, base_review) = match std::mem::replace(
+                &mut state.launch_teaser_agent,
+                super::launch_teaser_agent::LaunchTeaserAgentState::Idle,
+            ) {
+                super::launch_teaser_agent::LaunchTeaserAgentState::Running {
+                    task_id,
+                    snapshot,
+                    base_review,
+                    ..
+                } => (task_id, snapshot, base_review),
+                _ => return Update::none(),
+            };
+            match super::launch_teaser_agent::map_patch_to_review(
+                &base_review.plan,
+                &patch,
+            ) {
+                Ok(proposal) => {
+                    state.launch_teaser_agent =
+                        super::launch_teaser_agent::LaunchTeaserAgentState::ProposalReview {
+                            task_id,
+                            snapshot,
+                            proposal,
+                            base_review,
+                        };
+                    state.message = Some("Agent proposal ready for review.".to_string());
+                }
+                Err(e) => {
+                    state.launch_teaser_agent =
+                        super::launch_teaser_agent::LaunchTeaserAgentState::Idle;
+                    state.message = Some(format!("Agent proposal invalid: {e}"));
+                }
+            }
         }
         Err(e) => {
             state.launch_teaser_agent = super::launch_teaser_agent::LaunchTeaserAgentState::Idle;
