@@ -241,8 +241,6 @@ pub fn compile_ffmpeg_graph(
     Ok(CompiledLaunchTeaserGraph { args })
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;

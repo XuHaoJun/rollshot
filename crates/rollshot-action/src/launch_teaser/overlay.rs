@@ -107,8 +107,6 @@ pub fn prepare_overlay_assets(
     Ok(assets)
 }
 
-
-
 /// Rasterize text onto a transparent image and save as PNG.
 fn rasterize_overlay(
     width: u32,

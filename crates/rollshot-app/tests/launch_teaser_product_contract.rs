@@ -3,6 +3,8 @@
 //! Exercises the full provider-free deterministic creation → edit → preview →
 //! render → sidecar → completion path through domain APIs only.
 
+#![cfg(feature = "action-guide")]
+
 use rollshot_action::launch_teaser::persistence::*;
 use rollshot_action::launch_teaser::*;
 use rollshot_action::project::{
