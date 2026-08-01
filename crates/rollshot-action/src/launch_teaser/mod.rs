@@ -7,6 +7,8 @@ pub mod seed;
 pub mod persistence;
 pub mod overlay;
 pub mod graph;
+pub mod probe;
+pub mod render;
 
 pub use error::{
     LaunchTeaserArtifactV1, LaunchTeaserBindingError, LaunchTeaserError, LaunchTeaserPersistenceError,
@@ -25,3 +27,8 @@ pub use seed::{seed_launch_teaser, validate_launch_teaser_binding, DETERMINISTIC
 pub use persistence::{write_launch_teaser_sidecar, load_launch_teaser_sidecar};
 pub use graph::{compile_ffmpeg_graph, CompiledLaunchTeaserGraph, RenderProfile};
 pub use overlay::{prepare_overlay_assets, OverlayAsset};
+pub use probe::{verify_launch_teaser_output, VerifiedLaunchTeaserOutput};
+pub use render::{
+    render_launch_teaser, LaunchTeaserPreview, LaunchTeaserPreviewResult,
+    LaunchTeaserRenderRequest, LaunchTeaserRenderResult,
+};
