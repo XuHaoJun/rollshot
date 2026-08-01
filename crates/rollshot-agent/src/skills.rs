@@ -1109,8 +1109,7 @@ pub fn bundled_action_guide_launch_teaser_use() -> Option<SkillUse> {
         .invoke(
             &SkillInvocationRequest {
                 source_authority: SkillAuthorityId::parse("rollshot.bundled").unwrap(),
-                package_id: SkillPackageId::parse(ACTION_GUIDE_LAUNCH_TEASER_PACKAGE_ID)
-                    .unwrap(),
+                package_id: SkillPackageId::parse(ACTION_GUIDE_LAUNCH_TEASER_PACKAGE_ID).unwrap(),
                 expected_digest: None,
                 invocation_kind: SkillInvocationKind::HostExplicit,
             },

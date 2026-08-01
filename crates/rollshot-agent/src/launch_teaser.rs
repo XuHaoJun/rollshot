@@ -6,10 +6,9 @@
 //! `rollshot-action`.
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::model::ToolDefinition;
-use crate::runtime::{BudgetDimension, RunBudget};
+use crate::runtime::RunBudget;
 
 // ========================================================================
 // Constants (matching domain plan ceilings)
@@ -120,7 +119,9 @@ pub struct LaunchTeaserPatchV1 {
 ///
 /// Applies the same numeric and text ceilings as the domain plan.
 /// Product mapping performs final source/project/duration validation.
-pub fn parse_launch_teaser_patch(value: &serde_json::Value) -> Result<LaunchTeaserPatchV1, LaunchTeaserPatchError> {
+pub fn parse_launch_teaser_patch(
+    value: &serde_json::Value,
+) -> Result<LaunchTeaserPatchV1, LaunchTeaserPatchError> {
     let patch: LaunchTeaserPatchV1 = serde_json::from_value(value.clone())
         .map_err(|e| LaunchTeaserPatchError::Deserialization(e.to_string()))?;
 
@@ -158,8 +159,16 @@ pub fn parse_launch_teaser_patch(value: &serde_json::Value) -> Result<LaunchTeas
     }
 
     // Validate text fields.
-    validate_optional_text(patch.hook.as_deref(), MAX_HOOK_OUTRO_BYTES, MAX_HOOK_OUTRO_CHARS)?;
-    validate_optional_text(patch.outro_text.as_deref(), MAX_HOOK_OUTRO_BYTES, MAX_HOOK_OUTRO_CHARS)?;
+    validate_optional_text(
+        patch.hook.as_deref(),
+        MAX_HOOK_OUTRO_BYTES,
+        MAX_HOOK_OUTRO_CHARS,
+    )?;
+    validate_optional_text(
+        patch.outro_text.as_deref(),
+        MAX_HOOK_OUTRO_BYTES,
+        MAX_HOOK_OUTRO_CHARS,
+    )?;
 
     // Validate per-shot fields.
     for shot in &patch.shots {
@@ -226,7 +235,7 @@ fn validate_shot_patch(shot: &LaunchTeaserShotPatchV1) -> Result<(), LaunchTease
 
     // Zoom.
     if let Some(z) = shot.zoom_permille {
-        if z < MIN_ZOOM_PERMILLE || z > MAX_ZOOM_PERMILLE {
+        if !(MIN_ZOOM_PERMILLE..=MAX_ZOOM_PERMILLE).contains(&z) {
             return Err(LaunchTeaserPatchError::InvalidField(format!(
                 "zoom_permille {z} not in {MIN_ZOOM_PERMILLE}..={MAX_ZOOM_PERMILLE}"
             )));
@@ -241,14 +250,18 @@ fn validate_shot_patch(shot: &LaunchTeaserShotPatchV1) -> Result<(), LaunchTease
     }
 
     // Caption.
-    validate_optional_text(shot.caption.as_deref(), MAX_CAPTION_BYTES, MAX_CAPTION_CHARS)?;
+    validate_optional_text(
+        shot.caption.as_deref(),
+        MAX_CAPTION_BYTES,
+        MAX_CAPTION_CHARS,
+    )?;
 
     // Transition.
     if let Some(t) = &shot.transition {
         match t {
             LaunchTeaserTransitionPatchV1::Cut => {}
             LaunchTeaserTransitionPatchV1::Crossfade { duration_ms } => {
-                if *duration_ms < MIN_CROSSFADE_MS || *duration_ms > MAX_CROSSFADE_MS {
+                if !(MIN_CROSSFADE_MS..=MAX_CROSSFADE_MS).contains(duration_ms) {
                     return Err(LaunchTeaserPatchError::UnsupportedTransition(format!(
                         "crossfade duration_ms {duration_ms} not in {MIN_CROSSFADE_MS}..={MAX_CROSSFADE_MS}"
                     )));
@@ -608,7 +621,10 @@ mod tests {
         assert_eq!(def.name, "submit_launch_teaser_plan");
         let params = &def.parameters;
         assert_eq!(params["additionalProperties"], false);
-        assert!(params["required"].as_array().unwrap().contains(&serde_json::json!("shot_order")));
+        assert!(params["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("shot_order")));
     }
 
     #[test]

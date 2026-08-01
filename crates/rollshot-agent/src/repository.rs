@@ -100,26 +100,32 @@ pub struct RepositoryReadReceiptV1 {
 // ========================================================================
 
 const DENY_COMPONENTS: &[&str] = &[
-    ".git", ".hg", ".svn", ".env", ".ssh", "secrets", "credentials",
+    ".git",
+    ".hg",
+    ".svn",
+    ".env",
+    ".ssh",
+    "secrets",
+    "credentials",
 ];
 
 const DENY_SUFFIXES: &[&str] = &[".key", ".pem", ".p12", ".pfx"];
 
 const ALLOWED_EXTENSIONS: &[&str] = &[
-    "md", "txt", "rs", "toml", "json", "yaml", "yml", "js", "jsx", "ts",
-    "tsx", "css", "html", "swift", "m", "mm", "c", "cc", "cpp", "h", "hpp",
-    "go", "py", "java",
+    "md", "txt", "rs", "toml", "json", "yaml", "yml", "js", "jsx", "ts", "tsx", "css", "html",
+    "swift", "m", "mm", "c", "cc", "cpp", "h", "hpp", "go", "py", "java",
 ];
 
 fn is_denied_component(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    DENY_COMPONENTS.iter().any(|d| *d == lower)
-        || DENY_SUFFIXES.iter().any(|s| lower.ends_with(s))
+    DENY_COMPONENTS.iter().any(|d| *d == lower) || DENY_SUFFIXES.iter().any(|s| lower.ends_with(s))
 }
 
 fn is_allowed_extension(name: &str) -> bool {
     match name.rsplit_once('.') {
-        Some((_, ext)) => ALLOWED_EXTENSIONS.iter().any(|a| *a == ext.to_ascii_lowercase()),
+        Some((_, ext)) => ALLOWED_EXTENSIONS
+            .iter()
+            .any(|a| *a == ext.to_ascii_lowercase()),
         None => false,
     }
 }
@@ -324,6 +330,7 @@ struct RepositoryReadTool {
 }
 
 impl RepositoryReadTool {
+    #[allow(clippy::new_ret_no_self)]
     fn new(grant: RepositoryReadGrant, cancellation: RunCancellation) -> RepositoryReadToolHandle {
         let inner = Arc::new(RepositoryReadToolInner {
             grant,
@@ -551,8 +558,7 @@ fn read_via_descriptor(
         )
         .map_err(|e| RepositoryReadError::Io(format!("openat({comp}): {e}")))?;
 
-        let stat =
-            fstat(&dir_fd).map_err(|e| RepositoryReadError::Io(format!("fstat: {e}")))?;
+        let stat = fstat(&dir_fd).map_err(|e| RepositoryReadError::Io(format!("fstat: {e}")))?;
         let ft = FileType::from_raw_mode(stat.st_mode);
         if ft != FileType::Directory {
             return Err(RepositoryReadError::Io(
@@ -670,9 +676,12 @@ mod tests {
     #[tokio::test]
     async fn exact_file_read_succeeds() {
         let f = fixture();
-        let grant =
-            RepositoryReadGrant::open(f.root.path(), vec!["README.md".into()], RepositoryReadLimits::v1())
-                .unwrap();
+        let grant = RepositoryReadGrant::open(
+            f.root.path(),
+            vec!["README.md".into()],
+            RepositoryReadLimits::v1(),
+        )
+        .unwrap();
         let handle = repository_read_tool(grant, RunCancellation::new());
         let result = handle.tool().call(&args("README.md")).await.unwrap();
         match result {
@@ -691,9 +700,12 @@ mod tests {
     #[tokio::test]
     async fn directory_grant_allows_descendants() {
         let f = fixture();
-        let grant =
-            RepositoryReadGrant::open(f.root.path(), vec!["docs".into()], RepositoryReadLimits::v1())
-                .unwrap();
+        let grant = RepositoryReadGrant::open(
+            f.root.path(),
+            vec!["docs".into()],
+            RepositoryReadLimits::v1(),
+        )
+        .unwrap();
         let handle = repository_read_tool(grant, RunCancellation::new());
         let result = handle.tool().call(&args("docs/guide.md")).await.unwrap();
         assert!(matches!(result, ToolOutcome::Success { .. }));
@@ -702,9 +714,12 @@ mod tests {
     #[tokio::test]
     async fn path_outside_grant_scope_is_rejected() {
         let f = fixture();
-        let grant =
-            RepositoryReadGrant::open(f.root.path(), vec!["docs".into()], RepositoryReadLimits::v1())
-                .unwrap();
+        let grant = RepositoryReadGrant::open(
+            f.root.path(),
+            vec!["docs".into()],
+            RepositoryReadLimits::v1(),
+        )
+        .unwrap();
         let handle = repository_read_tool(grant, RunCancellation::new());
         let result = handle.tool().call(&args("README.md")).await.unwrap();
         assert!(matches!(result, ToolOutcome::Recoverable { .. }));
@@ -714,9 +729,12 @@ mod tests {
     #[tokio::test]
     async fn dotdot_traversal_is_rejected() {
         let f = fixture();
-        let grant =
-            RepositoryReadGrant::open(f.root.path(), vec!["docs".into()], RepositoryReadLimits::v1())
-                .unwrap();
+        let grant = RepositoryReadGrant::open(
+            f.root.path(),
+            vec!["docs".into()],
+            RepositoryReadLimits::v1(),
+        )
+        .unwrap();
         let handle = repository_read_tool(grant, RunCancellation::new());
         let result = handle.tool().call(&args("../README.md")).await.unwrap();
         assert!(matches!(result, ToolOutcome::Recoverable { .. }));
@@ -741,9 +759,12 @@ mod tests {
             f.root.path().join("docs/link.txt"),
         )
         .unwrap();
-        let grant =
-            RepositoryReadGrant::open(f.root.path(), vec!["docs".into()], RepositoryReadLimits::v1())
-                .unwrap();
+        let grant = RepositoryReadGrant::open(
+            f.root.path(),
+            vec!["docs".into()],
+            RepositoryReadLimits::v1(),
+        )
+        .unwrap();
         let handle = repository_read_tool(grant, RunCancellation::new());
         let result = handle.tool().call(&args("docs/link.txt")).await.unwrap();
         assert!(matches!(result, ToolOutcome::Recoverable { .. }));
@@ -754,11 +775,18 @@ mod tests {
     async fn symlink_directory_cannot_escape_root() {
         let f = fixture();
         std::os::unix::fs::symlink(f.outside.path(), f.root.path().join("escape")).unwrap();
-        let grant =
-            RepositoryReadGrant::open(f.root.path(), vec!["escape".into()], RepositoryReadLimits::v1())
-                .unwrap();
+        let grant = RepositoryReadGrant::open(
+            f.root.path(),
+            vec!["escape".into()],
+            RepositoryReadLimits::v1(),
+        )
+        .unwrap();
         let handle = repository_read_tool(grant, RunCancellation::new());
-        let result = handle.tool().call(&args("escape/secret.txt")).await.unwrap();
+        let result = handle
+            .tool()
+            .call(&args("escape/secret.txt"))
+            .await
+            .unwrap();
         assert!(matches!(result, ToolOutcome::Recoverable { .. }));
     }
 
@@ -826,7 +854,8 @@ mod tests {
             max_bytes_per_file: 100,
             ..RepositoryReadLimits::v1()
         };
-        let grant = RepositoryReadGrant::open(f.root.path(), vec!["big.md".into()], limits).unwrap();
+        let grant =
+            RepositoryReadGrant::open(f.root.path(), vec!["big.md".into()], limits).unwrap();
         let handle = repository_read_tool(grant, RunCancellation::new());
         let result = handle.tool().call(&args("big.md")).await.unwrap();
         match result {
@@ -841,9 +870,12 @@ mod tests {
     #[tokio::test]
     async fn cancellation_prevents_read() {
         let f = fixture();
-        let grant =
-            RepositoryReadGrant::open(f.root.path(), vec!["README.md".into()], RepositoryReadLimits::v1())
-                .unwrap();
+        let grant = RepositoryReadGrant::open(
+            f.root.path(),
+            vec!["README.md".into()],
+            RepositoryReadLimits::v1(),
+        )
+        .unwrap();
         let cancel = RunCancellation::new();
         cancel.cancel();
         let handle = repository_read_tool(grant, cancel);
@@ -854,9 +886,12 @@ mod tests {
     #[tokio::test]
     async fn grant_receipt_omits_root_path() {
         let f = fixture();
-        let grant =
-            RepositoryReadGrant::open(f.root.path(), vec!["README.md".into()], RepositoryReadLimits::v1())
-                .unwrap();
+        let grant = RepositoryReadGrant::open(
+            f.root.path(),
+            vec!["README.md".into()],
+            RepositoryReadLimits::v1(),
+        )
+        .unwrap();
         let receipt = grant.receipt();
         let json = serde_json::to_string(&receipt).unwrap();
         assert!(!json.contains(f.root.path().to_str().unwrap()));
@@ -868,9 +903,12 @@ mod tests {
     #[tokio::test]
     async fn debug_output_redacts_root() {
         let f = fixture();
-        let grant =
-            RepositoryReadGrant::open(f.root.path(), vec!["README.md".into()], RepositoryReadLimits::v1())
-                .unwrap();
+        let grant = RepositoryReadGrant::open(
+            f.root.path(),
+            vec!["README.md".into()],
+            RepositoryReadLimits::v1(),
+        )
+        .unwrap();
         let debug = format!("{grant:?}");
         assert!(!debug.contains(f.root.path().to_str().unwrap()));
         assert!(debug.contains("<redacted>"));
@@ -879,9 +917,12 @@ mod tests {
     #[tokio::test]
     async fn multiple_reads_collect_receipts() {
         let f = fixture();
-        let grant =
-            RepositoryReadGrant::open(f.root.path(), vec!["docs".into()], RepositoryReadLimits::v1())
-                .unwrap();
+        let grant = RepositoryReadGrant::open(
+            f.root.path(),
+            vec!["docs".into()],
+            RepositoryReadLimits::v1(),
+        )
+        .unwrap();
         let handle = repository_read_tool(grant, RunCancellation::new());
         let _ = handle.tool().call(&args("docs/guide.md")).await;
         let _ = handle.tool().call(&args("docs/code.rs")).await;

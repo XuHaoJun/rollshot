@@ -214,7 +214,7 @@ pub const LAUNCH_TEASER_SYSTEM_ENVELOPE: &str =
 
 /// Compose a full launch teaser system prompt from the bundled skill body
 /// and the authoritative envelope.
-pub(crate) fn compose_launch_teaser_prompt(
+pub fn compose_launch_teaser_prompt(
     skill_use: &crate::skills::SkillUse,
 ) -> Result<String, DriverError> {
     if skill_use.package_id().as_str() != crate::skills::ACTION_GUIDE_LAUNCH_TEASER_PACKAGE_ID {
@@ -2406,7 +2406,9 @@ impl AgentRunner {
                 }
                 rig_core::agent::run::AgentRunStep::CallTools { calls } => {
                     // Check if batch contains the terminal tool.
-                    let has_terminal = calls.iter().any(|c| c.tool_call.function.name == terminal_tool_name);
+                    let has_terminal = calls
+                        .iter()
+                        .any(|c| c.tool_call.function.name == terminal_tool_name);
 
                     if has_terminal {
                         // Terminal must be the sole call in the batch.
@@ -2545,7 +2547,11 @@ impl AgentRunner {
                         // All calls are auxiliary tools — validate names.
                         for call in &calls {
                             let name = &call.tool_call.function.name;
-                            if !profile.auxiliary_tools.iter().any(|a| a.definition.name == *name) {
+                            if !profile
+                                .auxiliary_tools
+                                .iter()
+                                .any(|a| a.definition.name == *name)
+                            {
                                 tracing::debug!(
                                     target = profile.tracing_target,
                                     tool_name = %name,
@@ -2574,16 +2580,18 @@ impl AgentRunner {
                             }
 
                             // Authority check for the auxiliary operation.
-                            let aux = profile.auxiliary_tools.iter()
+                            let aux = profile
+                                .auxiliary_tools
+                                .iter()
                                 .find(|a| a.definition.name == *name)
                                 .expect("auxiliary tool name already validated");
-                            let required_op = aux.tool.required_operations().first().copied()
-                                .unwrap_or(crate::authority::RunOperation::ReadAuthorizedWorkspaceFile);
-                            if let Err(_err) = authority.authorize_tool(
-                                authority.run_id(),
-                                subject,
-                                required_op,
-                            ) {
+                            let required_op =
+                                aux.tool.required_operations().first().copied().unwrap_or(
+                                    crate::authority::RunOperation::ReadAuthorizedWorkspaceFile,
+                                );
+                            if let Err(_err) =
+                                authority.authorize_tool(authority.run_id(), subject, required_op)
+                            {
                                 tracing::debug!(
                                     target = profile.tracing_target,
                                     operation = ?required_op,
@@ -2629,7 +2637,8 @@ impl AgentRunner {
                                         }) {
                                             return map_budget_error_to_single_submit(err);
                                         }
-                                        rig_results.push(rig_core::message::UserContent::tool_result(
+                                        rig_results
+                                            .push(rig_core::message::UserContent::tool_result(
                                             call.tool_call.id.clone(),
                                             rig_core::message::ToolResultContent::from_tool_output(
                                                 result_str,
@@ -2643,7 +2652,8 @@ impl AgentRunner {
                                             tool_name = %name,
                                             "single-submit auxiliary tool rejected arguments"
                                         );
-                                        rig_results.push(rig_core::message::UserContent::tool_result(
+                                        rig_results
+                                            .push(rig_core::message::UserContent::tool_result(
                                             call.tool_call.id.clone(),
                                             rig_core::message::ToolResultContent::from_tool_output(
                                                 serde_json::json!({"error": error}).to_string(),
@@ -8416,42 +8426,6 @@ main = "SKILL.md"
 
     // ---- Auxiliary tool tests (Task 1) ----
 
-    /// Auxiliary tool that counts calls and returns a fixed result.
-    struct CountingAuxiliaryTool {
-        tool_name: String,
-        required_op: RunOperation,
-        call_count: std::sync::atomic::AtomicU32,
-    }
-
-    impl CountingAuxiliaryTool {
-        fn new(name: &str, op: RunOperation) -> Self {
-            Self {
-                tool_name: name.to_string(),
-                required_op: op,
-                call_count: std::sync::atomic::AtomicU32::new(0),
-            }
-        }
-
-        fn call_count(&self) -> u32 {
-            self.call_count.load(std::sync::atomic::Ordering::SeqCst)
-        }
-
-        fn profile_entry(&self) -> SingleSubmitAuxiliaryTool {
-            SingleSubmitAuxiliaryTool {
-                definition: crate::model::ToolDefinition {
-                    name: self.tool_name.clone(),
-                    description: "test auxiliary".to_string(),
-                    parameters: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
-                },
-                tool: Arc::new(AuxiliaryToolStub {
-                    name: self.tool_name.clone(),
-                    required_op: self.required_op,
-                    call_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
-                }),
-            }
-        }
-    }
-
     struct AuxiliaryToolStub {
         name: String,
         required_op: RunOperation,
@@ -8465,11 +8439,9 @@ main = "SKILL.md"
         fn json_schema(&self) -> serde_json::Value {
             serde_json::json!({"type": "object"})
         }
-        fn call<'a>(
-            &'a self,
-            _arguments: &'a serde_json::Value,
-        ) -> crate::tools::ToolFuture<'a> {
-            self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        fn call<'a>(&'a self, _arguments: &'a serde_json::Value) -> crate::tools::ToolFuture<'a> {
+            self.call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Box::pin(async move {
                 Ok(crate::tools::ToolOutcome::Success {
                     result_json: serde_json::json!({"content": "file contents", "path": "README.md"}),
@@ -8491,8 +8463,16 @@ main = "SKILL.md"
     /// Provider that returns an auxiliary call first, then a terminal call.
     fn auxiliary_then_terminal_provider() -> ScriptedProvider {
         ScriptedProvider::new(vec![
-            tool_call_turn("tc_read", "read_authorized_project_text", r#"{"path":"README.md"}"#),
-            tool_call_turn("tc_submit", "submit_caption_suggestions", r#"{"suggestions":[]}"#),
+            tool_call_turn(
+                "tc_read",
+                "read_authorized_project_text",
+                r#"{"path":"README.md"}"#,
+            ),
+            tool_call_turn(
+                "tc_submit",
+                "submit_caption_suggestions",
+                r#"{"suggestions":[]}"#,
+            ),
         ])
     }
 
@@ -8536,7 +8516,7 @@ main = "SKILL.md"
         let runner = va_runner();
         let provider = auxiliary_then_terminal_provider();
 
-        let run_id = RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap();
+        let _run_id = RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap();
         let subject = AuthoritySubject::ActionGuideEphemeralGuide {
             guide_digest: "test-digest".to_string(),
         };
@@ -8570,8 +8550,15 @@ main = "SKILL.md"
             )
             .await;
 
-        assert!(matches!(terminal, SingleSubmitTerminal::Submitted { .. }), "expected Submitted, got {terminal:?}");
-        assert_eq!(call_counter.load(std::sync::atomic::Ordering::SeqCst), 1, "auxiliary was called once");
+        assert!(
+            matches!(terminal, SingleSubmitTerminal::Submitted { .. }),
+            "expected Submitted, got {terminal:?}"
+        );
+        assert_eq!(
+            call_counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "auxiliary was called once"
+        );
     }
 
     #[test]
@@ -8600,7 +8587,10 @@ main = "SKILL.md"
                 tool: aux.tool.clone(),
             },
         ]);
-        assert!(result.is_err(), "duplicate auxiliary names must be rejected");
+        assert!(
+            result.is_err(),
+            "duplicate auxiliary names must be rejected"
+        );
     }
 
     #[test]
@@ -8620,28 +8610,41 @@ main = "SKILL.md"
             }),
         };
         let result = base.with_auxiliary_tools(vec![aux]);
-        assert!(result.is_err(), "auxiliary name equal to terminal must be rejected");
+        assert!(
+            result.is_err(),
+            "auxiliary name equal to terminal must be rejected"
+        );
     }
 
     #[tokio::test]
     async fn unknown_auxiliary_tool_rejected() {
         // Provider returns an unknown tool name.
-        let provider = ScriptedProvider::new(vec![
-            tool_call_turn("tc_bad", "unknown_tool", r#"{"x":1}"#),
-        ]);
+        let provider =
+            ScriptedProvider::new(vec![tool_call_turn("tc_bad", "unknown_tool", r#"{"x":1}"#)]);
         let skill_use = crate::skills::bundled_action_guide_captions_use().unwrap();
         let profile = caption_profile(&skill_use); // no auxiliary tools
         let runner = va_runner();
         let authority = authority_with_read_and_submit();
         let input = crate::domain::AuthorizedModelInput::new(
-            "anthropic".into(), "model".into(), "test".into(), vec![], vec![],
-        ).unwrap();
+            "anthropic".into(),
+            "model".into(),
+            "test".into(),
+            vec![],
+            vec![],
+        )
+        .unwrap();
 
         let terminal = runner
             .run_single_submit_with_provider(
-                profile, input, &provider, caption_run_budget_for_tests(),
-                &RunCancellation::new(), &authority,
-                &AuthoritySubject::ActionGuideEphemeralGuide { guide_digest: "d".into() },
+                profile,
+                input,
+                &provider,
+                caption_run_budget_for_tests(),
+                &RunCancellation::new(),
+                &authority,
+                &AuthoritySubject::ActionGuideEphemeralGuide {
+                    guide_digest: "d".into(),
+                },
                 Some(&NoopAuditSink),
             )
             .await;
@@ -8653,12 +8656,28 @@ main = "SKILL.md"
         use crate::model::{ModelCompletion, ModelUsage};
         // Single turn with two tool calls: terminal + auxiliary.
         let mixed_turn: Vec<ModelStreamEvent> = vec![
-            ModelStreamEvent::ToolCallStart { id: "tc1".into(), name: "submit_caption_suggestions".into() },
-            ModelStreamEvent::ToolCallArgumentDelta { id: "tc1".into(), delta: r#"{"suggestions":[]}"#.into() },
-            ModelStreamEvent::ToolCallStart { id: "tc2".into(), name: "read_authorized_project_text".into() },
-            ModelStreamEvent::ToolCallArgumentDelta { id: "tc2".into(), delta: r#"{"path":"f"}"#.into() },
+            ModelStreamEvent::ToolCallStart {
+                id: "tc1".into(),
+                name: "submit_caption_suggestions".into(),
+            },
+            ModelStreamEvent::ToolCallArgumentDelta {
+                id: "tc1".into(),
+                delta: r#"{"suggestions":[]}"#.into(),
+            },
+            ModelStreamEvent::ToolCallStart {
+                id: "tc2".into(),
+                name: "read_authorized_project_text".into(),
+            },
+            ModelStreamEvent::ToolCallArgumentDelta {
+                id: "tc2".into(),
+                delta: r#"{"path":"f"}"#.into(),
+            },
             ModelStreamEvent::Completed(ModelCompletion {
-                usage: ModelUsage { input_tokens: 5, output_tokens: 3, total_tokens: 8 },
+                usage: ModelUsage {
+                    input_tokens: 5,
+                    output_tokens: 3,
+                    total_tokens: 8,
+                },
                 stop_reason: StopReason::ToolUse,
             }),
         ];
@@ -8682,14 +8701,25 @@ main = "SKILL.md"
         let runner = va_runner();
         let authority = authority_with_read_and_submit();
         let input = crate::domain::AuthorizedModelInput::new(
-            "anthropic".into(), "model".into(), "test".into(), vec![], vec![],
-        ).unwrap();
+            "anthropic".into(),
+            "model".into(),
+            "test".into(),
+            vec![],
+            vec![],
+        )
+        .unwrap();
 
         let terminal = runner
             .run_single_submit_with_provider(
-                profile, input, &provider, caption_run_budget_for_tests(),
-                &RunCancellation::new(), &authority,
-                &AuthoritySubject::ActionGuideEphemeralGuide { guide_digest: "d".into() },
+                profile,
+                input,
+                &provider,
+                caption_run_budget_for_tests(),
+                &RunCancellation::new(),
+                &authority,
+                &AuthoritySubject::ActionGuideEphemeralGuide {
+                    guide_digest: "d".into(),
+                },
                 Some(&NoopAuditSink),
             )
             .await;
