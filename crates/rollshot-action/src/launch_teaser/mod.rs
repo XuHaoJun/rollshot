@@ -19,7 +19,7 @@ pub use plan::{
     SpeedV1, TransitionV1, ValidatedLaunchTeaserPlan,
     FINAL_FPS, FINAL_HEIGHT, FINAL_WIDTH, LAUNCH_TEASER_SCHEMA_VERSION,
     MAX_DURATION_MS, MAX_SHOTS, MIN_DURATION_MS, MIN_SHOTS,
-    OUTRO_DURATION_MS, PLAN_DOMAIN_SEPARATOR, PREVIEW_HEIGHT, PREVIEW_WIDTH,
+    PLAN_DOMAIN_SEPARATOR, PREVIEW_HEIGHT, PREVIEW_WIDTH, OUTRO_DURATION_MS,
 };
 pub use seed::{seed_launch_teaser, validate_launch_teaser_binding, DETERMINISTIC_SEED_VERSION};
 pub use persistence::{write_launch_teaser_sidecar, load_launch_teaser_sidecar};
