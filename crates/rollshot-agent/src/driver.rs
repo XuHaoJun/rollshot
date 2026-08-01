@@ -6935,6 +6935,7 @@ main = "SKILL.md"
                     resolved_at_unix_ms: 15,
                 },
                 bound_at_unix_ms: 15,
+                repository_grant: None,
             };
             let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id, 10);
 

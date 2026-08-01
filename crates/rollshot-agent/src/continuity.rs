@@ -323,6 +323,18 @@ impl TryFrom<&crate::product_task::ProductTaskSnapshot> for ContinuityProjection
                     hasher.update(keyframe_sha256);
                     hasher.update(annotation_state_sha256);
                 }
+                crate::product_task::SourceBinding::ActionGuideLaunchTeaserProject {
+                    project_root_sha256,
+                    revision,
+                    projection_digest,
+                    motion_sha256,
+                } => {
+                    hasher.update(b"rollshot-source-binding-launch-teaser-project-v1\0");
+                    hasher.update(project_root_sha256);
+                    hasher.update(revision.to_le_bytes());
+                    hasher.update(projection_digest.as_bytes());
+                    hasher.update(motion_sha256.as_bytes());
+                }
             }
             format!("{:x}", hasher.finalize())
         };
@@ -588,6 +600,7 @@ fn task_kind_str(kind: TaskKind) -> String {
         TaskKind::SmartRedactionImprove => "smart_redaction_improve",
         TaskKind::ActionGuideCaptions => "action_guide_captions",
         TaskKind::ActionGuideVisualAnnotation => "action_guide_visual_annotation",
+        TaskKind::ActionGuideLaunchTeaser => "action_guide_launch_teaser",
     }
     .to_owned()
 }
@@ -614,6 +627,7 @@ fn artifact_kind_str(kind: ArtifactKind) -> String {
         ArtifactKind::SmartRedaction => "smart_redaction",
         ArtifactKind::ActionGuideCaptions => "action_guide_captions",
         ArtifactKind::ActionGuideVisualAnnotation => "action_guide_visual_annotation",
+        ArtifactKind::ActionGuideLaunchTeaser => "action_guide_launch_teaser",
     }
     .to_owned()
 }
@@ -1275,6 +1289,7 @@ mod tests {
             authority: authority_receipt_fixture(),
             skill_use: skill_use_receipt_fixture(),
             bound_at_unix_ms: 15,
+            repository_grant: None,
         }
     }
 

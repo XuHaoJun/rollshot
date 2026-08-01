@@ -1411,6 +1411,7 @@ mod tests {
             authority: authority.receipt(10),
             skill_use: skill_use.clone(),
             bound_at_unix_ms: 20,
+            repository_grant: None,
         }
     }
 
