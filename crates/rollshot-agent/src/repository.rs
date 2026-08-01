@@ -9,6 +9,7 @@
 //! Debug output, or user-visible errors.
 
 use std::fmt;
+use std::os::unix::io::OwnedFd;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -221,6 +222,7 @@ fn hash_grant(entries: &[String], limits: &RepositoryReadLimits) -> String {
 /// The root path is private: it never appears in Debug output or receipts.
 pub struct RepositoryReadGrant {
     root: PathBuf,
+    root_fd: OwnedFd,
     entries: Vec<String>,
     limits: RepositoryReadLimits,
     root_identity: String,
@@ -250,6 +252,14 @@ impl RepositoryReadGrant {
             return Err(RepositoryReadError::InvalidRoot);
         }
 
+        // Open the root directory once and retain the descriptor.
+        let root_fd = rustix::fs::open(
+            root,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(|e| RepositoryReadError::Io(format!("open root: {e}")))?;
+
         let mut validated = Vec::new();
         for entry in &entries {
             let comps = validate_entry(entry)?;
@@ -263,6 +273,7 @@ impl RepositoryReadGrant {
 
         Ok(Self {
             root: root.to_path_buf(),
+            root_fd,
             entries: validated,
             limits,
             root_identity,
@@ -430,7 +441,7 @@ impl Tool for RepositoryReadTool {
             }
 
             let result =
-                read_via_descriptor(&self.inner.grant.root, &components, &self.inner.grant);
+                read_via_descriptor(&self.inner.grant.root_fd, &components, &self.inner.grant);
 
             match result {
                 Ok(ReadResult {
@@ -499,20 +510,16 @@ struct ReadResult {
 
 /// Read a file using descriptor-relative traversal (no-follow at every step).
 fn read_via_descriptor(
-    root: &Path,
+    root_fd: &OwnedFd,
     components: &[String],
     grant: &RepositoryReadGrant,
 ) -> Result<ReadResult, RepositoryReadError> {
     use rustix::fs::{fstat, openat};
 
-    let root_fd = rustix::fs::open(
-        root,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW,
-        Mode::empty(),
-    )
-    .map_err(|e| RepositoryReadError::Io(format!("open root: {e}")))?;
-
-    let mut current_fd = root_fd;
+    // Clone the root fd so we own the traversal chain.
+    let mut current_fd = root_fd
+        .try_clone()
+        .map_err(|e| RepositoryReadError::Io(format!("clone root fd: {e}")))?;
     for (i, comp) in components.iter().enumerate() {
         let is_last = i == components.len() - 1;
 
