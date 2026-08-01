@@ -3023,7 +3023,8 @@ fn handle_teaser_preview_requested(state: &mut TimelineWorkspace) -> Update {
             return Update::none();
         }
         let op_id = review.next_operation_id;
-        let _plan = review.plan.clone();
+        let plan = review.plan.clone();
+        let cancellation = rollshot_action::project::PublishCancellation::new();
         // Transition to PreviewRendering
         if let super::launch_teaser::LaunchTeaserState::Reviewing(review) = std::mem::replace(
             &mut state.launch_teaser,
@@ -3032,6 +3033,7 @@ fn handle_teaser_preview_requested(state: &mut TimelineWorkspace) -> Update {
             state.launch_teaser = super::launch_teaser::LaunchTeaserState::PreviewRendering {
                 operation_id: op_id,
                 review,
+                cancellation,
             };
         }
         // Spawn preview render task
@@ -3049,16 +3051,66 @@ fn handle_teaser_preview_requested(state: &mut TimelineWorkspace) -> Update {
                 })
                 .await;
                 match loaded {
-                    Ok(Ok(_loaded)) => {
-                        // Stub: create temp preview file
-                        let preview_path =
-                            std::env::temp_dir().join(format!("rollshot-preview-{op_id}.mp4"));
-                        // Real rendering calls rollshot_action::launch_teaser::compile_ffmpeg_graph
-                        // with RenderProfile::Preview. For now, write an empty file as placeholder.
-                        let _ = std::fs::write(&preview_path, b"");
-                        Message::TeaserPreviewFinished {
-                            operation_id: op_id,
-                            result: Ok(preview_path),
+                    Ok(Ok(loaded)) => {
+                        let Some(validated) = plan.validate().ok() else {
+                            return Message::TeaserPreviewFinished {
+                                operation_id: op_id,
+                                result: Err("plan validation failed".into()),
+                            };
+                        };
+                        let toolchain = match crate::managed_ffmpeg::resolve_video_import_toolchain() {
+                            crate::managed_ffmpeg::VideoImportToolchainResolution::Available(tc) => tc,
+                            _ => {
+                                return Message::TeaserPreviewFinished {
+                                    operation_id: op_id,
+                                    result: Err("FFmpeg unavailable".into()),
+                                };
+                            }
+                        };
+                        let preview_cancel = rollshot_action::project::PublishCancellation::new();
+                        let render_result = tokio::task::spawn_blocking(move || {
+                            rollshot_action::launch_teaser::render_launch_teaser(
+                                rollshot_action::launch_teaser::LaunchTeaserRenderRequest {
+                                    loaded: &loaded,
+                                    plan: &validated,
+                                    toolchain: &toolchain,
+                                    cancellation: &preview_cancel,
+                                    destination: std::path::Path::new("/dev/null"),
+                                    profile: rollshot_action::launch_teaser::RenderProfile::Preview,
+                                },
+                            )
+                        })
+                        .await;
+                        match render_result {
+                            Ok(Ok(rollshot_action::launch_teaser::LaunchTeaserPreviewResult::Preview(preview))) => {
+                                // Copy the preview file out of the scratch directory
+                                // before the guard drops and cleans it up.
+                                let preview_dest = std::env::temp_dir()
+                                    .join(format!("rollshot-preview-{op_id}.mp4"));
+                                let copy_result = std::fs::copy(preview.output(), &preview_dest);
+                                match copy_result {
+                                    Ok(_) => Message::TeaserPreviewFinished {
+                                        operation_id: op_id,
+                                        result: Ok(preview_dest),
+                                    },
+                                    Err(e) => Message::TeaserPreviewFinished {
+                                        operation_id: op_id,
+                                        result: Err(format!("failed to copy preview: {e}")),
+                                    },
+                                }
+                            }
+                            Ok(Ok(_)) => Message::TeaserPreviewFinished {
+                                operation_id: op_id,
+                                result: Err("unexpected final result for preview".into()),
+                            },
+                            Ok(Err(e)) => Message::TeaserPreviewFinished {
+                                operation_id: op_id,
+                                result: Err(format!("preview render failed: {e}")),
+                            },
+                            Err(e) => Message::TeaserPreviewFinished {
+                                operation_id: op_id,
+                                result: Err(format!("preview render task panicked: {e}")),
+                            },
                         }
                     }
                     _ => Message::TeaserPreviewFinished {
@@ -3172,11 +3224,13 @@ fn handle_teaser_save_picker_chosen(
         super::launch_teaser::LaunchTeaserState::Closed,
     ) {
         let op_id = review.next_operation_id;
-        let _plan = review.plan.clone();
+        let plan = review.plan.clone();
+        let cancellation = rollshot_action::project::PublishCancellation::new();
         state.launch_teaser = super::launch_teaser::LaunchTeaserState::FinalRendering {
             operation_id: op_id,
             review,
             destination: destination.clone(),
+            cancellation: cancellation.clone(),
         };
         let root = state.project_root();
         return Update::task(iced::Task::perform(
@@ -3192,12 +3246,56 @@ fn handle_teaser_save_picker_chosen(
                 })
                 .await;
                 match loaded {
-                    Ok(Ok(_loaded)) => {
-                        // Stub: real rendering calls compile_ffmpeg_graph with RenderProfile::Final
-                        let _ = std::fs::write(&destination, b"");
-                        Message::TeaserRenderFinished {
-                            operation_id: op_id,
-                            result: Ok(destination),
+                    Ok(Ok(loaded)) => {
+                        let Some(validated) = plan.validate().ok() else {
+                            return Message::TeaserRenderFinished {
+                                operation_id: op_id,
+                                result: Err("plan validation failed".into()),
+                            };
+                        };
+                        let toolchain = match crate::managed_ffmpeg::resolve_video_import_toolchain() {
+                            crate::managed_ffmpeg::VideoImportToolchainResolution::Available(tc) => tc,
+                            _ => {
+                                return Message::TeaserRenderFinished {
+                                    operation_id: op_id,
+                                    result: Err("FFmpeg unavailable".into()),
+                                };
+                            }
+                        };
+                        let dest = destination.clone();
+                        let render_result = tokio::task::spawn_blocking(move || {
+                            rollshot_action::launch_teaser::render_launch_teaser(
+                                rollshot_action::launch_teaser::LaunchTeaserRenderRequest {
+                                    loaded: &loaded,
+                                    plan: &validated,
+                                    toolchain: &toolchain,
+                                    cancellation: &cancellation,
+                                    destination: &dest,
+                                    profile: rollshot_action::launch_teaser::RenderProfile::Final,
+                                },
+                            )
+                        })
+                        .await;
+                        match render_result {
+                            Ok(Ok(rollshot_action::launch_teaser::LaunchTeaserPreviewResult::Final(result))) => {
+                                let _ = result;
+                                Message::TeaserRenderFinished {
+                                    operation_id: op_id,
+                                    result: Ok(destination),
+                                }
+                            }
+                            Ok(Ok(_)) => Message::TeaserRenderFinished {
+                                operation_id: op_id,
+                                result: Err("unexpected preview result for final render".into()),
+                            },
+                            Ok(Err(e)) => Message::TeaserRenderFinished {
+                                operation_id: op_id,
+                                result: Err(format!("render failed: {e}")),
+                            },
+                            Err(e) => Message::TeaserRenderFinished {
+                                operation_id: op_id,
+                                result: Err(format!("render task panicked: {e}")),
+                            },
                         }
                     }
                     _ => Message::TeaserRenderFinished {

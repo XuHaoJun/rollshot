@@ -83,12 +83,14 @@ pub(crate) enum LaunchTeaserState {
     PreviewRendering {
         operation_id: u64,
         review: LaunchTeaserReviewState,
+        cancellation: rollshot_action::project::PublishCancellation,
     },
     /// Final render is in flight.
     FinalRendering {
         operation_id: u64,
         review: LaunchTeaserReviewState,
         destination: PathBuf,
+        cancellation: rollshot_action::project::PublishCancellation,
     },
     /// Teaser has been successfully rendered.
     Completed(LaunchTeaserCompletedState),
