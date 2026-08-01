@@ -78,9 +78,10 @@ pub fn compile_ffmpeg_graph(
         let start_pts = shot.source_start_ms as f64 / 1_000.0;
         let end_pts = shot.source_end_ms as f64 / 1_000.0;
 
-        // Trim and reset PTS.
+        // Trim and reset PTS, applying speed adjustment.
+        let speed_permille = shot.speed.permille();
         filters.push(format!(
-            "[0:v]trim=start={start_pts}:end={end_pts},setpts=PTS-STARTPTS[trim{i}]"
+            "[0:v]trim=start={start_pts}:end={end_pts},setpts=(PTS-STARTPTS)*1000/{speed_permille}[trim{i}]"
         ));
 
         // Focus crop: interpolate center from start to end.
