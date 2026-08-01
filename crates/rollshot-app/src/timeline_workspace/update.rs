@@ -3135,6 +3135,7 @@ fn handle_teaser_preview_finished(
     if let super::launch_teaser::LaunchTeaserState::PreviewRendering {
         operation_id: id,
         review: _review,
+        ..
     } = &state.launch_teaser
     {
         if *id != operation_id {
@@ -3320,6 +3321,7 @@ fn handle_teaser_render_finished(
         operation_id: id,
         review: _review,
         destination: _destination,
+        ..
     } = &state.launch_teaser
     {
         if *id != operation_id {
@@ -3564,6 +3566,11 @@ fn handle_teaser_agent_scope_confirmed(state: &mut TimelineWorkspace) -> Update 
     };
     let snapshot_clone = snapshot.clone();
 
+    // Extract data before moving into state.
+    let scope_root = scope.root.clone();
+    let scope_entries = scope.entries.clone();
+    let base_plan = base_review.plan.clone();
+
     state.launch_teaser_agent = super::launch_teaser_agent::LaunchTeaserAgentState::Running {
         operation_id,
         task_id,
@@ -3609,10 +3616,6 @@ fn handle_teaser_agent_scope_confirmed(state: &mut TimelineWorkspace) -> Update 
             return Update::none();
         }
     };
-
-    let scope_root = scope.root.clone();
-    let scope_entries = scope.entries.clone();
-    let base_plan = base_review.plan.clone();
 
     state.message = Some("Agent improving teaser...".to_string());
 
