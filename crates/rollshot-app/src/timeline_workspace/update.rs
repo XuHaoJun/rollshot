@@ -252,9 +252,16 @@ pub enum Message {
     #[cfg(feature = "action-guide")]
     TeaserSetOutro(String),
     #[cfg(feature = "action-guide")]
-    TeaserMoveShot { from: usize, to: usize },
+    TeaserMoveShot {
+        from: usize,
+        to: usize,
+    },
     #[cfg(feature = "action-guide")]
-    TeaserSetRange { shot: usize, start_ms: u64, end_ms: u64 },
+    TeaserSetRange {
+        shot: usize,
+        start_ms: u64,
+        end_ms: u64,
+    },
     #[cfg(feature = "action-guide")]
     TeaserSetFocus {
         shot: usize,
@@ -266,7 +273,10 @@ pub enum Message {
         speed: rollshot_action::launch_teaser::SpeedV1,
     },
     #[cfg(feature = "action-guide")]
-    TeaserSetCaption { shot: usize, caption: String },
+    TeaserSetCaption {
+        shot: usize,
+        caption: String,
+    },
     #[cfg(feature = "action-guide")]
     TeaserSetTransition {
         shot: usize,
@@ -316,13 +326,7 @@ pub enum Message {
     #[cfg(feature = "action-guide")]
     TeaserAgentFinished {
         operation_id: u64,
-        result: Result<
-            (
-                rollshot_agent::product_task::ProductTaskSnapshot,
-                Vec<u8>,
-            ),
-            String,
-        >,
+        result: Result<(rollshot_agent::product_task::ProductTaskSnapshot, Vec<u8>), String>,
     },
     #[cfg(feature = "action-guide")]
     TeaserAcceptProposal,
@@ -2705,9 +2709,10 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
         Message::CreateTeaser => handle_create_teaser(state),
 
         #[cfg(feature = "action-guide")]
-        Message::TeaserSeeded { operation_id, result } => {
-            handle_teaser_seeded(state, operation_id, result)
-        }
+        Message::TeaserSeeded {
+            operation_id,
+            result,
+        } => handle_teaser_seeded(state, operation_id, result),
 
         #[cfg(feature = "action-guide")]
         Message::CloseTeaser => {
@@ -2752,7 +2757,11 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
         }
 
         #[cfg(feature = "action-guide")]
-        Message::TeaserSetRange { shot, start_ms, end_ms } => {
+        Message::TeaserSetRange {
+            shot,
+            start_ms,
+            end_ms,
+        } => {
             if let super::launch_teaser::LaunchTeaserState::Reviewing(review) =
                 &mut state.launch_teaser
             {
@@ -2822,31 +2831,31 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
         Message::TeaserPreviewRequested => handle_teaser_preview_requested(state),
 
         #[cfg(feature = "action-guide")]
-        Message::TeaserPreviewFinished { operation_id, result } => {
-            handle_teaser_preview_finished(state, operation_id, result)
-        }
+        Message::TeaserPreviewFinished {
+            operation_id,
+            result,
+        } => handle_teaser_preview_finished(state, operation_id, result),
 
         #[cfg(feature = "action-guide")]
         Message::TeaserRenderRequested => handle_teaser_render_requested(state),
 
         #[cfg(feature = "action-guide")]
-        Message::TeaserSavePickerChosen(path) => {
-            handle_teaser_save_picker_chosen(state, path)
-        }
+        Message::TeaserSavePickerChosen(path) => handle_teaser_save_picker_chosen(state, path),
 
         #[cfg(feature = "action-guide")]
-        Message::TeaserRenderFinished { operation_id, result } => {
-            handle_teaser_render_finished(state, operation_id, result)
-        }
+        Message::TeaserRenderFinished {
+            operation_id,
+            result,
+        } => handle_teaser_render_finished(state, operation_id, result),
 
         #[cfg(feature = "action-guide")]
         Message::TeaserOpenOutput => {
-            if let super::launch_teaser::LaunchTeaserState::Completed(completed) = &state.launch_teaser {
+            if let super::launch_teaser::LaunchTeaserState::Completed(completed) =
+                &state.launch_teaser
+            {
                 let path = completed.output_path.clone();
                 return Update::task(iced::Task::perform(
-                    async move {
-                        crate::platform_actions::open_path(&path)
-                    },
+                    async move { crate::platform_actions::open_path(&path) },
                     |result| match result {
                         Ok(()) => Message::PlatformActionFinished(Ok(())),
                         Err(e) => Message::PlatformActionFinished(Err(e)),
@@ -2858,7 +2867,9 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
 
         #[cfg(feature = "action-guide")]
         Message::TeaserShowInFolder => {
-            if let super::launch_teaser::LaunchTeaserState::Completed(completed) = &state.launch_teaser {
+            if let super::launch_teaser::LaunchTeaserState::Completed(completed) =
+                &state.launch_teaser
+            {
                 let path = completed.output_path.clone();
                 return Update::task(iced::Task::perform(
                     async move {
@@ -2906,9 +2917,10 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
         }
 
         #[cfg(feature = "action-guide")]
-        Message::TeaserAgentFinished { operation_id, result } => {
-            handle_teaser_agent_finished(state, operation_id, result)
-        }
+        Message::TeaserAgentFinished {
+            operation_id,
+            result,
+        } => handle_teaser_agent_finished(state, operation_id, result),
 
         #[cfg(feature = "action-guide")]
         Message::TeaserAcceptProposal => handle_teaser_accept_proposal(state),
@@ -2996,8 +3008,7 @@ fn handle_teaser_seeded(
     match result {
         Ok(plan) => {
             let review = super::launch_teaser::LaunchTeaserReviewState::new(plan);
-            state.launch_teaser =
-                super::launch_teaser::LaunchTeaserState::Reviewing(review);
+            state.launch_teaser = super::launch_teaser::LaunchTeaserState::Reviewing(review);
         }
         Err(e) => {
             state.launch_teaser = super::launch_teaser::LaunchTeaserState::Closed;
@@ -3025,9 +3036,10 @@ fn handle_teaser_preview_requested(state: &mut TimelineWorkspace) -> Update {
         let op_id = review.next_operation_id;
         let _plan = review.plan.clone();
         // Transition to PreviewRendering
-        if let super::launch_teaser::LaunchTeaserState::Reviewing(review) =
-            std::mem::replace(&mut state.launch_teaser, super::launch_teaser::LaunchTeaserState::Closed)
-        {
+        if let super::launch_teaser::LaunchTeaserState::Reviewing(review) = std::mem::replace(
+            &mut state.launch_teaser,
+            super::launch_teaser::LaunchTeaserState::Closed,
+        ) {
             state.launch_teaser = super::launch_teaser::LaunchTeaserState::PreviewRendering {
                 operation_id: op_id,
                 review,
@@ -3050,9 +3062,8 @@ fn handle_teaser_preview_requested(state: &mut TimelineWorkspace) -> Update {
                 match loaded {
                     Ok(Ok(_loaded)) => {
                         // Stub: create temp preview file
-                        let preview_path = std::env::temp_dir().join(format!(
-                            "rollshot-preview-{op_id}.mp4"
-                        ));
+                        let preview_path =
+                            std::env::temp_dir().join(format!("rollshot-preview-{op_id}.mp4"));
                         // Real rendering calls rollshot_action::launch_teaser::compile_ffmpeg_graph
                         // with RenderProfile::Preview. For now, write an empty file as placeholder.
                         let _ = std::fs::write(&preview_path, b"");
@@ -3081,7 +3092,8 @@ fn handle_teaser_preview_finished(
 ) -> Update {
     // Only handle if we're in PreviewRendering with matching ID
     if let super::launch_teaser::LaunchTeaserState::PreviewRendering {
-        operation_id: id, review,
+        operation_id: id,
+        review,
     } = &state.launch_teaser
     {
         if *id != operation_id {
@@ -3093,15 +3105,16 @@ fn handle_teaser_preview_finished(
 
     match result {
         Ok(path) => {
-            if let super::launch_teaser::LaunchTeaserState::PreviewRendering {
-                review, ..
-            } = std::mem::replace(&mut state.launch_teaser, super::launch_teaser::LaunchTeaserState::Closed)
+            if let super::launch_teaser::LaunchTeaserState::PreviewRendering { review, .. } =
+                std::mem::replace(
+                    &mut state.launch_teaser,
+                    super::launch_teaser::LaunchTeaserState::Closed,
+                )
             {
                 let mut review = review;
                 review.preview_path = Some(path.clone());
-                state.launch_teaser =
-                    super::launch_teaser::LaunchTeaserState::Reviewing(review);
-                        // Open preview externally
+                state.launch_teaser = super::launch_teaser::LaunchTeaserState::Reviewing(review);
+                // Open preview externally
                 return Update::task(iced::Task::perform(
                     async move { crate::platform_actions::open_path(&path) },
                     |result| match result {
@@ -3112,12 +3125,13 @@ fn handle_teaser_preview_finished(
             }
         }
         Err(e) => {
-            if let super::launch_teaser::LaunchTeaserState::PreviewRendering {
-                review, ..
-            } = std::mem::replace(&mut state.launch_teaser, super::launch_teaser::LaunchTeaserState::Closed)
+            if let super::launch_teaser::LaunchTeaserState::PreviewRendering { review, .. } =
+                std::mem::replace(
+                    &mut state.launch_teaser,
+                    super::launch_teaser::LaunchTeaserState::Closed,
+                )
             {
-                state.launch_teaser =
-                    super::launch_teaser::LaunchTeaserState::Reviewing(review);
+                state.launch_teaser = super::launch_teaser::LaunchTeaserState::Reviewing(review);
                 state.message = Some(format!("Preview failed: {e}"));
             }
         }
@@ -3130,8 +3144,7 @@ fn handle_teaser_render_requested(state: &mut TimelineWorkspace) -> Update {
     if let super::launch_teaser::LaunchTeaserState::Reviewing(review) = &state.launch_teaser {
         if review.final_render_gated() {
             if !review.content_reviewed {
-                state.message =
-                    Some("Review captured content before rendering.".into());
+                state.message = Some("Review captured content before rendering.".into());
             }
             return Update::none();
         }
@@ -3165,9 +3178,10 @@ fn handle_teaser_save_picker_chosen(
         return Update::none();
     };
 
-    if let super::launch_teaser::LaunchTeaserState::Reviewing(review) =
-        std::mem::replace(&mut state.launch_teaser, super::launch_teaser::LaunchTeaserState::Closed)
-    {
+    if let super::launch_teaser::LaunchTeaserState::Reviewing(review) = std::mem::replace(
+        &mut state.launch_teaser,
+        super::launch_teaser::LaunchTeaserState::Closed,
+    ) {
         let op_id = review.next_operation_id;
         let plan = review.plan.clone();
         state.launch_teaser = super::launch_teaser::LaunchTeaserState::FinalRendering {
@@ -3216,7 +3230,9 @@ fn handle_teaser_render_finished(
     result: Result<std::path::PathBuf, String>,
 ) -> Update {
     if let super::launch_teaser::LaunchTeaserState::FinalRendering {
-        operation_id: id, review, destination,
+        operation_id: id,
+        review,
+        destination,
     } = &state.launch_teaser
     {
         if *id != operation_id {
@@ -3228,9 +3244,11 @@ fn handle_teaser_render_finished(
 
     match result {
         Ok(output_path) => {
-            if let super::launch_teaser::LaunchTeaserState::FinalRendering {
-                review, ..
-            } = std::mem::replace(&mut state.launch_teaser, super::launch_teaser::LaunchTeaserState::Closed)
+            if let super::launch_teaser::LaunchTeaserState::FinalRendering { review, .. } =
+                std::mem::replace(
+                    &mut state.launch_teaser,
+                    super::launch_teaser::LaunchTeaserState::Closed,
+                )
             {
                 let validated = review.validated.as_ref();
                 let duration_ms = validated.map_or(0, |v| v.duration_ms());
@@ -3249,10 +3267,13 @@ fn handle_teaser_render_finished(
 
                 // Persist sidecar if project root is available.
                 let sidecar_persisted = if let Some(root) = state.project_root() {
-                    let plan_sha256 = match rollshot_action::launch_teaser::persistence::compute_plan_sha256(&plan) {
-                        Ok(h) => h,
-                        Err(_) => String::new(),
-                    };
+                    let plan_sha256 =
+                        match rollshot_action::launch_teaser::persistence::compute_plan_sha256(
+                            &plan,
+                        ) {
+                            Ok(h) => h,
+                            Err(_) => String::new(),
+                        };
                     let now_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -3267,7 +3288,9 @@ fn handle_teaser_render_finished(
                         output_sha256: output_sha256.clone(),
                         rendered_at_unix_ms: now_ms,
                     };
-                    match rollshot_action::launch_teaser::persistence::write_launch_teaser_sidecar(&root, &artifact) {
+                    match rollshot_action::launch_teaser::persistence::write_launch_teaser_sidecar(
+                        &root, &artifact,
+                    ) {
                         Ok(()) => true,
                         Err(e) => {
                             tracing::warn!(target: "rollshot::launch_teaser", "sidecar write failed: {e}");
@@ -3278,27 +3301,27 @@ fn handle_teaser_render_finished(
                     false
                 };
 
-                state.launch_teaser =
-                    super::launch_teaser::LaunchTeaserState::Completed(
-                        super::launch_teaser::LaunchTeaserCompletedState {
-                            duration_ms,
-                            width: rollshot_action::launch_teaser::FINAL_WIDTH,
-                            height: rollshot_action::launch_teaser::FINAL_HEIGHT,
-                            output_path,
-                            output_sha256,
-                            sidecar_persisted,
-                            plan,
-                        },
-                    );
+                state.launch_teaser = super::launch_teaser::LaunchTeaserState::Completed(
+                    super::launch_teaser::LaunchTeaserCompletedState {
+                        duration_ms,
+                        width: rollshot_action::launch_teaser::FINAL_WIDTH,
+                        height: rollshot_action::launch_teaser::FINAL_HEIGHT,
+                        output_path,
+                        output_sha256,
+                        sidecar_persisted,
+                        plan,
+                    },
+                );
             }
         }
         Err(e) => {
-            if let super::launch_teaser::LaunchTeaserState::FinalRendering {
-                review, ..
-            } = std::mem::replace(&mut state.launch_teaser, super::launch_teaser::LaunchTeaserState::Closed)
+            if let super::launch_teaser::LaunchTeaserState::FinalRendering { review, .. } =
+                std::mem::replace(
+                    &mut state.launch_teaser,
+                    super::launch_teaser::LaunchTeaserState::Closed,
+                )
             {
-                state.launch_teaser =
-                    super::launch_teaser::LaunchTeaserState::Reviewing(review);
+                state.launch_teaser = super::launch_teaser::LaunchTeaserState::Reviewing(review);
                 state.message = Some(format!("Render failed: {e}"));
             }
         }
@@ -3313,17 +3336,19 @@ fn handle_teaser_render_finished(
 #[cfg(feature = "action-guide")]
 fn handle_teaser_agent_requested(state: &mut TimelineWorkspace) -> Update {
     // Only available when teaser is in Reviewing state.
-    if !matches!(&state.launch_teaser, super::launch_teaser::LaunchTeaserState::Reviewing(_)) {
+    if !matches!(
+        &state.launch_teaser,
+        super::launch_teaser::LaunchTeaserState::Reviewing(_)
+    ) {
         return Update::none();
     }
     let Some(root) = state.project_root() else {
         state.message = Some("Save the project before using agent suggestions.".into());
         return Update::none();
     };
-    state.launch_teaser_agent =
-        super::launch_teaser_agent::LaunchTeaserAgentState::ScopeSelection(
-            super::launch_teaser_agent::RepositoryScopeState::new(root),
-        );
+    state.launch_teaser_agent = super::launch_teaser_agent::LaunchTeaserAgentState::ScopeSelection(
+        super::launch_teaser_agent::RepositoryScopeState::new(root),
+    );
     Update::none()
 }
 
@@ -3362,10 +3387,7 @@ fn handle_teaser_agent_scope_entry_added(
 }
 
 #[cfg(feature = "action-guide")]
-fn handle_teaser_agent_scope_entry_removed(
-    state: &mut TimelineWorkspace,
-    index: usize,
-) -> Update {
+fn handle_teaser_agent_scope_entry_removed(state: &mut TimelineWorkspace, index: usize) -> Update {
     if let super::launch_teaser_agent::LaunchTeaserAgentState::ScopeSelection(scope) =
         &mut state.launch_teaser_agent
     {
@@ -3412,7 +3434,12 @@ fn handle_teaser_agent_scope_confirmed(state: &mut TimelineWorkspace) -> Update 
         }) = &state.project_session
         {
             let root_digest = super::caption_agent::project_root_digest(root);
-            (root_digest, *base_revision, String::new(), base_review.plan.source.motion_sha256.clone())
+            (
+                root_digest,
+                *base_revision,
+                String::new(),
+                base_review.plan.source.motion_sha256.clone(),
+            )
         } else {
             return Update::none();
         };
@@ -3430,9 +3457,10 @@ fn handle_teaser_agent_scope_confirmed(state: &mut TimelineWorkspace) -> Update 
         .as_millis() as i64;
 
     // Create a durable task snapshot.
-    let task_id = match rollshot_agent::product_task::ProductTaskId::parse(
-        format!("task-teaser-{}", uuid::Uuid::new_v4()),
-    ) {
+    let task_id = match rollshot_agent::product_task::ProductTaskId::parse(format!(
+        "task-teaser-{}",
+        uuid::Uuid::new_v4()
+    )) {
         Ok(id) => id,
         Err(e) => {
             state.message = Some(format!("Agent task creation failed: {e}"));
@@ -3478,13 +3506,7 @@ fn handle_teaser_agent_scope_confirmed(state: &mut TimelineWorkspace) -> Update 
 fn handle_teaser_agent_finished(
     state: &mut TimelineWorkspace,
     operation_id: u64,
-    result: Result<
-        (
-            rollshot_agent::product_task::ProductTaskSnapshot,
-            Vec<u8>,
-        ),
-        String,
-    >,
+    result: Result<(rollshot_agent::product_task::ProductTaskSnapshot, Vec<u8>), String>,
 ) -> Update {
     // Verify we're in Running with matching operation_id.
     let running = match &state.launch_teaser_agent {
@@ -3516,9 +3538,9 @@ fn handle_teaser_agent_finished(
 #[cfg(feature = "action-guide")]
 fn handle_teaser_accept_proposal(state: &mut TimelineWorkspace) -> Update {
     let proposal = match &state.launch_teaser_agent {
-        super::launch_teaser_agent::LaunchTeaserAgentState::ProposalReview {
-            proposal, ..
-        } => proposal.clone(),
+        super::launch_teaser_agent::LaunchTeaserAgentState::ProposalReview { proposal, .. } => {
+            proposal.clone()
+        }
         _ => return Update::none(),
     };
 

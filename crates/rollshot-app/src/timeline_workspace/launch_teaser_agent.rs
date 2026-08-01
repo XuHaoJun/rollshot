@@ -25,13 +25,11 @@ use std::path::PathBuf;
 
 use rollshot_action::launch_teaser::LaunchTeaserPlanV1;
 use rollshot_agent::product_task::{
-    ArtifactId, ProductArtifactMetadata, ProductTaskId, ProductTaskSnapshot,
-    SourceBinding, TaskAttempt, TaskAttemptId, TaskKind,
+    ArtifactId, ProductArtifactMetadata, ProductTaskId, ProductTaskSnapshot, SourceBinding,
+    TaskAttempt, TaskAttemptId, TaskKind,
 };
 
-use super::launch_teaser::{
-    LaunchTeaserAgentProposalReview, LaunchTeaserReviewState,
-};
+use super::launch_teaser::{LaunchTeaserAgentProposalReview, LaunchTeaserReviewState};
 
 // ========================================================================
 // Repository scope
@@ -119,6 +117,7 @@ pub(crate) enum ScopeError {
 
 /// States for the agent proposal lifecycle.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) enum LaunchTeaserAgentState {
     /// No agent run active.
     Idle,
@@ -133,6 +132,7 @@ pub(crate) enum LaunchTeaserAgentState {
         base_review: LaunchTeaserReviewState,
     },
     /// Proposal is ready for field-level review.
+    #[allow(dead_code)]
     ProposalReview {
         task_id: ProductTaskId,
         snapshot: ProductTaskSnapshot,
@@ -182,20 +182,20 @@ pub(crate) fn create_teaser_task_snapshot(
 }
 
 /// Start an attempt on a teaser task snapshot.
+#[allow(dead_code)]
 pub(crate) fn start_teaser_attempt(
     snapshot: &ProductTaskSnapshot,
     run_id: rollshot_agent::domain::RunId,
     now: i64,
 ) -> Result<ProductTaskSnapshot, String> {
-    let attempt = TaskAttempt::new(
-        TaskAttemptId::new(1),
-        run_id,
-        now,
-    );
-    snapshot.start_attempt(attempt, now).map_err(|e| e.to_string())
+    let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id, now);
+    snapshot
+        .start_attempt(attempt, now)
+        .map_err(|e| e.to_string())
 }
 
 /// Bind a run contract to the running task.
+#[allow(dead_code)]
 pub(crate) fn bind_teaser_run_contract(
     snapshot: &ProductTaskSnapshot,
     contract: rollshot_agent::product_task::RunContractReceiptV1,
@@ -281,10 +281,7 @@ pub(crate) fn cancel_teaser_task(
     now: i64,
 ) -> Result<ProductTaskSnapshot, String> {
     snapshot
-        .record_terminal(
-            rollshot_agent::product_task::TaskTerminal::Cancelled,
-            now,
-        )
+        .record_terminal(rollshot_agent::product_task::TaskTerminal::Cancelled, now)
         .map_err(|e| e.to_string())
 }
 
@@ -422,9 +419,9 @@ fn apply_patch_to_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::timeline_workspace::launch_teaser::FieldDecision;
     use rollshot_action::launch_teaser::*;
     use rollshot_action::project::ProjectStepId;
-    use crate::timeline_workspace::launch_teaser::FieldDecision;
 
     fn valid_plan_fixture() -> LaunchTeaserPlanV1 {
         fn shot(id: u64, start: u64, end: u64) -> LaunchTeaserShotV1 {
@@ -557,7 +554,10 @@ mod tests {
 
         let review = super::super::launch_teaser::map_agent_patch(&base, &patch_plan).unwrap();
         assert_eq!(review.diffs.len(), 1);
-        assert_eq!(review.diffs[0].field, super::super::launch_teaser::ProposalFieldPath::Hook);
+        assert_eq!(
+            review.diffs[0].field,
+            super::super::launch_teaser::ProposalFieldPath::Hook
+        );
         assert_eq!(review.diffs[0].proposed_value, "New Hook");
     }
 
@@ -569,7 +569,10 @@ mod tests {
 
         let review = super::super::launch_teaser::map_agent_patch(&base, &patch_plan).unwrap();
         assert_eq!(review.diffs.len(), 1);
-        assert_eq!(review.diffs[0].field, super::super::launch_teaser::ProposalFieldPath::OutroText);
+        assert_eq!(
+            review.diffs[0].field,
+            super::super::launch_teaser::ProposalFieldPath::OutroText
+        );
     }
 
     #[test]
@@ -599,8 +602,7 @@ mod tests {
         patch_plan.hook = "Better Hook".into();
         patch_plan.outro_text = "Better Outro".into();
 
-        let mut review =
-            super::super::launch_teaser::map_agent_patch(&base, &patch_plan).unwrap();
+        let mut review = super::super::launch_teaser::map_agent_patch(&base, &patch_plan).unwrap();
 
         // Accept hook, reject outro.
         review.diffs[0].decision = FieldDecision::Accepted;
@@ -617,8 +619,7 @@ mod tests {
         let mut patch_plan = base.clone();
         patch_plan.hook = "X".into();
 
-        let mut review =
-            super::super::launch_teaser::map_agent_patch(&base, &patch_plan).unwrap();
+        let mut review = super::super::launch_teaser::map_agent_patch(&base, &patch_plan).unwrap();
         assert!(!review.all_decided());
         review.diffs[0].decision = FieldDecision::Accepted;
         assert!(review.all_decided());

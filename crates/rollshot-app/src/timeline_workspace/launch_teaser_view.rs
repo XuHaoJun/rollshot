@@ -20,7 +20,10 @@ pub(crate) fn teaser_disabled_reason(ws: &TimelineWorkspace) -> Option<&'static 
 
 /// Whether the Create teaser button should be shown.
 pub(crate) fn can_create_teaser(ws: &TimelineWorkspace) -> bool {
-    matches!(ws.launch_teaser_eligibility(), LaunchTeaserEligibility::Eligible)
+    matches!(
+        ws.launch_teaser_eligibility(),
+        LaunchTeaserEligibility::Eligible
+    )
 }
 
 /// The main teaser view element. Returns None when the teaser is Closed.
@@ -47,7 +50,10 @@ fn seeding_view<'a>() -> Element<'a, Message> {
         .into()
 }
 
-fn review_view<'a>(ws: &'a TimelineWorkspace, review: &'a LaunchTeaserReviewState) -> Element<'a, Message> {
+fn review_view<'a>(
+    ws: &'a TimelineWorkspace,
+    review: &'a LaunchTeaserReviewState,
+) -> Element<'a, Message> {
     let header = row![
         text("Launch Teaser Review").size(20),
         container("  ").width(Length::Fill),
@@ -62,7 +68,9 @@ fn review_view<'a>(ws: &'a TimelineWorkspace, review: &'a LaunchTeaserReviewStat
             container(
                 text("Plan is stale. Regenerate after guide changes.")
                     .size(14)
-                    .style(|_theme| iced::widget::text::Style { color: Some(iced::Color::from_rgb(1.0, 0.8, 0.0)) }),
+                    .style(|_theme| iced::widget::text::Style {
+                        color: Some(iced::Color::from_rgb(1.0, 0.8, 0.0)),
+                    }),
             )
             .padding(8),
         )
@@ -71,10 +79,10 @@ fn review_view<'a>(ws: &'a TimelineWorkspace, review: &'a LaunchTeaserReviewStat
     };
 
     // Validation banner
-    let validation_banner = review.validation_message.as_ref().map(|msg| {
-        container(text(format!("Validation: {msg}")).size(14))
-            .padding(8)
-    });
+    let validation_banner = review
+        .validation_message
+        .as_ref()
+        .map(|msg| container(text(format!("Validation: {msg}")).size(14)).padding(8));
 
     // Shot cards
     let shots: Element<'a, Message> = review
@@ -114,24 +122,21 @@ fn review_view<'a>(ws: &'a TimelineWorkspace, review: &'a LaunchTeaserReviewStat
         } else {
             "Review captured content before rendering"
         };
-        button(text(label).size(14))
-            .on_press(Message::TeaserSetContentReviewed(!checked))
+        button(text(label).size(14)).on_press(Message::TeaserSetContentReviewed(!checked))
     };
 
     // Preview / Render buttons
-    let preview_btn = button("Preview")
-        .on_press_maybe(if review.render_disabled() {
-            None
-        } else {
-            Some(Message::TeaserPreviewRequested)
-        });
+    let preview_btn = button("Preview").on_press_maybe(if review.render_disabled() {
+        None
+    } else {
+        Some(Message::TeaserPreviewRequested)
+    });
 
-    let render_btn = button("Render")
-        .on_press_maybe(if review.final_render_gated() {
-            None
-        } else {
-            Some(Message::TeaserRenderRequested)
-        });
+    let render_btn = button("Render").on_press_maybe(if review.final_render_gated() {
+        None
+    } else {
+        Some(Message::TeaserRenderRequested)
+    });
 
     let actions = row![preview_btn, render_btn].spacing(8);
 
@@ -171,7 +176,10 @@ fn agent_running_view<'a>(_review: &'a LaunchTeaserReviewState) -> Element<'a, M
     .into()
 }
 
-fn rendering_view<'a>(_review: &'a LaunchTeaserReviewState, status: &'a str) -> Element<'a, Message> {
+fn rendering_view<'a>(
+    _review: &'a LaunchTeaserReviewState,
+    status: &'a str,
+) -> Element<'a, Message> {
     container(
         column![
             text(status).size(16),
@@ -195,7 +203,11 @@ fn completion_view<'a>(completed: &'a LaunchTeaserCompletedState) -> Element<'a,
             text(format!("{}×{}", completed.width, completed.height)).size(14),
             text(format!(
                 "Output: {}",
-                completed.output_path.file_name().unwrap_or_default().to_string_lossy()
+                completed
+                    .output_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
             ))
             .size(14),
             row![
@@ -218,15 +230,14 @@ fn completion_view<'a>(completed: &'a LaunchTeaserCompletedState) -> Element<'a,
 pub(crate) fn create_teaser_button<'a>(ws: &'a TimelineWorkspace) -> Element<'a, Message> {
     let eligibility = ws.launch_teaser_eligibility();
     match eligibility {
-        LaunchTeaserEligibility::Eligible => {
-            button("Create teaser").on_press(Message::CreateTeaser).into()
-        }
+        LaunchTeaserEligibility::Eligible => button("Create teaser")
+            .on_press(Message::CreateTeaser)
+            .into(),
         _ => {
             let reason = eligibility
                 .disabled_reason()
                 .unwrap_or("Cannot create teaser");
-            button(text(format!("Create teaser: {reason}")).size(12))
-                .into()
+            button(text(format!("Create teaser: {reason}")).size(12)).into()
         }
     }
 }

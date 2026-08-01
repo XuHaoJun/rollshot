@@ -27,17 +27,17 @@ mod view;
 mod visual_annotation_agent;
 
 #[cfg(feature = "action-guide")]
-pub(crate) mod project;
-#[cfg(feature = "action-guide")]
-pub(crate) mod project_publish;
-#[cfg(feature = "action-guide")]
-pub(crate) mod share;
-#[cfg(feature = "action-guide")]
 pub(crate) mod launch_teaser;
 #[cfg(feature = "action-guide")]
 pub(crate) mod launch_teaser_agent;
 #[cfg(feature = "action-guide")]
 mod launch_teaser_view;
+#[cfg(feature = "action-guide")]
+pub(crate) mod project;
+#[cfg(feature = "action-guide")]
+pub(crate) mod project_publish;
+#[cfg(feature = "action-guide")]
+pub(crate) mod share;
 
 #[allow(unused_imports)]
 pub use update::{subscription, update, Message, Update};

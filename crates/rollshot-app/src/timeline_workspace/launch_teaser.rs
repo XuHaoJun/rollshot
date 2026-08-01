@@ -54,24 +54,12 @@ impl LaunchTeaserEligibility {
     pub fn disabled_reason(&self) -> Option<&'static str> {
         match self {
             Self::Eligible => None,
-            Self::UnsavedProject => {
-                Some("Save this Action Guide before creating a teaser.")
-            }
-            Self::ReadOnlyProject => {
-                Some("This Action Guide is read-only.")
-            }
-            Self::DirtyProject => {
-                Some("Save current guide edits before creating a teaser.")
-            }
-            Self::MissingMotion => {
-                Some("Record motion to create a teaser.")
-            }
-            Self::UnavailableMotion => {
-                Some("The motion recording is unavailable.")
-            }
-            Self::TooFewReviewedSteps => {
-                Some("Review at least 3 steps to create a teaser.")
-            }
+            Self::UnsavedProject => Some("Save this Action Guide before creating a teaser."),
+            Self::ReadOnlyProject => Some("This Action Guide is read-only."),
+            Self::DirtyProject => Some("Save current guide edits before creating a teaser."),
+            Self::MissingMotion => Some("Record motion to create a teaser."),
+            Self::UnavailableMotion => Some("The motion recording is unavailable."),
+            Self::TooFewReviewedSteps => Some("Review at least 3 steps to create a teaser."),
         }
     }
 }
@@ -82,9 +70,7 @@ pub(crate) enum LaunchTeaserState {
     /// No teaser is open.
     Closed,
     /// The deterministic seed is being generated.
-    Seeding {
-        operation_id: u64,
-    },
+    Seeding { operation_id: u64 },
     /// User is reviewing and optionally editing the plan.
     Reviewing(LaunchTeaserReviewState),
     /// Agent run is in flight.
@@ -493,12 +479,16 @@ impl LaunchTeaserAgentProposalReview {
 
     /// Whether all fields have been decided.
     pub fn all_decided(&self) -> bool {
-        self.diffs.iter().all(|d| d.decision != FieldDecision::Pending)
+        self.diffs
+            .iter()
+            .all(|d| d.decision != FieldDecision::Pending)
     }
 
     /// Whether all fields are accepted.
     pub fn all_accepted(&self) -> bool {
-        self.diffs.iter().all(|d| d.decision == FieldDecision::Accepted)
+        self.diffs
+            .iter()
+            .all(|d| d.decision == FieldDecision::Accepted)
     }
 
     /// Build a candidate plan from currently accepted decisions.
@@ -641,12 +631,7 @@ mod tests {
     #[test]
     fn eligibility_unsaved_project() {
         assert_eq!(
-            launch_teaser_eligibility(
-                ProjectSaveState::Unsaved,
-                &None,
-                &WorkspaceMotion::None,
-                5,
-            ),
+            launch_teaser_eligibility(ProjectSaveState::Unsaved, &None, &WorkspaceMotion::None, 5,),
             LaunchTeaserEligibility::UnsavedProject
         );
     }
@@ -659,15 +644,12 @@ mod tests {
         let session = Some(ProjectSession::Saved {
             root: PathBuf::from("/tmp/test"),
             base_revision: 1,
-            access: ProjectAccess::Writable(crate::timeline_workspace::project::ProjectWriterGuard::for_test()),
+            access: ProjectAccess::Writable(
+                crate::timeline_workspace::project::ProjectWriterGuard::for_test(),
+            ),
         });
         assert_eq!(
-            launch_teaser_eligibility(
-                ProjectSaveState::Dirty,
-                &session,
-                &WorkspaceMotion::None,
-                5,
-            ),
+            launch_teaser_eligibility(ProjectSaveState::Dirty, &session, &WorkspaceMotion::None, 5,),
             LaunchTeaserEligibility::DirtyProject
         );
     }
@@ -680,15 +662,12 @@ mod tests {
         let session = Some(ProjectSession::Saved {
             root: PathBuf::from("/tmp/test"),
             base_revision: 1,
-            access: ProjectAccess::Writable(crate::timeline_workspace::project::ProjectWriterGuard::for_test()),
+            access: ProjectAccess::Writable(
+                crate::timeline_workspace::project::ProjectWriterGuard::for_test(),
+            ),
         });
         assert_eq!(
-            launch_teaser_eligibility(
-                ProjectSaveState::Clean,
-                &session,
-                &WorkspaceMotion::None,
-                5,
-            ),
+            launch_teaser_eligibility(ProjectSaveState::Clean, &session, &WorkspaceMotion::None, 5,),
             LaunchTeaserEligibility::MissingMotion
         );
     }
@@ -701,30 +680,28 @@ mod tests {
         let session = Some(ProjectSession::Saved {
             root: PathBuf::from("/tmp/test"),
             base_revision: 1,
-            access: ProjectAccess::Writable(crate::timeline_workspace::project::ProjectWriterGuard::for_test()),
+            access: ProjectAccess::Writable(
+                crate::timeline_workspace::project::ProjectWriterGuard::for_test(),
+            ),
         });
         // Motion must be ready for this test since motion is checked before step count
-        let ready_motion = WorkspaceMotion::Ready(rollshot_action::ValidatedMotionAsset::new_for_test(
-            rollshot_action::motion::MotionMetadata {
-                sha256: "c".repeat(64),
-                duration_ms: 60_000,
-                width: 1920,
-                height: 1080,
-                fps_numerator: 30,
-                fps_denominator: 1,
-                codec: rollshot_action::motion::MotionCodec::H264,
-                audio: rollshot_action::motion::MotionAudio::None,
-            },
-            std::path::PathBuf::from("/tmp/test/motion.mp4"),
-            std::path::PathBuf::from("/tmp/test/scratch"),
-        ));
+        let ready_motion =
+            WorkspaceMotion::Ready(rollshot_action::ValidatedMotionAsset::new_for_test(
+                rollshot_action::motion::MotionMetadata {
+                    sha256: "c".repeat(64),
+                    duration_ms: 60_000,
+                    width: 1920,
+                    height: 1080,
+                    fps_numerator: 30,
+                    fps_denominator: 1,
+                    codec: rollshot_action::motion::MotionCodec::H264,
+                    audio: rollshot_action::motion::MotionAudio::None,
+                },
+                std::path::PathBuf::from("/tmp/test/motion.mp4"),
+                std::path::PathBuf::from("/tmp/test/scratch"),
+            ));
         assert_eq!(
-            launch_teaser_eligibility(
-                ProjectSaveState::Clean,
-                &session,
-                &ready_motion,
-                2,
-            ),
+            launch_teaser_eligibility(ProjectSaveState::Clean, &session, &ready_motion, 2,),
             LaunchTeaserEligibility::TooFewReviewedSteps
         );
     }
@@ -740,12 +717,7 @@ mod tests {
             access: ProjectAccess::ReadOnly,
         });
         assert_eq!(
-            launch_teaser_eligibility(
-                ProjectSaveState::Clean,
-                &session,
-                &WorkspaceMotion::None,
-                5,
-            ),
+            launch_teaser_eligibility(ProjectSaveState::Clean, &session, &WorkspaceMotion::None, 5,),
             LaunchTeaserEligibility::ReadOnlyProject
         );
     }
@@ -810,7 +782,11 @@ mod tests {
                 motion_height: 1080,
             },
             hook: "Test Hook".into(),
-            shots: vec![shot(1, 0, 5_000), shot(2, 5_000, 10_000), shot(3, 10_000, 15_000)],
+            shots: vec![
+                shot(1, 0, 5_000),
+                shot(2, 5_000, 10_000),
+                shot(3, 10_000, 15_000),
+            ],
             outro_text: "Test Outro".into(),
             provenance: LaunchTeaserProvenanceV1 {
                 deterministic_seed_version: 1,
@@ -847,8 +823,11 @@ mod tests {
 #[cfg(test)]
 pub(crate) mod completion_tests {
     use rollshot_action::launch_teaser::*;
-    use rollshot_action::{CandidateKind, CaptureRegion, DegradedReason, DetectReason, FrameId, InputCapability, InputSourceKind, Millis};
     use rollshot_action::project::ProjectStepId;
+    use rollshot_action::{
+        CandidateKind, CaptureRegion, DegradedReason, DetectReason, FrameId, InputCapability,
+        InputSourceKind, Millis,
+    };
 
     fn valid_plan_fixture() -> LaunchTeaserPlanV1 {
         fn shot(id: u64, start: u64, end: u64) -> LaunchTeaserShotV1 {
@@ -980,7 +959,10 @@ pub(crate) mod completion_tests {
         assert!(result.is_err(), "should fail with bad digest");
 
         // External MP4 must still exist.
-        assert!(output_path.exists(), "external MP4 must survive sidecar failure");
+        assert!(
+            output_path.exists(),
+            "external MP4 must survive sidecar failure"
+        );
 
         // Original sidecar must still be valid.
         let load_result = persistence::load_launch_teaser_sidecar(root, &loaded);
@@ -1132,7 +1114,10 @@ pub(crate) mod completion_tests {
 
         // The sidecar is JSON, not binary MP4 data.
         let sidecar_str = String::from_utf8(sidecar_bytes.clone()).unwrap();
-        assert!(sidecar_str.contains("\"plan\"") , "sidecar should contain plan");
+        assert!(
+            sidecar_str.contains("\"plan\""),
+            "sidecar should contain plan"
+        );
         assert!(
             !sidecar_bytes.windows(4).any(|w| w == b"\x00\x00\x00\x01"),
             "sidecar must not contain MP4 NAL units"
@@ -1140,10 +1125,12 @@ pub(crate) mod completion_tests {
     }
 
     /// Helper: build a minimal LoadedProject for sidecar freshness checks.
-    fn build_test_loaded_project(root: &std::path::Path) -> rollshot_action::project::LoadedProject {
-        use rollshot_action::project::*;
+    fn build_test_loaded_project(
+        root: &std::path::Path,
+    ) -> rollshot_action::project::LoadedProject {
         use rollshot_action::motion::asset::ValidatedMotionAsset;
         use rollshot_action::motion::probe::{MotionAudio, MotionCodec, MotionMetadata};
+        use rollshot_action::project::*;
 
         let steps: Vec<ProjectStep> = (1..=3)
             .map(|i| ProjectStep {
