@@ -300,6 +300,34 @@ pub enum Message {
     TeaserOpenOutput,
     #[cfg(feature = "action-guide")]
     TeaserShowInFolder,
+    // ---- Launch teaser agent messages ----
+    #[cfg(feature = "action-guide")]
+    TeaserAgentRequested,
+    #[cfg(feature = "action-guide")]
+    TeaserAgentScopeRootChosen(Option<std::path::PathBuf>),
+    #[cfg(feature = "action-guide")]
+    TeaserAgentScopeEntryAdded(Option<std::path::PathBuf>),
+    #[cfg(feature = "action-guide")]
+    TeaserAgentScopeEntryRemoved(usize),
+    #[cfg(feature = "action-guide")]
+    TeaserAgentScopeConfirmed,
+    #[cfg(feature = "action-guide")]
+    TeaserAgentScopeCancelled,
+    #[cfg(feature = "action-guide")]
+    TeaserAgentFinished {
+        operation_id: u64,
+        result: Result<
+            (
+                rollshot_agent::product_task::ProductTaskSnapshot,
+                Vec<u8>,
+            ),
+            String,
+        >,
+    },
+    #[cfg(feature = "action-guide")]
+    TeaserAcceptProposal,
+    #[cfg(feature = "action-guide")]
+    TeaserRejectProposal,
 }
 
 #[derive(Debug, Clone)]
@@ -2848,6 +2876,45 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             }
             Update::none()
         }
+
+        // ---- Launch teaser agent handlers ----
+        #[cfg(feature = "action-guide")]
+        Message::TeaserAgentRequested => handle_teaser_agent_requested(state),
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserAgentScopeRootChosen(root) => {
+            handle_teaser_agent_scope_root_chosen(state, root)
+        }
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserAgentScopeEntryAdded(path) => {
+            handle_teaser_agent_scope_entry_added(state, path)
+        }
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserAgentScopeEntryRemoved(index) => {
+            handle_teaser_agent_scope_entry_removed(state, index)
+        }
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserAgentScopeConfirmed => handle_teaser_agent_scope_confirmed(state),
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserAgentScopeCancelled => {
+            state.launch_teaser_agent = super::launch_teaser_agent::LaunchTeaserAgentState::Idle;
+            Update::none()
+        }
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserAgentFinished { operation_id, result } => {
+            handle_teaser_agent_finished(state, operation_id, result)
+        }
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserAcceptProposal => handle_teaser_accept_proposal(state),
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserRejectProposal => handle_teaser_reject_proposal(state),
     }
 }
 
@@ -2956,7 +3023,7 @@ fn handle_teaser_preview_requested(state: &mut TimelineWorkspace) -> Update {
             return Update::none();
         }
         let op_id = review.next_operation_id;
-        let plan = review.plan.clone();
+        let _plan = review.plan.clone();
         // Transition to PreviewRendering
         if let super::launch_teaser::LaunchTeaserState::Reviewing(review) =
             std::mem::replace(&mut state.launch_teaser, super::launch_teaser::LaunchTeaserState::Closed)
@@ -3169,6 +3236,48 @@ fn handle_teaser_render_finished(
                 let duration_ms = validated.map_or(0, |v| v.duration_ms());
                 let plan = review.plan.clone();
 
+                // Compute output SHA-256.
+                let output_sha256 = match std::fs::read(&output_path) {
+                    Ok(bytes) => {
+                        use sha2::{Digest, Sha256};
+                        let mut hasher = Sha256::new();
+                        hasher.update(&bytes);
+                        format!("{:x}", hasher.finalize())
+                    }
+                    Err(_) => String::new(),
+                };
+
+                // Persist sidecar if project root is available.
+                let sidecar_persisted = if let Some(root) = state.project_root() {
+                    let plan_sha256 = match rollshot_action::launch_teaser::persistence::compute_plan_sha256(&plan) {
+                        Ok(h) => h,
+                        Err(_) => String::new(),
+                    };
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as i64;
+                    let artifact = rollshot_action::launch_teaser::error::LaunchTeaserArtifactV1 {
+                        schema_version: 1,
+                        plan: plan.clone(),
+                        plan_sha256,
+                        renderer_version: 1,
+                        ffmpeg_version: "unknown".into(),
+                        ffprobe_version: "unknown".into(),
+                        output_sha256: output_sha256.clone(),
+                        rendered_at_unix_ms: now_ms,
+                    };
+                    match rollshot_action::launch_teaser::persistence::write_launch_teaser_sidecar(&root, &artifact) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            tracing::warn!(target: "rollshot::launch_teaser", "sidecar write failed: {e}");
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
+
                 state.launch_teaser =
                     super::launch_teaser::LaunchTeaserState::Completed(
                         super::launch_teaser::LaunchTeaserCompletedState {
@@ -3176,8 +3285,8 @@ fn handle_teaser_render_finished(
                             width: rollshot_action::launch_teaser::FINAL_WIDTH,
                             height: rollshot_action::launch_teaser::FINAL_HEIGHT,
                             output_path,
-                            output_sha256: String::new(),
-                            sidecar_persisted: false,
+                            output_sha256,
+                            sidecar_persisted,
                             plan,
                         },
                     );
@@ -3194,6 +3303,247 @@ fn handle_teaser_render_finished(
             }
         }
     }
+    Update::none()
+}
+
+// ---------------------------------------------------------------------------
+// Launch teaser agent lifecycle
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "action-guide")]
+fn handle_teaser_agent_requested(state: &mut TimelineWorkspace) -> Update {
+    // Only available when teaser is in Reviewing state.
+    if !matches!(&state.launch_teaser, super::launch_teaser::LaunchTeaserState::Reviewing(_)) {
+        return Update::none();
+    }
+    let Some(root) = state.project_root() else {
+        state.message = Some("Save the project before using agent suggestions.".into());
+        return Update::none();
+    };
+    state.launch_teaser_agent =
+        super::launch_teaser_agent::LaunchTeaserAgentState::ScopeSelection(
+            super::launch_teaser_agent::RepositoryScopeState::new(root),
+        );
+    Update::none()
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_teaser_agent_scope_root_chosen(
+    state: &mut TimelineWorkspace,
+    root: Option<std::path::PathBuf>,
+) -> Update {
+    if let Some(root) = root {
+        state.launch_teaser_agent =
+            super::launch_teaser_agent::LaunchTeaserAgentState::ScopeSelection(
+                super::launch_teaser_agent::RepositoryScopeState::new(root),
+            );
+    }
+    Update::none()
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_teaser_agent_scope_entry_added(
+    state: &mut TimelineWorkspace,
+    path: Option<std::path::PathBuf>,
+) -> Update {
+    let Some(path) = path else {
+        return Update::none();
+    };
+    if let super::launch_teaser_agent::LaunchTeaserAgentState::ScopeSelection(scope) =
+        &mut state.launch_teaser_agent
+    {
+        // Convert absolute path to relative path from scope root.
+        if let Ok(relative) = path.strip_prefix(&scope.root) {
+            let relative_str = relative.to_string_lossy().to_string();
+            let _ = scope.add_entry(relative_str);
+        }
+    }
+    Update::none()
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_teaser_agent_scope_entry_removed(
+    state: &mut TimelineWorkspace,
+    index: usize,
+) -> Update {
+    if let super::launch_teaser_agent::LaunchTeaserAgentState::ScopeSelection(scope) =
+        &mut state.launch_teaser_agent
+    {
+        scope.remove_entry(index);
+    }
+    Update::none()
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_teaser_agent_scope_confirmed(state: &mut TimelineWorkspace) -> Update {
+    // Take the scope and transition to Running.
+    let scope = match std::mem::replace(
+        &mut state.launch_teaser_agent,
+        super::launch_teaser_agent::LaunchTeaserAgentState::Idle,
+    ) {
+        super::launch_teaser_agent::LaunchTeaserAgentState::ScopeSelection(scope) => scope,
+        _ => return Update::none(),
+    };
+
+    if !scope.confirmed || scope.entries.is_empty() {
+        state.launch_teaser_agent =
+            super::launch_teaser_agent::LaunchTeaserAgentState::ScopeSelection(scope);
+        return Update::none();
+    }
+
+    // Extract the base review state from the current teaser.
+    let base_review = match &state.launch_teaser {
+        super::launch_teaser::LaunchTeaserState::Reviewing(review) => review.clone(),
+        _ => return Update::none(),
+    };
+
+    let operation_id = {
+        let id = state.next_save_recording_operation_id;
+        state.next_save_recording_operation_id += 1;
+        id
+    };
+
+    // Build source binding.
+    let (project_root_sha256, revision, projection_digest, motion_sha256) =
+        if let Some(super::project::ProjectSession::Saved {
+            root,
+            base_revision,
+            ..
+        }) = &state.project_session
+        {
+            let root_digest = super::caption_agent::project_root_digest(root);
+            (root_digest, *base_revision, String::new(), base_review.plan.source.motion_sha256.clone())
+        } else {
+            return Update::none();
+        };
+
+    let source_binding = super::launch_teaser_agent::launch_teaser_source_binding(
+        project_root_sha256,
+        revision,
+        projection_digest,
+        motion_sha256,
+    );
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+
+    // Create a durable task snapshot.
+    let task_id = match rollshot_agent::product_task::ProductTaskId::parse(
+        format!("task-teaser-{}", uuid::Uuid::new_v4()),
+    ) {
+        Ok(id) => id,
+        Err(e) => {
+            state.message = Some(format!("Agent task creation failed: {e}"));
+            return Update::none();
+        }
+    };
+
+    let snapshot = match super::launch_teaser_agent::create_teaser_task_snapshot(
+        task_id.clone(),
+        source_binding,
+        now,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            state.message = Some(format!("Agent task creation failed: {e}"));
+            return Update::none();
+        }
+    };
+
+    state.launch_teaser_agent = super::launch_teaser_agent::LaunchTeaserAgentState::Running {
+        operation_id,
+        task_id,
+        snapshot,
+        scope,
+        base_review,
+    };
+
+    // Spawn agent run task. For now this completes immediately with a no-op.
+    // A real implementation would invoke the bundled profile and decode the patch.
+    Update::task(iced::Task::perform(
+        async move {
+            // Stub: agent run produces no patch.
+            Message::TeaserAgentFinished {
+                operation_id,
+                result: Err("Agent run not yet implemented.".into()),
+            }
+        },
+        std::convert::identity,
+    ))
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_teaser_agent_finished(
+    state: &mut TimelineWorkspace,
+    operation_id: u64,
+    result: Result<
+        (
+            rollshot_agent::product_task::ProductTaskSnapshot,
+            Vec<u8>,
+        ),
+        String,
+    >,
+) -> Update {
+    // Verify we're in Running with matching operation_id.
+    let running = match &state.launch_teaser_agent {
+        super::launch_teaser_agent::LaunchTeaserAgentState::Running {
+            operation_id: id, ..
+        } => *id == operation_id,
+        _ => false,
+    };
+    if !running {
+        return Update::none();
+    }
+
+    match result {
+        Ok((_snapshot, _patch_bytes)) => {
+            // A real implementation would decode the patch, map it onto the base plan,
+            // and transition to ProposalReview.
+            // For now, transition back to Idle with a message.
+            state.launch_teaser_agent = super::launch_teaser_agent::LaunchTeaserAgentState::Idle;
+            state.message = Some("Agent proposal received. Review not yet wired.".into());
+        }
+        Err(e) => {
+            state.launch_teaser_agent = super::launch_teaser_agent::LaunchTeaserAgentState::Idle;
+            state.message = Some(format!("Agent run failed: {e}"));
+        }
+    }
+    Update::none()
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_teaser_accept_proposal(state: &mut TimelineWorkspace) -> Update {
+    let proposal = match &state.launch_teaser_agent {
+        super::launch_teaser_agent::LaunchTeaserAgentState::ProposalReview {
+            proposal, ..
+        } => proposal.clone(),
+        _ => return Update::none(),
+    };
+
+    // Build the accepted candidate and apply it to the review state.
+    let candidate = match proposal.accepted_candidate() {
+        Some(c) => c,
+        None => return Update::none(),
+    };
+
+    if let super::launch_teaser::LaunchTeaserState::Reviewing(review) = &mut state.launch_teaser {
+        review.plan = candidate;
+        review.revalidate();
+        review.content_reviewed = false;
+        review.preview_path = None;
+    }
+
+    state.launch_teaser_agent = super::launch_teaser_agent::LaunchTeaserAgentState::Idle;
+    Update::none()
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_teaser_reject_proposal(state: &mut TimelineWorkspace) -> Update {
+    // Discard the proposal and return to idle.
+    state.launch_teaser_agent = super::launch_teaser_agent::LaunchTeaserAgentState::Idle;
+    state.message = Some("Agent proposal rejected.".into());
     Update::none()
 }
 

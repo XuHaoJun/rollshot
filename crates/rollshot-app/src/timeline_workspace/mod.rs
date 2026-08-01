@@ -35,6 +35,8 @@ pub(crate) mod share;
 #[cfg(feature = "action-guide")]
 pub(crate) mod launch_teaser;
 #[cfg(feature = "action-guide")]
+pub(crate) mod launch_teaser_agent;
+#[cfg(feature = "action-guide")]
 mod launch_teaser_view;
 
 #[allow(unused_imports)]
@@ -434,6 +436,9 @@ pub struct TimelineWorkspace {
     /// Launch teaser lifecycle state. See [`launch_teaser::LaunchTeaserState`].
     #[cfg(feature = "action-guide")]
     pub(crate) launch_teaser: launch_teaser::LaunchTeaserState,
+    /// Launch teaser agent proposal lifecycle state.
+    #[cfg(feature = "action-guide")]
+    pub(crate) launch_teaser_agent: launch_teaser_agent::LaunchTeaserAgentState,
 }
 
 impl TimelineWorkspace {
@@ -529,6 +534,8 @@ impl TimelineWorkspace {
             next_save_recording_operation_id: 0,
             #[cfg(feature = "action-guide")]
             launch_teaser: launch_teaser::LaunchTeaserState::Closed,
+            #[cfg(feature = "action-guide")]
+            launch_teaser_agent: launch_teaser_agent::LaunchTeaserAgentState::Idle,
         };
         ws.rebuild_selection_handles();
         ws
@@ -610,6 +617,8 @@ impl TimelineWorkspace {
             next_save_recording_operation_id: 0,
             #[cfg(feature = "action-guide")]
             launch_teaser: launch_teaser::LaunchTeaserState::Closed,
+            #[cfg(feature = "action-guide")]
+            launch_teaser_agent: launch_teaser_agent::LaunchTeaserAgentState::Idle,
         };
         ws.rebuild_selection_handles();
         ws

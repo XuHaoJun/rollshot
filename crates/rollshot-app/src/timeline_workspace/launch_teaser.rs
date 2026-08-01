@@ -23,7 +23,7 @@
 use std::path::PathBuf;
 
 use rollshot_action::launch_teaser::{
-    LaunchTeaserPlanV1, LaunchTeaserSeedError, LaunchTeaserSidecarLoad, ValidatedLaunchTeaserPlan,
+    LaunchTeaserPlanV1, LaunchTeaserSidecarLoad, ValidatedLaunchTeaserPlan,
 };
 
 use super::motion::WorkspaceMotion;
@@ -108,7 +108,7 @@ pub(crate) enum LaunchTeaserState {
 }
 
 /// Mutable state for the teaser review screen.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct LaunchTeaserReviewState {
     /// The current plan (may have user edits).
     pub plan: LaunchTeaserPlanV1,
