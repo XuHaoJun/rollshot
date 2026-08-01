@@ -490,7 +490,7 @@ pub(crate) struct TeaserRunSuccess {
 /// ReadyForReview.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn suggest_launch_teaser_task(
-    operation_id: u64,
+    _operation_id: u64,
     store: std::sync::Arc<crate::agent_store::TaskStore>,
     cancellation: rollshot_agent::runtime::RunCancellation,
     model: String,
@@ -501,7 +501,7 @@ pub(crate) async fn suggest_launch_teaser_task(
     scope_entries: Vec<String>,
     source_binding: SourceBinding,
     task_snapshot: ProductTaskSnapshot,
-    project_root: PathBuf,
+    _project_root: PathBuf,
 ) -> Result<TeaserRunSuccess, String> {
     use rollshot_agent::authority::AuthoritySubject;
     use rollshot_agent::driver::{AgentConfig, AgentRunner, SingleSubmitProfile};

@@ -414,34 +414,51 @@ impl Tool for RepositoryReadTool {
                 });
             }
 
-            // Check aggregate limits before opening.
-            {
+            // Check aggregate limits and compute remaining allowances.
+            let effective_limits = {
                 let files = self.inner.files_read.lock().unwrap();
+                let total = self.inner.total_bytes_read.lock().unwrap();
+                let total_ret = self.inner.total_bytes_returned.lock().unwrap();
+
                 if *files >= self.inner.grant.limits.max_files {
                     return Ok(ToolOutcome::Recoverable {
                         error: "file limit reached".to_string(),
                     });
                 }
-            }
-            {
-                let total = self.inner.total_bytes_read.lock().unwrap();
-                if *total >= self.inner.grant.limits.max_total_bytes as u64 {
+                let remaining_total =
+                    (self.inner.grant.limits.max_total_bytes as u64).saturating_sub(*total);
+                let remaining_return =
+                    (self.inner.grant.limits.max_total_return_bytes as u64).saturating_sub(*total_ret);
+                if remaining_total == 0 || remaining_return == 0 {
                     return Ok(ToolOutcome::Recoverable {
-                        error: "total read limit reached".to_string(),
+                        error: if remaining_total == 0 {
+                            "total read limit reached"
+                        } else {
+                            "total return limit reached"
+                        }
+                        .to_string(),
                     });
                 }
-            }
-            {
-                let total_ret = self.inner.total_bytes_returned.lock().unwrap();
-                if *total_ret >= self.inner.grant.limits.max_total_return_bytes as u64 {
-                    return Ok(ToolOutcome::Recoverable {
-                        error: "total return limit reached".to_string(),
-                    });
-                }
-            }
 
-            let result =
-                read_via_descriptor(&self.inner.grant.root_fd, &components, &self.inner.grant);
+                RepositoryReadLimits {
+                    max_files: 1,
+                    max_bytes_per_file: self
+                        .inner
+                        .grant
+                        .limits
+                        .max_bytes_per_file
+                        .min(remaining_total as usize),
+                    max_total_bytes: remaining_total as usize,
+                    max_total_return_bytes: remaining_return as usize,
+                }
+            };
+
+            let result = read_via_descriptor(
+                &self.inner.grant.root_fd,
+                &components,
+                &self.inner.grant,
+                &effective_limits,
+            );
 
             match result {
                 Ok(ReadResult {
@@ -513,6 +530,7 @@ fn read_via_descriptor(
     root_fd: &OwnedFd,
     components: &[String],
     grant: &RepositoryReadGrant,
+    effective_limits: &RepositoryReadLimits,
 ) -> Result<ReadResult, RepositoryReadError> {
     use rustix::fs::{fstat, openat};
 
@@ -553,7 +571,7 @@ fn read_via_descriptor(
                 )));
             }
 
-            return read_file_content(&file_fd, &grant.limits);
+            return read_file_content(&file_fd, effective_limits);
         }
 
         // Intermediate component: must be a directory.
