@@ -9,6 +9,7 @@ pub mod model;
 pub mod product_task;
 pub(crate) mod provider;
 pub mod runtime;
+pub mod repository;
 pub mod skills;
 pub mod tools;
 pub mod visual_annotation;
