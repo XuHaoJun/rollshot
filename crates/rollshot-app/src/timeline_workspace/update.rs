@@ -285,12 +285,6 @@ pub enum Message {
     #[cfg(feature = "action-guide")]
     TeaserSetContentReviewed(bool),
     #[cfg(feature = "action-guide")]
-    TeaserAcceptAll,
-    #[cfg(feature = "action-guide")]
-    TeaserAcceptField(super::launch_teaser::ProposalFieldPath),
-    #[cfg(feature = "action-guide")]
-    TeaserRejectField(super::launch_teaser::ProposalFieldPath),
-    #[cfg(feature = "action-guide")]
     TeaserPreviewRequested,
     #[cfg(feature = "action-guide")]
     TeaserPreviewFinished {
@@ -2819,13 +2813,6 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             }
             Update::none()
         }
-
-        #[cfg(feature = "action-guide")]
-        Message::TeaserAcceptAll => Update::none(),
-        #[cfg(feature = "action-guide")]
-        Message::TeaserAcceptField(_) => Update::none(),
-        #[cfg(feature = "action-guide")]
-        Message::TeaserRejectField(_) => Update::none(),
 
         #[cfg(feature = "action-guide")]
         Message::TeaserPreviewRequested => handle_teaser_preview_requested(state),
