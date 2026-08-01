@@ -854,6 +854,7 @@ async fn suggest_captions_with_store(
         authority: receipt,
         skill_use: skill_use.receipt(),
         bound_at_unix_ms: now,
+        repository_grant: None,
     };
     let bound = match running.bind_run_contract(run_contract, now) {
         Ok(bound) => bound,
@@ -1177,6 +1178,7 @@ pub(crate) mod restore_test_helpers {
                 .unwrap()
                 .receipt(),
             bound_at_unix_ms: now,
+            repository_grant: None,
         };
         let bound = running.bind_run_contract(run_contract, now).unwrap();
 
@@ -1270,6 +1272,7 @@ pub(crate) mod restore_test_helpers {
                 .unwrap()
                 .receipt(),
             bound_at_unix_ms: now,
+            repository_grant: None,
         };
         let bound = running.bind_run_contract(run_contract, now).unwrap();
 
@@ -1895,6 +1898,7 @@ pub(crate) mod provider_tests {
                 .unwrap()
                 .receipt(),
             bound_at_unix_ms: now,
+            repository_grant: None,
         };
         let bound = running.bind_run_contract(run_contract, now).unwrap();
 
@@ -2442,6 +2446,7 @@ mod audit_tests {
                 .unwrap()
                 .receipt(),
             bound_at_unix_ms: 20,
+            repository_grant: None,
         }
     }
 
@@ -2624,6 +2629,7 @@ mod audit_tests {
                 .unwrap()
                 .receipt(),
             bound_at_unix_ms: 20,
+            repository_grant: None,
         };
         let bound = running.bind_run_contract(contract, 20).unwrap();
         store

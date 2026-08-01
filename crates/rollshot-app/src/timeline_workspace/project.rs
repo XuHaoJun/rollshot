@@ -430,6 +430,7 @@ pub(crate) fn from_loaded_project(
         motion: ws_motion,
         save_recording_state: super::motion::SaveRecordingState::Idle,
         next_save_recording_operation_id: 0,
+        launch_teaser: super::launch_teaser::LaunchTeaserState::Closed,
     };
 
     ws.rebuild_selection_handles();

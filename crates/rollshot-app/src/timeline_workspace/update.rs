@@ -235,6 +235,51 @@ pub enum Message {
         operation_id: u64,
         result: Result<(), String>,
     },
+    // ---- Launch teaser messages ----
+    #[cfg(feature = "action-guide")]
+    CreateTeaser,
+    #[cfg(feature = "action-guide")]
+    TeaserSeeded {
+        operation_id: u64,
+        result: Result<rollshot_action::launch_teaser::LaunchTeaserPlanV1, String>,
+    },
+    #[cfg(feature = "action-guide")]
+    CloseTeaser,
+    #[cfg(feature = "action-guide")]
+    RegenerateTeaser,
+    #[cfg(feature = "action-guide")]
+    TeaserSetHook(String),
+    #[cfg(feature = "action-guide")]
+    TeaserSetOutro(String),
+    #[cfg(feature = "action-guide")]
+    TeaserMoveShot { from: usize, to: usize },
+    #[cfg(feature = "action-guide")]
+    TeaserSetRange { shot: usize, start_ms: u64, end_ms: u64 },
+    #[cfg(feature = "action-guide")]
+    TeaserSetFocus {
+        shot: usize,
+        focus: rollshot_action::launch_teaser::FocusPathV1,
+    },
+    #[cfg(feature = "action-guide")]
+    TeaserSetSpeed {
+        shot: usize,
+        speed: rollshot_action::launch_teaser::SpeedV1,
+    },
+    #[cfg(feature = "action-guide")]
+    TeaserSetCaption { shot: usize, caption: String },
+    #[cfg(feature = "action-guide")]
+    TeaserSetTransition {
+        shot: usize,
+        transition: rollshot_action::launch_teaser::TransitionV1,
+    },
+    #[cfg(feature = "action-guide")]
+    TeaserSetContentReviewed(bool),
+    #[cfg(feature = "action-guide")]
+    TeaserAcceptAll,
+    #[cfg(feature = "action-guide")]
+    TeaserAcceptField(super::launch_teaser::ProposalFieldPath),
+    #[cfg(feature = "action-guide")]
+    TeaserRejectField(super::launch_teaser::ProposalFieldPath),
 }
 
 #[derive(Debug, Clone)]
@@ -816,6 +861,8 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             if let Some(index) = state.selected {
                 state.guide.rename(index, title);
                 state.mark_project_dirty();
+                #[cfg(feature = "action-guide")]
+                super::launch_teaser::mark_launch_teaser_stale(&mut state.launch_teaser);
             }
             Update::none()
         }
@@ -826,6 +873,8 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             if let Some(index) = state.selected {
                 state.guide.set_caption(index, caption);
                 state.mark_project_dirty();
+                #[cfg(feature = "action-guide")]
+                super::launch_teaser::mark_launch_teaser_stale(&mut state.launch_teaser);
             }
             Update::none()
         }
@@ -848,6 +897,8 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             }
             if deleted {
                 state.mark_project_dirty();
+                #[cfg(feature = "action-guide")]
+                super::launch_teaser::mark_launch_teaser_stale(&mut state.launch_teaser);
             }
             if let Some(source) = deleted_source {
                 state.presentation.clear_for_source(source);
@@ -866,6 +917,8 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
                 let source = state.selected_step().map(|step| step.source);
                 if state.guide.replace_keyframe(index, frame) {
                     state.mark_project_dirty();
+                    #[cfg(feature = "action-guide")]
+                    super::launch_teaser::mark_launch_teaser_stale(&mut state.launch_teaser);
                     state.rebuild_selection_handles();
                     if let Some(source) = source {
                         if state.presentation.clear_for_source(source) {
@@ -2598,7 +2651,215 @@ pub fn update(state: &mut TimelineWorkspace, message: Message) -> Update {
             operation_id,
             result,
         } => handle_save_recording_worker_finished(state, operation_id, result),
+
+        // ---- Launch teaser handlers ----
+        #[cfg(feature = "action-guide")]
+        Message::CreateTeaser => handle_create_teaser(state),
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserSeeded { operation_id, result } => {
+            handle_teaser_seeded(state, operation_id, result)
+        }
+
+        #[cfg(feature = "action-guide")]
+        Message::CloseTeaser => {
+            state.launch_teaser = super::launch_teaser::LaunchTeaserState::Closed;
+            Update::none()
+        }
+
+        #[cfg(feature = "action-guide")]
+        Message::RegenerateTeaser => {
+            state.launch_teaser = super::launch_teaser::LaunchTeaserState::Closed;
+            handle_create_teaser(state)
+        }
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserSetHook(hook) => {
+            if let super::launch_teaser::LaunchTeaserState::Reviewing(review) =
+                &mut state.launch_teaser
+            {
+                super::launch_teaser::apply_teaser_set_hook(review, hook);
+            }
+            Update::none()
+        }
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserSetOutro(outro) => {
+            if let super::launch_teaser::LaunchTeaserState::Reviewing(review) =
+                &mut state.launch_teaser
+            {
+                super::launch_teaser::apply_teaser_set_outro(review, outro);
+            }
+            Update::none()
+        }
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserMoveShot { from, to } => {
+            if let super::launch_teaser::LaunchTeaserState::Reviewing(review) =
+                &mut state.launch_teaser
+            {
+                super::launch_teaser::apply_teaser_move_shot(review, from, to);
+            }
+            Update::none()
+        }
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserSetRange { shot, start_ms, end_ms } => {
+            if let super::launch_teaser::LaunchTeaserState::Reviewing(review) =
+                &mut state.launch_teaser
+            {
+                super::launch_teaser::apply_teaser_set_range(review, shot, start_ms, end_ms);
+            }
+            Update::none()
+        }
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserSetFocus { shot, focus } => {
+            if let super::launch_teaser::LaunchTeaserState::Reviewing(review) =
+                &mut state.launch_teaser
+            {
+                super::launch_teaser::apply_teaser_set_focus(review, shot, focus);
+            }
+            Update::none()
+        }
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserSetSpeed { shot, speed } => {
+            if let super::launch_teaser::LaunchTeaserState::Reviewing(review) =
+                &mut state.launch_teaser
+            {
+                super::launch_teaser::apply_teaser_set_speed(review, shot, speed);
+            }
+            Update::none()
+        }
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserSetCaption { shot, caption } => {
+            if let super::launch_teaser::LaunchTeaserState::Reviewing(review) =
+                &mut state.launch_teaser
+            {
+                super::launch_teaser::apply_teaser_set_caption(review, shot, caption);
+            }
+            Update::none()
+        }
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserSetTransition { shot, transition } => {
+            if let super::launch_teaser::LaunchTeaserState::Reviewing(review) =
+                &mut state.launch_teaser
+            {
+                super::launch_teaser::apply_teaser_set_transition(review, shot, transition);
+            }
+            Update::none()
+        }
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserSetContentReviewed(reviewed) => {
+            if let super::launch_teaser::LaunchTeaserState::Reviewing(review) =
+                &mut state.launch_teaser
+            {
+                review.content_reviewed = reviewed;
+            }
+            Update::none()
+        }
+
+        #[cfg(feature = "action-guide")]
+        Message::TeaserAcceptAll => Update::none(),
+        #[cfg(feature = "action-guide")]
+        Message::TeaserAcceptField(_) => Update::none(),
+        #[cfg(feature = "action-guide")]
+        Message::TeaserRejectField(_) => Update::none(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Launch teaser lifecycle
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "action-guide")]
+fn handle_create_teaser(state: &mut TimelineWorkspace) -> Update {
+    use rollshot_action::launch_teaser::seed_launch_teaser;
+
+    // Check eligibility
+    let eligibility = state.launch_teaser_eligibility();
+    if eligibility != super::launch_teaser::LaunchTeaserEligibility::Eligible {
+        state.message = eligibility.disabled_reason().map(String::from);
+        return Update::none();
+    }
+
+    // Snapshot operation ID and project root
+    let operation_id = {
+        let id = state.next_save_recording_operation_id;
+        state.next_save_recording_operation_id += 1;
+        id
+    };
+    let project_root = state.project_root();
+
+    state.launch_teaser = super::launch_teaser::LaunchTeaserState::Seeding { operation_id };
+
+    // Load project and seed on blocking task
+    let Some(root) = project_root else {
+        state.launch_teaser = super::launch_teaser::LaunchTeaserState::Closed;
+        state.message = Some("Project root unavailable".into());
+        return Update::none();
+    };
+
+    Update::task(iced::Task::perform(
+        async move {
+            let loaded = tokio::task::spawn_blocking(move || {
+                rollshot_action::project::load_project(&root, None)
+            })
+            .await;
+            match loaded {
+                Ok(Ok(loaded)) => match seed_launch_teaser(&loaded) {
+                    Ok(plan) => Message::TeaserSeeded {
+                        operation_id,
+                        result: Ok(plan),
+                    },
+                    Err(e) => Message::TeaserSeeded {
+                        operation_id,
+                        result: Err(e.category().to_string()),
+                    },
+                },
+                Ok(Err(e)) => Message::TeaserSeeded {
+                    operation_id,
+                    result: Err(e.category().to_string()),
+                },
+                Err(e) => Message::TeaserSeeded {
+                    operation_id,
+                    result: Err(format!("spawn: {e}")),
+                },
+            }
+        },
+        std::convert::identity,
+    ))
+}
+
+#[cfg(feature = "action-guide")]
+fn handle_teaser_seeded(
+    state: &mut TimelineWorkspace,
+    operation_id: u64,
+    result: Result<rollshot_action::launch_teaser::LaunchTeaserPlanV1, String>,
+) -> Update {
+    // Ignore late results
+    if !matches!(&state.launch_teaser, super::launch_teaser::LaunchTeaserState::Seeding { operation_id: id } if *id == operation_id)
+    {
+        return Update::none();
+    }
+
+    match result {
+        Ok(plan) => {
+            let review = super::launch_teaser::LaunchTeaserReviewState::new(plan);
+            state.launch_teaser =
+                super::launch_teaser::LaunchTeaserState::Reviewing(review);
+        }
+        Err(e) => {
+            state.launch_teaser = super::launch_teaser::LaunchTeaserState::Closed;
+            state.message = Some(format!("Teaser creation failed: {e}"));
+        }
+    }
+
+    Update::none()
 }
 
 pub fn subscription(_state: &TimelineWorkspace) -> iced::Subscription<Message> {

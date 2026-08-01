@@ -155,6 +155,7 @@ impl LaunchTeaserRenderError {
 }
 
 /// Sidecar load state.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchTeaserSidecarLoad {
     /// No sidecar file exists.
     Missing,

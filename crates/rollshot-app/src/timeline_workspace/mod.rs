@@ -32,6 +32,8 @@ pub(crate) mod project;
 pub(crate) mod project_publish;
 #[cfg(feature = "action-guide")]
 pub(crate) mod share;
+#[cfg(feature = "action-guide")]
+pub(crate) mod launch_teaser;
 
 #[allow(unused_imports)]
 pub use update::{subscription, update, Message, Update};
@@ -427,6 +429,9 @@ pub struct TimelineWorkspace {
     /// Monotonic operation id for save-recording export provenance.
     #[cfg(feature = "action-guide")]
     pub(crate) next_save_recording_operation_id: u64,
+    /// Launch teaser lifecycle state. See [`launch_teaser::LaunchTeaserState`].
+    #[cfg(feature = "action-guide")]
+    pub(crate) launch_teaser: launch_teaser::LaunchTeaserState,
 }
 
 impl TimelineWorkspace {
@@ -520,6 +525,8 @@ impl TimelineWorkspace {
             save_recording_state: motion::SaveRecordingState::Idle,
             #[cfg(feature = "action-guide")]
             next_save_recording_operation_id: 0,
+            #[cfg(feature = "action-guide")]
+            launch_teaser: launch_teaser::LaunchTeaserState::Closed,
         };
         ws.rebuild_selection_handles();
         ws
@@ -599,6 +606,8 @@ impl TimelineWorkspace {
             motion: motion::WorkspaceMotion::None,
             save_recording_state: motion::SaveRecordingState::Idle,
             next_save_recording_operation_id: 0,
+            #[cfg(feature = "action-guide")]
+            launch_teaser: launch_teaser::LaunchTeaserState::Closed,
         };
         ws.rebuild_selection_handles();
         ws
@@ -742,6 +751,17 @@ impl TimelineWorkspace {
             _ => None,
         }
     }
+    /// Compute launch teaser eligibility from the current workspace state.
+    #[cfg(feature = "action-guide")]
+    pub(crate) fn launch_teaser_eligibility(&self) -> launch_teaser::LaunchTeaserEligibility {
+        launch_teaser::launch_teaser_eligibility(
+            self.save_state,
+            &self.project_session,
+            &self.motion,
+            self.guide.steps().len(),
+        )
+    }
+
     /// Mark the project dirty after a successful persisted mutation.
     #[cfg(feature = "action-guide")]
     pub(crate) fn mark_project_dirty(&mut self) {
