@@ -241,22 +241,7 @@ pub fn compile_ffmpeg_graph(
     Ok(CompiledLaunchTeaserGraph { args })
 }
 
-/// Compute cumulative start time of shot `index` (same as overlay module).
-fn cumulative_start_ms(plan: &super::plan::LaunchTeaserPlanV1, index: usize) -> u64 {
-    let mut total = 0u64;
-    for (i, shot) in plan.shots.iter().enumerate() {
-        if i == index {
-            return total;
-        }
-        let source_dur = shot.source_end_ms.saturating_sub(shot.source_start_ms);
-        let displayed = (source_dur.saturating_mul(1_000)) / (shot.speed.permille());
-        total = total.saturating_add(displayed);
-        if i + 1 < plan.shots.len() {
-            total = total.saturating_sub(shot.transition.overlap_ms());
-        }
-    }
-    total
-}
+
 
 #[cfg(test)]
 mod tests {
@@ -641,5 +626,67 @@ mod tests {
             );
         }
         assert!(filter.contains("[shot2]"));
+    }
+
+    /// I-4: Validate the filter graph for a mixed Cut+Crossfade+Cut transition plan.
+    /// Ensures xfade offset is correct when Cut follows Crossfade and final output
+    /// label is [outv].
+    #[test]
+    fn mixed_cut_crossfade_cut_generates_correct_filter_graph() {
+        let mut plan = valid_plan();
+        // Shot 0: Cut (default)
+        // Shot 1: Crossfade 500ms
+        plan.shots[1].transition = TransitionV1::Crossfade { duration_ms: 500 };
+        // Shot 2: Cut (default)
+        // Extend source ranges so the plan still validates.
+        plan.shots[0].source_end_ms = 5_500;
+        plan.shots[1].source_start_ms = 5_500;
+        plan.shots[1].source_end_ms = 11_000;
+        plan.shots[2].source_start_ms = 11_000;
+        plan.shots[2].source_end_ms = 16_500;
+        plan.source.motion_duration_ms = 16_500;
+
+        let validated = plan.validate().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let assets =
+            prepare_overlay_assets(&validated, scratch.path(), RenderProfile::Final).unwrap();
+        let motion = Path::new("/tmp/fake.mp4");
+        let output = Path::new("/tmp/out.mp4");
+        let _graph = compile_ffmpeg_graph(
+            &validated,
+            motion,
+            &assets,
+            output,
+            RenderProfile::Final,
+            scratch.path(),
+        )
+        .unwrap();
+        let filter = std::fs::read_to_string(scratch.path().join("filter.txt")).unwrap();
+
+        // Must contain an xfade filter for the crossfade transition.
+        assert!(
+            filter.contains("xfade"),
+            "mixed plan must use xfade for crossfade transition"
+        );
+
+        // Must contain a concat filter for the Cut transition within the xfade chain.
+        assert!(
+            filter.contains("concat"),
+            "mixed plan must use concat for cut transition within xfade chain"
+        );
+
+        // The xfade offset for shot 1 (Crossfade 500ms) must be:
+        // cumulative_start_ms(1) - 500ms = 5_500 - 500 = 5_000ms = 5.0s.
+        // (shot 0 displayed = 5_500ms, no overlap since shot 0 is Cut)
+        assert!(
+            filter.contains("offset=5"),
+            "xfade offset must be 5.0s for crossfade after cut, got: {filter}"
+        );
+
+        // Final output label must be [outv].
+        assert!(
+            filter.contains("[outv]"),
+            "filter graph must end with [outv] label, got: {filter}"
+        );
     }
 }
