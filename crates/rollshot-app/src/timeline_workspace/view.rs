@@ -353,8 +353,7 @@ fn header(state: &TimelineWorkspace) -> Element<'_, Message> {
         .into();
 
     #[cfg(feature = "action-guide")]
-    let teaser_btn: Element<Message> =
-        super::launch_teaser_view::create_teaser_button(state);
+    let teaser_btn: Element<Message> = super::launch_teaser_view::create_teaser_button(state);
     #[cfg(not(feature = "action-guide"))]
     let teaser_btn: Element<Message> = Space::new()
         .width(Length::Shrink)

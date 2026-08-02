@@ -3058,8 +3058,11 @@ fn handle_teaser_preview_requested(state: &mut TimelineWorkspace) -> Update {
                                 result: Err("plan validation failed".into()),
                             };
                         };
-                        let toolchain = match crate::managed_ffmpeg::resolve_video_import_toolchain() {
-                            crate::managed_ffmpeg::VideoImportToolchainResolution::Available(tc) => tc,
+                        let toolchain = match crate::managed_ffmpeg::resolve_video_import_toolchain(
+                        ) {
+                            crate::managed_ffmpeg::VideoImportToolchainResolution::Available(
+                                tc,
+                            ) => tc,
                             _ => {
                                 return Message::TeaserPreviewFinished {
                                     operation_id: op_id,
@@ -3082,7 +3085,11 @@ fn handle_teaser_preview_requested(state: &mut TimelineWorkspace) -> Update {
                         })
                         .await;
                         match render_result {
-                            Ok(Ok(rollshot_action::launch_teaser::LaunchTeaserPreviewResult::Preview(preview))) => {
+                            Ok(Ok(
+                                rollshot_action::launch_teaser::LaunchTeaserPreviewResult::Preview(
+                                    preview,
+                                ),
+                            )) => {
                                 // Copy the preview file out of the scratch directory
                                 // before the guard drops and cleans it up.
                                 let preview_dest = std::env::temp_dir()
@@ -3254,8 +3261,11 @@ fn handle_teaser_save_picker_chosen(
                                 result: Err("plan validation failed".into()),
                             };
                         };
-                        let toolchain = match crate::managed_ffmpeg::resolve_video_import_toolchain() {
-                            crate::managed_ffmpeg::VideoImportToolchainResolution::Available(tc) => tc,
+                        let toolchain = match crate::managed_ffmpeg::resolve_video_import_toolchain(
+                        ) {
+                            crate::managed_ffmpeg::VideoImportToolchainResolution::Available(
+                                tc,
+                            ) => tc,
                             _ => {
                                 return Message::TeaserRenderFinished {
                                     operation_id: op_id,
@@ -3278,7 +3288,11 @@ fn handle_teaser_save_picker_chosen(
                         })
                         .await;
                         match render_result {
-                            Ok(Ok(rollshot_action::launch_teaser::LaunchTeaserPreviewResult::Final(result))) => {
+                            Ok(Ok(
+                                rollshot_action::launch_teaser::LaunchTeaserPreviewResult::Final(
+                                    result,
+                                ),
+                            )) => {
                                 let _ = result;
                                 Message::TeaserRenderFinished {
                                     operation_id: op_id,
@@ -3690,10 +3704,7 @@ fn handle_teaser_agent_finished(
                 } => (task_id, snapshot, base_review),
                 _ => return Update::none(),
             };
-            match super::launch_teaser_agent::map_patch_to_review(
-                &base_review.plan,
-                &patch,
-            ) {
+            match super::launch_teaser_agent::map_patch_to_review(&base_review.plan, &patch) {
                 Ok(proposal) => {
                     state.launch_teaser_agent =
                         super::launch_teaser_agent::LaunchTeaserAgentState::ProposalReview {

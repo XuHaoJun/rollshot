@@ -10,7 +10,7 @@
 
 use std::fmt;
 use std::os::unix::io::OwnedFd;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 use std::sync::{Arc, Mutex};
 
 use rustix::fs::{FileType, Mode, OFlags};
@@ -221,7 +221,6 @@ fn hash_grant(entries: &[String], limits: &RepositoryReadLimits) -> String {
 ///
 /// The root path is private: it never appears in Debug output or receipts.
 pub struct RepositoryReadGrant {
-    root: PathBuf,
     root_fd: OwnedFd,
     entries: Vec<String>,
     limits: RepositoryReadLimits,
@@ -272,7 +271,6 @@ impl RepositoryReadGrant {
         let grant_hash = hash_grant(&validated, &limits);
 
         Ok(Self {
-            root: root.to_path_buf(),
             root_fd,
             entries: validated,
             limits,
@@ -427,8 +425,8 @@ impl Tool for RepositoryReadTool {
                 }
                 let remaining_total =
                     (self.inner.grant.limits.max_total_bytes as u64).saturating_sub(*total);
-                let remaining_return =
-                    (self.inner.grant.limits.max_total_return_bytes as u64).saturating_sub(*total_ret);
+                let remaining_return = (self.inner.grant.limits.max_total_return_bytes as u64)
+                    .saturating_sub(*total_ret);
                 if remaining_total == 0 || remaining_return == 0 {
                     return Ok(ToolOutcome::Recoverable {
                         error: if remaining_total == 0 {
@@ -453,12 +451,8 @@ impl Tool for RepositoryReadTool {
                 }
             };
 
-            let result = read_via_descriptor(
-                &self.inner.grant.root_fd,
-                &components,
-                &self.inner.grant,
-                &effective_limits,
-            );
+            let result =
+                read_via_descriptor(&self.inner.grant.root_fd, &components, &effective_limits);
 
             match result {
                 Ok(ReadResult {
@@ -529,7 +523,6 @@ struct ReadResult {
 fn read_via_descriptor(
     root_fd: &OwnedFd,
     components: &[String],
-    grant: &RepositoryReadGrant,
     effective_limits: &RepositoryReadLimits,
 ) -> Result<ReadResult, RepositoryReadError> {
     use rustix::fs::{fstat, openat};

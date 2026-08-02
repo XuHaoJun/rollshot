@@ -708,13 +708,7 @@ pub(crate) async fn suggest_launch_teaser_task(
     let _candidate = map_patch_to_review(&base_plan, &patch)?;
 
     // 11. Promote to ReadyForReview.
-    let promoted = promote_teaser_ready_for_review(
-        &bound,
-        &patch_json,
-        &provider,
-        &model,
-        now,
-    )?;
+    let promoted = promote_teaser_ready_for_review(&bound, &patch_json, &provider, &model, now)?;
 
     Ok(TeaserRunSuccess {
         task_id: task_snapshot.task_id().clone(),
