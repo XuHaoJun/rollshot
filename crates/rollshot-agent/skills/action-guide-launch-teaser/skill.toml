@@ -1,0 +1,6 @@
+schema_version = 1
+package_id = "action-guide-launch-teaser"
+name = "Action Guide Launch Teaser"
+description = "Propose bounded launch teaser shot and copy edits from reviewed Action Guide evidence."
+declared_version = "1.0.0"
+main = "SKILL.md"

@@ -16,6 +16,7 @@ mod frame_store;
 mod gif;
 mod guide;
 mod input;
+pub mod launch_teaser;
 mod metrics;
 mod models;
 pub mod motion;

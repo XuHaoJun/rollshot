@@ -1260,6 +1260,7 @@ pub fn start_agent_run(
                 authority: authority.receipt(now),
                 skill_use: skill_use.receipt(),
                 bound_at_unix_ms: now,
+                repository_grant: None,
             };
             let store_clone = store.clone();
             let task_id_clone = task_id.clone();
@@ -4286,6 +4287,7 @@ mod reducer_tests {
             authority: authority_receipt_for_provenance(),
             skill_use: stale_skill,
             bound_at_unix_ms: 25,
+            repository_grant: None,
         };
 
         // bind_run_contract rejects the stale snapshot.
@@ -4416,6 +4418,7 @@ mod reducer_tests {
             authority,
             skill_use: skill,
             bound_at_unix_ms: 20,
+            repository_grant: None,
         }
     }
 

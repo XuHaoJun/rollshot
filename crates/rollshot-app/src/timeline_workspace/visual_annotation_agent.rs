@@ -532,6 +532,7 @@ pub(crate) async fn suggest_visual_annotation_task(
         authority: receipt,
         skill_use: skill_use.receipt(),
         bound_at_unix_ms: now,
+        repository_grant: None,
     };
     let bound = match running.bind_run_contract(run_contract, now) {
         Ok(bound) => bound,
@@ -1502,6 +1503,7 @@ pub(crate) mod restore_test_helpers {
                 .unwrap()
                 .receipt(),
             bound_at_unix_ms: now,
+            repository_grant: None,
         };
         let bound = running.bind_run_contract(run_contract, now).unwrap();
 
@@ -3394,6 +3396,7 @@ mod tests {
                 .unwrap()
                 .receipt(),
             bound_at_unix_ms: now + 2,
+            repository_grant: None,
         };
         let bound = running.bind_run_contract(contract, now + 2).unwrap();
         store
@@ -3566,6 +3569,7 @@ mod tests {
                 .unwrap()
                 .receipt(),
             bound_at_unix_ms: now + 2,
+            repository_grant: None,
         };
         let bound2 = running2.bind_run_contract(contract2, now + 2).unwrap();
         store
@@ -4033,6 +4037,7 @@ mod tests {
                     .unwrap()
                     .receipt(),
                     bound_at_unix_ms: 30,
+                    repository_grant: None,
                 };
                 let bound = loaded.bind_run_contract(contract, 30).unwrap();
 

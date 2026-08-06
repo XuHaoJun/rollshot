@@ -208,6 +208,30 @@ pub(crate) fn compose_caption_prompt(
 pub const CAPTION_SYSTEM_ENVELOPE: &str =
     "You produce compact structured suggestions for Rollshot Action Guide captions.";
 
+/// System envelope for a launch teaser run.
+pub const LAUNCH_TEASER_SYSTEM_ENVELOPE: &str =
+    "You propose bounded changes to a Rollshot launch teaser plan from reviewed Action Guide evidence.";
+
+/// Compose a full launch teaser system prompt from the bundled skill body
+/// and the authoritative envelope.
+pub fn compose_launch_teaser_prompt(
+    skill_use: &crate::skills::SkillUse,
+) -> Result<String, DriverError> {
+    if skill_use.package_id().as_str() != crate::skills::ACTION_GUIDE_LAUNCH_TEASER_PACKAGE_ID {
+        return Err(DriverError::AgentProtocolFailure(
+            "expected launch teaser skill".to_string(),
+        ));
+    }
+    Ok(format!(
+        "{envelope}\n\n<rollshot-skill package=\"{pkg}\" digest=\"{digest}\" declared_version=\"{ver}\">\n{body}\n</rollshot-skill>",
+        envelope = LAUNCH_TEASER_SYSTEM_ENVELOPE,
+        pkg = skill_use.package_id().as_str(),
+        digest = skill_use.digest(),
+        ver = skill_use.declared_version().unwrap_or("unknown"),
+        body = skill_use.body(),
+    ))
+}
+
 /// Frozen profile for a visual annotation run.
 ///
 /// Wraps the resolved bundled skill and exposes the exact system prompt
@@ -520,6 +544,14 @@ pub enum SingleSubmitTerminal {
     },
 }
 
+/// An auxiliary tool that may be called during a single-submit run before the
+/// terminal tool. The model may call auxiliary tools zero or more times; the
+/// terminal tool is the sole successful terminal action.
+pub struct SingleSubmitAuxiliaryTool {
+    pub definition: crate::model::ToolDefinition,
+    pub tool: std::sync::Arc<dyn crate::tools::Tool>,
+}
+
 /// Bounded profile for a single-submit tool interaction.
 ///
 /// Created via `from_skill`, which rejects a system prompt that does not
@@ -533,6 +565,7 @@ pub struct SingleSubmitProfile<'a> {
     pub system_prompt: String,
     pub required_operation: crate::authority::RunOperation,
     pub tracing_target: &'static str,
+    pub auxiliary_tools: Vec<SingleSubmitAuxiliaryTool>,
 }
 
 impl<'a> SingleSubmitProfile<'a> {
@@ -559,7 +592,42 @@ impl<'a> SingleSubmitProfile<'a> {
             system_prompt,
             required_operation,
             tracing_target,
+            auxiliary_tools: Vec::new(),
         })
+    }
+
+    /// Add auxiliary tools that may be called before the terminal tool.
+    ///
+    /// Rejects duplicate names and any auxiliary name equal to the terminal
+    /// tool name. Verifies `definition.name == tool.name()` for each entry.
+    pub fn with_auxiliary_tools(
+        mut self,
+        auxiliary: Vec<SingleSubmitAuxiliaryTool>,
+    ) -> Result<Self, DriverError> {
+        let terminal_name = self.tool_definition.name.as_str();
+        let mut seen = std::collections::HashSet::new();
+        for aux in &auxiliary {
+            if aux.definition.name != aux.tool.name() {
+                return Err(DriverError::AgentProtocolFailure(format!(
+                    "auxiliary tool definition name '{}' does not match tool name '{}'",
+                    aux.definition.name,
+                    aux.tool.name()
+                )));
+            }
+            if aux.definition.name == terminal_name {
+                return Err(DriverError::AgentProtocolFailure(
+                    "auxiliary tool name must not equal the terminal tool name".to_string(),
+                ));
+            }
+            if !seen.insert(&aux.definition.name) {
+                return Err(DriverError::AgentProtocolFailure(format!(
+                    "duplicate auxiliary tool name '{}'",
+                    aux.definition.name
+                )));
+            }
+        }
+        self.auxiliary_tools = auxiliary;
+        Ok(self)
     }
 }
 
@@ -2185,20 +2253,32 @@ impl AgentRunner {
             return map_budget_error_to_single_submit(err);
         }
 
-        let tool_definitions = vec![profile.tool_definition.clone()];
-        let tool_names: BTreeSet<String> =
-            tool_definitions.iter().map(|t| t.name.clone()).collect();
+        // Build registry and definitions from auxiliary tools + terminal tool.
         let terminal_tool_name = profile.tool_definition.name.clone();
-
+        let mut tool_definitions: Vec<crate::model::ToolDefinition> = Vec::new();
         let mut registry = ToolRegistry::new(ToolRegistryLimits::permissive());
+        for aux in &profile.auxiliary_tools {
+            tool_definitions.push(aux.definition.clone());
+            if let Err(e) = registry.register(aux.tool.clone()) {
+                tracing::error!(
+                    target = profile.tracing_target,
+                    error = %e,
+                    "failed to register auxiliary tool"
+                );
+                return SingleSubmitTerminal::ProtocolFailure;
+            }
+        }
+        tool_definitions.push(profile.tool_definition.clone());
         if let Err(e) = registry.register(profile.tool.clone()) {
             tracing::error!(
                 target = profile.tracing_target,
                 error = %e,
-                "failed to register single-submit stub tool"
+                "failed to register single-submit terminal tool"
             );
             return SingleSubmitTerminal::ProtocolFailure;
         }
+        let tool_names: BTreeSet<String> =
+            tool_definitions.iter().map(|t| t.name.clone()).collect();
 
         let mut rig_run = rig_core::agent::run::AgentRun::new(rig_core::message::Message::user(
             &input.user_message,
@@ -2325,137 +2405,286 @@ impl AgentRunner {
                     tracker.apply_turn();
                 }
                 rig_core::agent::run::AgentRunStep::CallTools { calls } => {
-                    if calls.len() != 1 || calls[0].tool_call.function.name != terminal_tool_name {
-                        tracing::debug!(
-                            target = profile.tracing_target,
-                            call_count = calls.len(),
-                            tool_name = %calls.first().map(|c| c.tool_call.function.name.as_str()).unwrap_or(""),
-                            "single-submit runner rejecting tool call batch"
-                        );
-                        return SingleSubmitTerminal::ProtocolFailure;
-                    }
+                    // Check if batch contains the terminal tool.
+                    let has_terminal = calls
+                        .iter()
+                        .any(|c| c.tool_call.function.name == terminal_tool_name);
 
-                    let pending = &calls[0];
-                    let arguments = pending.tool_call.function.arguments.clone();
-                    let argument_bytes = match serde_json::to_vec(&arguments) {
-                        Ok(bytes) => u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-                        Err(error) => {
+                    if has_terminal {
+                        // Terminal must be the sole call in the batch.
+                        if calls.len() != 1 {
                             tracing::debug!(
                                 target = profile.tracing_target,
-                                error = %error,
-                                "single-submit arguments could not be serialized"
+                                call_count = calls.len(),
+                                tool_name = %calls.first().map(|c| c.tool_call.function.name.as_str()).unwrap_or(""),
+                                "single-submit runner rejecting batch with terminal + other calls"
                             );
                             return SingleSubmitTerminal::ProtocolFailure;
                         }
-                    };
 
-                    if let Err(err) = tracker.charge(UsageSnapshot {
-                        tool_calls: 1,
-                        argument_bytes,
-                        ..UsageSnapshot::default()
-                    }) {
-                        return map_budget_error_to_single_submit(err);
-                    }
-
-                    // Authority check: the tool call must be authorized.
-                    if let Err(_err) = authority.authorize_tool(
-                        authority.run_id(),
-                        subject,
-                        profile.required_operation,
-                    ) {
-                        tracing::debug!(
-                            target = profile.tracing_target,
-                            operation = ?profile.required_operation,
-                            "single-submit authority denied"
-                        );
-                        let Some(sink) = audit_sink else {
-                            tracing::error!(
-                                target = profile.tracing_target,
-                                operation = ?profile.required_operation,
-                                "single-submit authority denial has no audit sink"
-                            );
-                            return SingleSubmitTerminal::ProtocolFailure;
-                        };
-                        if let Err(category) = record_authority_denial(
-                            authority,
-                            &terminal_tool_name,
-                            profile.required_operation,
-                            profile.tracing_target,
-                            sink,
-                        )
-                        .await
-                        {
-                            return SingleSubmitTerminal::AuditFailure { category };
-                        }
-                        return SingleSubmitTerminal::AuthorityDenied {
-                            operation: profile.required_operation,
-                        };
-                    }
-
-                    // Execute the tool stub to satisfy the rig protocol.
-                    let tool_call = ToolCall {
-                        name: pending.tool_call.function.name.clone(),
-                        arguments_json: arguments.clone(),
-                    };
-                    let terminal_tools: BTreeSet<String> =
-                        [terminal_tool_name.clone()].into_iter().collect();
-                    let results = registry
-                        .execute_calls(&[tool_call], cancellation, &terminal_tools)
-                        .await;
-
-                    let mut rig_results: Vec<rig_core::message::UserContent> = Vec::new();
-                    for (i, result) in results.into_iter().enumerate() {
-                        let call_id = calls[i].tool_call.id.clone();
-                        match result {
-                            Ok(ToolOutcome::Success { result_json }) => {
-                                let result_str =
-                                    serde_json::to_string(&result_json).unwrap_or_default();
-                                if let Err(err) = tracker.charge(UsageSnapshot {
-                                    result_bytes: u64::try_from(result_str.len())
-                                        .unwrap_or(u64::MAX),
-                                    ..UsageSnapshot::default()
-                                }) {
-                                    return map_budget_error_to_single_submit(err);
-                                }
-                                rig_results.push(rig_core::message::UserContent::tool_result(
-                                    call_id,
-                                    rig_core::message::ToolResultContent::from_tool_output(
-                                        result_str,
-                                    ),
-                                ));
-                            }
-                            Ok(ToolOutcome::Recoverable { error }) => {
+                        let pending = &calls[0];
+                        let arguments = pending.tool_call.function.arguments.clone();
+                        let argument_bytes = match serde_json::to_vec(&arguments) {
+                            Ok(bytes) => u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                            Err(error) => {
                                 tracing::debug!(
                                     target = profile.tracing_target,
                                     error = %error,
-                                    "single-submit stub tool rejected payload"
+                                    "single-submit arguments could not be serialized"
                                 );
                                 return SingleSubmitTerminal::ProtocolFailure;
                             }
-                            Err(err) => {
+                        };
+
+                        if let Err(err) = tracker.charge(UsageSnapshot {
+                            tool_calls: 1,
+                            argument_bytes,
+                            ..UsageSnapshot::default()
+                        }) {
+                            return map_budget_error_to_single_submit(err);
+                        }
+
+                        // Authority check: the terminal tool call must be authorized.
+                        if let Err(_err) = authority.authorize_tool(
+                            authority.run_id(),
+                            subject,
+                            profile.required_operation,
+                        ) {
+                            tracing::debug!(
+                                target = profile.tracing_target,
+                                operation = ?profile.required_operation,
+                                "single-submit authority denied"
+                            );
+                            let Some(sink) = audit_sink else {
+                                tracing::error!(
+                                    target = profile.tracing_target,
+                                    operation = ?profile.required_operation,
+                                    "single-submit authority denial has no audit sink"
+                                );
+                                return SingleSubmitTerminal::ProtocolFailure;
+                            };
+                            if let Err(category) = record_authority_denial(
+                                authority,
+                                &terminal_tool_name,
+                                profile.required_operation,
+                                profile.tracing_target,
+                                sink,
+                            )
+                            .await
+                            {
+                                return SingleSubmitTerminal::AuditFailure { category };
+                            }
+                            return SingleSubmitTerminal::AuthorityDenied {
+                                operation: profile.required_operation,
+                            };
+                        }
+
+                        // Execute the terminal tool.
+                        let tool_call = ToolCall {
+                            name: pending.tool_call.function.name.clone(),
+                            arguments_json: arguments.clone(),
+                        };
+                        let terminal_tools: BTreeSet<String> =
+                            [terminal_tool_name.clone()].into_iter().collect();
+                        let results = registry
+                            .execute_calls(&[tool_call], cancellation, &terminal_tools)
+                            .await;
+
+                        let mut rig_results: Vec<rig_core::message::UserContent> = Vec::new();
+                        for (i, result) in results.into_iter().enumerate() {
+                            let call_id = calls[i].tool_call.id.clone();
+                            match result {
+                                Ok(ToolOutcome::Success { result_json }) => {
+                                    let result_str =
+                                        serde_json::to_string(&result_json).unwrap_or_default();
+                                    if let Err(err) = tracker.charge(UsageSnapshot {
+                                        result_bytes: u64::try_from(result_str.len())
+                                            .unwrap_or(u64::MAX),
+                                        ..UsageSnapshot::default()
+                                    }) {
+                                        return map_budget_error_to_single_submit(err);
+                                    }
+                                    rig_results.push(rig_core::message::UserContent::tool_result(
+                                        call_id,
+                                        rig_core::message::ToolResultContent::from_tool_output(
+                                            result_str,
+                                        ),
+                                    ));
+                                }
+                                Ok(ToolOutcome::Recoverable { error }) => {
+                                    tracing::debug!(
+                                        target = profile.tracing_target,
+                                        error = %error,
+                                        "single-submit terminal tool rejected payload"
+                                    );
+                                    return SingleSubmitTerminal::ProtocolFailure;
+                                }
+                                Err(err) => {
+                                    tracing::debug!(
+                                        target = profile.tracing_target,
+                                        error = %err,
+                                        "single-submit terminal tool returned an error"
+                                    );
+                                    return SingleSubmitTerminal::ProtocolFailure;
+                                }
+                            }
+                        }
+
+                        if let Err(e) = rig_run.tool_results(rig_results) {
+                            tracing::debug!(
+                                target = profile.tracing_target,
+                                error = %e,
+                                "rig agent run tool_results failed"
+                            );
+                            return SingleSubmitTerminal::ProtocolFailure;
+                        }
+
+                        tracker.apply_turn();
+
+                        // Return the raw arguments.
+                        return SingleSubmitTerminal::Submitted { arguments };
+                    } else {
+                        // All calls are auxiliary tools — validate names.
+                        for call in &calls {
+                            let name = &call.tool_call.function.name;
+                            if !profile
+                                .auxiliary_tools
+                                .iter()
+                                .any(|a| a.definition.name == *name)
+                            {
                                 tracing::debug!(
                                     target = profile.tracing_target,
-                                    error = %err,
-                                    "single-submit stub tool returned an error"
+                                    tool_name = %name,
+                                    "single-submit runner rejecting unknown tool"
                                 );
                                 return SingleSubmitTerminal::ProtocolFailure;
                             }
                         }
+
+                        // Execute auxiliary calls serially.
+                        let mut rig_results: Vec<rig_core::message::UserContent> = Vec::new();
+                        for call in &calls {
+                            let name = &call.tool_call.function.name;
+                            let arguments = call.tool_call.function.arguments.clone();
+
+                            let argument_bytes = match serde_json::to_vec(&arguments) {
+                                Ok(bytes) => u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                                Err(_) => return SingleSubmitTerminal::ProtocolFailure,
+                            };
+                            if let Err(err) = tracker.charge(UsageSnapshot {
+                                tool_calls: 1,
+                                argument_bytes,
+                                ..UsageSnapshot::default()
+                            }) {
+                                return map_budget_error_to_single_submit(err);
+                            }
+
+                            // Authority check for the auxiliary operation.
+                            let aux = profile
+                                .auxiliary_tools
+                                .iter()
+                                .find(|a| a.definition.name == *name)
+                                .expect("auxiliary tool name already validated");
+                            let required_op =
+                                aux.tool.required_operations().first().copied().unwrap_or(
+                                    crate::authority::RunOperation::ReadAuthorizedWorkspaceFile,
+                                );
+                            if let Err(_err) =
+                                authority.authorize_tool(authority.run_id(), subject, required_op)
+                            {
+                                tracing::debug!(
+                                    target = profile.tracing_target,
+                                    operation = ?required_op,
+                                    tool_name = %name,
+                                    "single-submit auxiliary authority denied"
+                                );
+                                let Some(sink) = audit_sink else {
+                                    return SingleSubmitTerminal::ProtocolFailure;
+                                };
+                                if let Err(category) = record_authority_denial(
+                                    authority,
+                                    name,
+                                    required_op,
+                                    profile.tracing_target,
+                                    sink,
+                                )
+                                .await
+                                {
+                                    return SingleSubmitTerminal::AuditFailure { category };
+                                }
+                                return SingleSubmitTerminal::AuthorityDenied {
+                                    operation: required_op,
+                                };
+                            }
+
+                            let tool_call_obj = ToolCall {
+                                name: name.clone(),
+                                arguments_json: arguments.clone(),
+                            };
+                            let results = registry
+                                .execute_calls(&[tool_call_obj], cancellation, &BTreeSet::new())
+                                .await;
+
+                            for result in results {
+                                match result {
+                                    Ok(ToolOutcome::Success { result_json }) => {
+                                        let result_str =
+                                            serde_json::to_string(&result_json).unwrap_or_default();
+                                        if let Err(err) = tracker.charge(UsageSnapshot {
+                                            result_bytes: u64::try_from(result_str.len())
+                                                .unwrap_or(u64::MAX),
+                                            ..UsageSnapshot::default()
+                                        }) {
+                                            return map_budget_error_to_single_submit(err);
+                                        }
+                                        rig_results
+                                            .push(rig_core::message::UserContent::tool_result(
+                                            call.tool_call.id.clone(),
+                                            rig_core::message::ToolResultContent::from_tool_output(
+                                                result_str,
+                                            ),
+                                        ));
+                                    }
+                                    Ok(ToolOutcome::Recoverable { error }) => {
+                                        tracing::debug!(
+                                            target = profile.tracing_target,
+                                            error = %error,
+                                            tool_name = %name,
+                                            "single-submit auxiliary tool rejected arguments"
+                                        );
+                                        rig_results
+                                            .push(rig_core::message::UserContent::tool_result(
+                                            call.tool_call.id.clone(),
+                                            rig_core::message::ToolResultContent::from_tool_output(
+                                                serde_json::json!({"error": error}).to_string(),
+                                            ),
+                                        ));
+                                    }
+                                    Err(err) => {
+                                        tracing::debug!(
+                                            target = profile.tracing_target,
+                                            error = %err,
+                                            tool_name = %name,
+                                            "single-submit auxiliary tool hard error"
+                                        );
+                                        return SingleSubmitTerminal::ProtocolFailure;
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Err(e) = rig_run.tool_results(rig_results) {
+                            tracing::debug!(
+                                target = profile.tracing_target,
+                                error = %e,
+                                "rig agent run tool_results failed"
+                            );
+                            return SingleSubmitTerminal::ProtocolFailure;
+                        }
+
+                        tracker.apply_turn();
+                        // Continue the model loop.
                     }
-
-                    if let Err(e) = rig_run.tool_results(rig_results) {
-                        tracing::debug!(
-                            target = profile.tracing_target,
-                            error = %e,
-                            "rig agent run tool_results failed"
-                        );
-                        return SingleSubmitTerminal::ProtocolFailure;
-                    }
-
-                    tracker.apply_turn();
-
-                    // Return the raw arguments.
-                    return SingleSubmitTerminal::Submitted { arguments };
                 }
                 rig_core::agent::run::AgentRunStep::Done(_) => {
                     if last_assistant_text.is_empty() {
@@ -6716,6 +6945,7 @@ main = "SKILL.md"
                     resolved_at_unix_ms: 15,
                 },
                 bound_at_unix_ms: 15,
+                repository_grant: None,
             };
             let attempt = TaskAttempt::new(TaskAttemptId::new(1), run_id, 10);
 
@@ -7399,7 +7629,7 @@ main = "SKILL.md"
     use crate::authority::{
         AuthorityBinding, AuthoritySnapshot, AuthoritySubject, DisclosureCeiling, RunOperation,
     };
-    use crate::model::ModelStreamEvent;
+    use crate::model::{ModelStreamEvent, StopReason};
     use crate::product_task::{ProductTaskId, TaskAttemptId};
     use crate::visual_annotation::tests::lifecycle::{
         text_turn, tool_call_turn, va_runner, ScriptedProvider,
@@ -8192,5 +8422,331 @@ main = "SKILL.md"
         .await;
         assert_eq!(result, Ok(()));
         assert!(events.try_recv().is_err(), "no audit event on success");
+    }
+
+    // ---- Auxiliary tool tests (Task 1) ----
+
+    struct AuxiliaryToolStub {
+        name: String,
+        required_op: RunOperation,
+        call_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl crate::tools::Tool for AuxiliaryToolStub {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn json_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn call<'a>(&'a self, _arguments: &'a serde_json::Value) -> crate::tools::ToolFuture<'a> {
+            self.call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                Ok(crate::tools::ToolOutcome::Success {
+                    result_json: serde_json::json!({"content": "file contents", "path": "README.md"}),
+                })
+            })
+        }
+        fn required_operations(&self) -> &'static [RunOperation] {
+            // Leak a static for test purposes.
+            // Each test creates its own stub, so this is safe.
+            match self.required_op {
+                RunOperation::ReadAuthorizedWorkspaceFile => {
+                    &[RunOperation::ReadAuthorizedWorkspaceFile]
+                }
+                _ => &[],
+            }
+        }
+    }
+
+    /// Provider that returns an auxiliary call first, then a terminal call.
+    fn auxiliary_then_terminal_provider() -> ScriptedProvider {
+        ScriptedProvider::new(vec![
+            tool_call_turn(
+                "tc_read",
+                "read_authorized_project_text",
+                r#"{"path":"README.md"}"#,
+            ),
+            tool_call_turn(
+                "tc_submit",
+                "submit_caption_suggestions",
+                r#"{"suggestions":[]}"#,
+            ),
+        ])
+    }
+
+    fn authority_with_read_and_submit() -> AuthoritySnapshot {
+        let run_id = RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap();
+        let subject = AuthoritySubject::ActionGuideEphemeralGuide {
+            guide_digest: "test-digest".to_string(),
+        };
+        caption_authority_for_tests(
+            &run_id,
+            &subject,
+            DisclosureCeiling::TextMetadataOnly,
+            BTreeSet::from([
+                RunOperation::SubmitReviewCandidate,
+                RunOperation::ReadAuthorizedWorkspaceFile,
+            ]),
+        )
+    }
+
+    #[tokio::test]
+    async fn auxiliary_success_threads_result_then_terminal_submits() {
+        let aux_stub = AuxiliaryToolStub {
+            name: "read_authorized_project_text".to_string(),
+            required_op: RunOperation::ReadAuthorizedWorkspaceFile,
+            call_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        };
+        let call_counter = aux_stub.call_count.clone();
+        let auxiliary = SingleSubmitAuxiliaryTool {
+            definition: crate::model::ToolDefinition {
+                name: "read_authorized_project_text".to_string(),
+                description: "test".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+            tool: Arc::new(aux_stub),
+        };
+
+        let skill_use = crate::skills::bundled_action_guide_captions_use().unwrap();
+        let profile = caption_profile(&skill_use)
+            .with_auxiliary_tools(vec![auxiliary])
+            .unwrap();
+        let runner = va_runner();
+        let provider = auxiliary_then_terminal_provider();
+
+        let _run_id = RunId::parse("run-00000000-0000-4000-8000-00000000002a").unwrap();
+        let subject = AuthoritySubject::ActionGuideEphemeralGuide {
+            guide_digest: "test-digest".to_string(),
+        };
+        let authority = authority_with_read_and_submit();
+
+        let input = crate::domain::AuthorizedModelInput::new(
+            "anthropic".into(),
+            "vision-model".into(),
+            "suggest captions".into(),
+            vec![],
+            vec![],
+        )
+        .expect("valid input");
+
+        let terminal = runner
+            .run_single_submit_with_provider(
+                profile,
+                input,
+                &provider,
+                RunBudget {
+                    wall_time: std::time::Duration::from_secs(30),
+                    model_calls: 4,
+                    attachments: 1,
+                    tool_calls: 2,
+                    ..RunBudget::unlimited()
+                },
+                &RunCancellation::new(),
+                &authority,
+                &subject,
+                Some(&NoopAuditSink),
+            )
+            .await;
+
+        assert!(
+            matches!(terminal, SingleSubmitTerminal::Submitted { .. }),
+            "expected Submitted, got {terminal:?}"
+        );
+        assert_eq!(
+            call_counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "auxiliary was called once"
+        );
+    }
+
+    #[test]
+    fn duplicate_auxiliary_names_rejected() {
+        let skill_use = crate::skills::bundled_action_guide_captions_use().unwrap();
+        let base = caption_profile(&skill_use);
+        let aux = SingleSubmitAuxiliaryTool {
+            definition: crate::model::ToolDefinition {
+                name: "read_authorized_project_text".to_string(),
+                description: "test".to_string(),
+                parameters: serde_json::json!({}),
+            },
+            tool: Arc::new(AuxiliaryToolStub {
+                name: "read_authorized_project_text".to_string(),
+                required_op: RunOperation::ReadAuthorizedWorkspaceFile,
+                call_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            }),
+        };
+        let result = base.with_auxiliary_tools(vec![
+            SingleSubmitAuxiliaryTool {
+                definition: aux.definition.clone(),
+                tool: aux.tool.clone(),
+            },
+            SingleSubmitAuxiliaryTool {
+                definition: aux.definition.clone(),
+                tool: aux.tool.clone(),
+            },
+        ]);
+        assert!(
+            result.is_err(),
+            "duplicate auxiliary names must be rejected"
+        );
+    }
+
+    #[test]
+    fn auxiliary_name_equal_to_terminal_rejected() {
+        let skill_use = crate::skills::bundled_action_guide_captions_use().unwrap();
+        let base = caption_profile(&skill_use);
+        let aux = SingleSubmitAuxiliaryTool {
+            definition: crate::model::ToolDefinition {
+                name: "submit_caption_suggestions".to_string(),
+                description: "test".to_string(),
+                parameters: serde_json::json!({}),
+            },
+            tool: Arc::new(AuxiliaryToolStub {
+                name: "submit_caption_suggestions".to_string(),
+                required_op: RunOperation::ReadAuthorizedWorkspaceFile,
+                call_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            }),
+        };
+        let result = base.with_auxiliary_tools(vec![aux]);
+        assert!(
+            result.is_err(),
+            "auxiliary name equal to terminal must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_auxiliary_tool_rejected() {
+        // Provider returns an unknown tool name.
+        let provider =
+            ScriptedProvider::new(vec![tool_call_turn("tc_bad", "unknown_tool", r#"{"x":1}"#)]);
+        let skill_use = crate::skills::bundled_action_guide_captions_use().unwrap();
+        let profile = caption_profile(&skill_use); // no auxiliary tools
+        let runner = va_runner();
+        let authority = authority_with_read_and_submit();
+        let input = crate::domain::AuthorizedModelInput::new(
+            "anthropic".into(),
+            "model".into(),
+            "test".into(),
+            vec![],
+            vec![],
+        )
+        .unwrap();
+
+        let terminal = runner
+            .run_single_submit_with_provider(
+                profile,
+                input,
+                &provider,
+                caption_run_budget_for_tests(),
+                &RunCancellation::new(),
+                &authority,
+                &AuthoritySubject::ActionGuideEphemeralGuide {
+                    guide_digest: "d".into(),
+                },
+                Some(&NoopAuditSink),
+            )
+            .await;
+        assert!(matches!(terminal, SingleSubmitTerminal::ProtocolFailure));
+    }
+
+    #[tokio::test]
+    async fn terminal_mixed_with_auxiliary_calls_rejected() {
+        use crate::model::{ModelCompletion, ModelUsage};
+        // Single turn with two tool calls: terminal + auxiliary.
+        let mixed_turn: Vec<ModelStreamEvent> = vec![
+            ModelStreamEvent::ToolCallStart {
+                id: "tc1".into(),
+                name: "submit_caption_suggestions".into(),
+            },
+            ModelStreamEvent::ToolCallArgumentDelta {
+                id: "tc1".into(),
+                delta: r#"{"suggestions":[]}"#.into(),
+            },
+            ModelStreamEvent::ToolCallStart {
+                id: "tc2".into(),
+                name: "read_authorized_project_text".into(),
+            },
+            ModelStreamEvent::ToolCallArgumentDelta {
+                id: "tc2".into(),
+                delta: r#"{"path":"f"}"#.into(),
+            },
+            ModelStreamEvent::Completed(ModelCompletion {
+                usage: ModelUsage {
+                    input_tokens: 5,
+                    output_tokens: 3,
+                    total_tokens: 8,
+                },
+                stop_reason: StopReason::ToolUse,
+            }),
+        ];
+        let provider = ScriptedProvider::new(vec![mixed_turn]);
+        let aux_stub = AuxiliaryToolStub {
+            name: "read_authorized_project_text".to_string(),
+            required_op: RunOperation::ReadAuthorizedWorkspaceFile,
+            call_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        };
+        let skill_use = crate::skills::bundled_action_guide_captions_use().unwrap();
+        let profile = caption_profile(&skill_use)
+            .with_auxiliary_tools(vec![SingleSubmitAuxiliaryTool {
+                definition: crate::model::ToolDefinition {
+                    name: "read_authorized_project_text".to_string(),
+                    description: "test".to_string(),
+                    parameters: serde_json::json!({}),
+                },
+                tool: Arc::new(aux_stub),
+            }])
+            .unwrap();
+        let runner = va_runner();
+        let authority = authority_with_read_and_submit();
+        let input = crate::domain::AuthorizedModelInput::new(
+            "anthropic".into(),
+            "model".into(),
+            "test".into(),
+            vec![],
+            vec![],
+        )
+        .unwrap();
+
+        let terminal = runner
+            .run_single_submit_with_provider(
+                profile,
+                input,
+                &provider,
+                caption_run_budget_for_tests(),
+                &RunCancellation::new(),
+                &authority,
+                &AuthoritySubject::ActionGuideEphemeralGuide {
+                    guide_digest: "d".into(),
+                },
+                Some(&NoopAuditSink),
+            )
+            .await;
+        assert!(matches!(terminal, SingleSubmitTerminal::ProtocolFailure));
+    }
+
+    #[tokio::test]
+    async fn existing_terminal_only_caption_behavior_unchanged() {
+        let provider = ScriptedProvider::new(vec![tool_call_turn(
+            "tc_1",
+            "submit_caption_suggestions",
+            r#"{"suggestions":[]}"#,
+        )]);
+        let terminal = run_caption_profile(
+            &provider,
+            caption_run_budget_for_tests(),
+            &RunCancellation::new(),
+            DisclosureCeiling::TextMetadataOnly,
+            BTreeSet::from([RunOperation::SubmitReviewCandidate]),
+            vec![],
+        )
+        .await;
+        match terminal {
+            SingleSubmitTerminal::Submitted { arguments } => {
+                assert_eq!(arguments, serde_json::json!({"suggestions": []}));
+            }
+            other => panic!("expected Submitted, got {other:?}"),
+        }
     }
 }

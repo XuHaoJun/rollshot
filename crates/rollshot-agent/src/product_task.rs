@@ -128,6 +128,7 @@ pub enum TaskKind {
     SmartRedactionImprove,
     ActionGuideCaptions,
     ActionGuideVisualAnnotation,
+    ActionGuideLaunchTeaser,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -172,6 +173,7 @@ pub enum ArtifactKind {
     SmartRedaction,
     ActionGuideCaptions,
     ActionGuideVisualAnnotation,
+    ActionGuideLaunchTeaser,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -222,6 +224,12 @@ pub enum SourceBinding {
         keyframe_sha256: [u8; 32],
         annotation_state_sha256: [u8; 32],
     },
+    ActionGuideLaunchTeaserProject {
+        project_root_sha256: [u8; 32],
+        revision: u64,
+        projection_digest: String,
+        motion_sha256: String,
+    },
 }
 
 /// Deserialization shim accepting both the tagged form and the pre-migration
@@ -265,6 +273,12 @@ impl<'de> Deserialize<'de> for SourceBinding {
                 keyframe: u64,
                 keyframe_sha256: [u8; 32],
                 annotation_state_sha256: [u8; 32],
+            },
+            ActionGuideLaunchTeaserProject {
+                project_root_sha256: [u8; 32],
+                revision: u64,
+                projection_digest: String,
+                motion_sha256: String,
             },
         }
 
@@ -341,6 +355,17 @@ impl<'de> Deserialize<'de> for SourceBinding {
                 keyframe,
                 keyframe_sha256,
                 annotation_state_sha256,
+            },
+            Repr::Tagged(Tagged::ActionGuideLaunchTeaserProject {
+                project_root_sha256,
+                revision,
+                projection_digest,
+                motion_sha256,
+            }) => Self::ActionGuideLaunchTeaserProject {
+                project_root_sha256,
+                revision,
+                projection_digest,
+                motion_sha256,
             },
             Repr::LegacyFlat(flat) => Self::SmartRedaction {
                 base_image_sha256: flat.base_image_sha256,
@@ -437,6 +462,16 @@ impl SourceBinding {
                     annotation_state_sha256: asb,
                 },
             ) => ga == gb && sa == sb && ka == kb && kha == khb && asa == asb,
+            (
+                Self::ActionGuideLaunchTeaserProject {
+                    project_root_sha256: a,
+                    ..
+                },
+                Self::ActionGuideLaunchTeaserProject {
+                    project_root_sha256: b,
+                    ..
+                },
+            ) => a == b,
             _ => false,
         }
     }
@@ -508,6 +543,20 @@ impl SourceBinding {
                     annotation_state_sha256: asb,
                 },
             ) => ga == gb && sa == sb && ka == kb && kha == khb && asa == asb,
+            (
+                Self::ActionGuideLaunchTeaserProject {
+                    revision: ra,
+                    projection_digest: pa,
+                    motion_sha256: ma,
+                    ..
+                },
+                Self::ActionGuideLaunchTeaserProject {
+                    revision: rb,
+                    projection_digest: pb,
+                    motion_sha256: mb,
+                    ..
+                },
+            ) => ra == rb && pa == pb && ma == mb,
             _ => false,
         }
     }
@@ -584,6 +633,10 @@ pub enum ArtifactSummary {
     },
     ActionGuideVisualAnnotation {
         suggestion_count: u32,
+    },
+    ActionGuideLaunchTeaser {
+        changed_field_count: u32,
+        repository_read_count: u32,
     },
 }
 
@@ -1064,6 +1117,9 @@ pub struct RunContractReceiptV1 {
     pub authority: AuthoritySnapshotReceiptV1,
     pub skill_use: SkillUseReceiptV1,
     pub bound_at_unix_ms: i64,
+    /// Optional repository grant receipt for launch-teaser runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_grant: Option<crate::repository::RepositoryReadGrantReceiptV1>,
 }
 
 // ========================================================================
@@ -2817,6 +2873,7 @@ mod tests {
             authority: authority_receipt_fixture(),
             skill_use: skill_use_receipt_fixture(),
             bound_at_unix_ms: 20,
+            repository_grant: None,
         }
     }
 
@@ -2831,6 +2888,7 @@ mod tests {
                 ..skill_use_receipt_fixture()
             },
             bound_at_unix_ms: 20,
+            repository_grant: None,
         }
     }
 
@@ -3079,6 +3137,7 @@ mod tests {
             authority: authority_receipt_fixture(),
             skill_use: skill_use_receipt_fixture(),
             bound_at_unix_ms: 20,
+            repository_grant: None,
         };
         let meta = v2_metadata_with_contract(&contract);
         assert_eq!(meta.run_contract(), Some(&contract));
@@ -3227,6 +3286,7 @@ mod tests {
             authority: authority_receipt_fixture(),
             skill_use: skill_use_receipt_fixture(),
             bound_at_unix_ms: 20,
+            repository_grant: None,
         };
         let json = serde_json::to_string(&receipt).unwrap();
         let restored: RunContractReceiptV1 = serde_json::from_str(&json).unwrap();

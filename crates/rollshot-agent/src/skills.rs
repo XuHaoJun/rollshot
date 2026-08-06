@@ -989,10 +989,18 @@ const CAPTIONS_BUNDLED_MANIFEST: &str = include_str!("../skills/action-guide-cap
 /// Well-known package ID for the bundled Action Guide visual annotations skill.
 pub const ACTION_GUIDE_VISUAL_ANNOTATIONS_PACKAGE_ID: &str = "action-guide-visual-annotations";
 
+/// Well-known package ID for the bundled Action Guide launch teaser skill.
+pub const ACTION_GUIDE_LAUNCH_TEASER_PACKAGE_ID: &str = "action-guide-launch-teaser";
+
 const VISUAL_ANNOTATIONS_BUNDLED_BODY: &str =
     include_str!("../skills/action-guide-visual-annotations/SKILL.md");
 const VISUAL_ANNOTATIONS_BUNDLED_MANIFEST: &str =
     include_str!("../skills/action-guide-visual-annotations/skill.toml");
+
+const LAUNCH_TEASER_BUNDLED_BODY: &str =
+    include_str!("../skills/action-guide-launch-teaser/SKILL.md");
+const LAUNCH_TEASER_BUNDLED_MANIFEST: &str =
+    include_str!("../skills/action-guide-launch-teaser/skill.toml");
 
 static BUNDLED_REPORT: LazyLock<CatalogBuildReport> = LazyLock::new(|| {
     let limits = SkillCatalogLimits::v1();
@@ -1016,6 +1024,13 @@ static BUNDLED_REPORT: LazyLock<CatalogBuildReport> = LazyLock::new(|| {
             vec![
                 ("skill.toml", VISUAL_ANNOTATIONS_BUNDLED_MANIFEST.as_bytes()),
                 ("SKILL.md", VISUAL_ANNOTATIONS_BUNDLED_BODY.as_bytes()),
+            ],
+        ),
+        (
+            ACTION_GUIDE_LAUNCH_TEASER_PACKAGE_ID,
+            vec![
+                ("skill.toml", LAUNCH_TEASER_BUNDLED_MANIFEST.as_bytes()),
+                ("SKILL.md", LAUNCH_TEASER_BUNDLED_BODY.as_bytes()),
             ],
         ),
     ])];
@@ -1077,6 +1092,24 @@ pub fn bundled_action_guide_visual_annotations_use() -> Option<SkillUse> {
                 source_authority: SkillAuthorityId::parse("rollshot.bundled").unwrap(),
                 package_id: SkillPackageId::parse(ACTION_GUIDE_VISUAL_ANNOTATIONS_PACKAGE_ID)
                     .unwrap(),
+                expected_digest: None,
+                invocation_kind: SkillInvocationKind::HostExplicit,
+            },
+            0,
+        )
+        .ok()
+}
+
+/// Resolve the bundled Action Guide launch teaser skill. Returns `None`
+/// if the package was not loaded (diagnostic in the build report).
+pub fn bundled_action_guide_launch_teaser_use() -> Option<SkillUse> {
+    let report = bundled_skill_catalog();
+    report
+        .catalog
+        .invoke(
+            &SkillInvocationRequest {
+                source_authority: SkillAuthorityId::parse("rollshot.bundled").unwrap(),
+                package_id: SkillPackageId::parse(ACTION_GUIDE_LAUNCH_TEASER_PACKAGE_ID).unwrap(),
                 expected_digest: None,
                 invocation_kind: SkillInvocationKind::HostExplicit,
             },
@@ -2118,7 +2151,7 @@ main = "SKILL.md"
             "unexpected diagnostics: {:?}",
             report.diagnostics
         );
-        assert_eq!(report.catalog.entries.len(), 3);
+        assert_eq!(report.catalog.entries.len(), 4);
     }
 
     #[test]

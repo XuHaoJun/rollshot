@@ -62,6 +62,12 @@ pub fn view(state: &TimelineWorkspace) -> Element<'_, Message> {
         .height(Length::Fixed(0.0))
         .into();
 
+    // If the teaser workspace is active, show it instead of the normal body.
+    #[cfg(feature = "action-guide")]
+    if let Some(teaser) = super::launch_teaser_view::teaser_view(state) {
+        return teaser;
+    }
+
     let body: Element<Message> = column![
         header(state),
         read_only_banner,
@@ -346,6 +352,14 @@ fn header(state: &TimelineWorkspace) -> Element<'_, Message> {
         .height(Length::Shrink)
         .into();
 
+    #[cfg(feature = "action-guide")]
+    let teaser_btn: Element<Message> = super::launch_teaser_view::create_teaser_button(state);
+    #[cfg(not(feature = "action-guide"))]
+    let teaser_btn: Element<Message> = Space::new()
+        .width(Length::Shrink)
+        .height(Length::Shrink)
+        .into();
+
     row![
         advisory,
         save_indicator,
@@ -362,6 +376,7 @@ fn header(state: &TimelineWorkspace) -> Element<'_, Message> {
         mp4_btn,
         export_controls,
         issue_pack_btn,
+        teaser_btn,
     ]
     .spacing(8)
     .align_y(Alignment::Center)

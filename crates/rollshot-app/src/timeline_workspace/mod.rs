@@ -27,6 +27,12 @@ mod view;
 mod visual_annotation_agent;
 
 #[cfg(feature = "action-guide")]
+pub(crate) mod launch_teaser;
+#[cfg(feature = "action-guide")]
+pub(crate) mod launch_teaser_agent;
+#[cfg(feature = "action-guide")]
+mod launch_teaser_view;
+#[cfg(feature = "action-guide")]
 pub(crate) mod project;
 #[cfg(feature = "action-guide")]
 pub(crate) mod project_publish;
@@ -427,6 +433,12 @@ pub struct TimelineWorkspace {
     /// Monotonic operation id for save-recording export provenance.
     #[cfg(feature = "action-guide")]
     pub(crate) next_save_recording_operation_id: u64,
+    /// Launch teaser lifecycle state. See [`launch_teaser::LaunchTeaserState`].
+    #[cfg(feature = "action-guide")]
+    pub(crate) launch_teaser: launch_teaser::LaunchTeaserState,
+    /// Launch teaser agent proposal lifecycle state.
+    #[cfg(feature = "action-guide")]
+    pub(crate) launch_teaser_agent: launch_teaser_agent::LaunchTeaserAgentState,
 }
 
 impl TimelineWorkspace {
@@ -520,6 +532,10 @@ impl TimelineWorkspace {
             save_recording_state: motion::SaveRecordingState::Idle,
             #[cfg(feature = "action-guide")]
             next_save_recording_operation_id: 0,
+            #[cfg(feature = "action-guide")]
+            launch_teaser: launch_teaser::LaunchTeaserState::Closed,
+            #[cfg(feature = "action-guide")]
+            launch_teaser_agent: launch_teaser_agent::LaunchTeaserAgentState::Idle,
         };
         ws.rebuild_selection_handles();
         ws
@@ -599,6 +615,10 @@ impl TimelineWorkspace {
             motion: motion::WorkspaceMotion::None,
             save_recording_state: motion::SaveRecordingState::Idle,
             next_save_recording_operation_id: 0,
+            #[cfg(feature = "action-guide")]
+            launch_teaser: launch_teaser::LaunchTeaserState::Closed,
+            #[cfg(feature = "action-guide")]
+            launch_teaser_agent: launch_teaser_agent::LaunchTeaserAgentState::Idle,
         };
         ws.rebuild_selection_handles();
         ws
@@ -742,6 +762,17 @@ impl TimelineWorkspace {
             _ => None,
         }
     }
+    /// Compute launch teaser eligibility from the current workspace state.
+    #[cfg(feature = "action-guide")]
+    pub(crate) fn launch_teaser_eligibility(&self) -> launch_teaser::LaunchTeaserEligibility {
+        launch_teaser::launch_teaser_eligibility(
+            self.save_state,
+            &self.project_session,
+            &self.motion,
+            self.guide.steps().len(),
+        )
+    }
+
     /// Mark the project dirty after a successful persisted mutation.
     #[cfg(feature = "action-guide")]
     pub(crate) fn mark_project_dirty(&mut self) {

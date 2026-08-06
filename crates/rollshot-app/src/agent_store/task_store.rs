@@ -1960,6 +1960,7 @@ mod tests {
             authority: authority_receipt_fixture(),
             skill_use: skill_use_receipt_fixture(),
             bound_at_unix_ms: 20,
+            repository_grant: None,
         }
     }
 
