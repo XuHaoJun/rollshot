@@ -1,1 +1,0 @@
-{"status":"DONE","commit":"89a6b16","test_summary":"433 passed (3 suites), 42 provider_contract tests including 2 new context_overflow tests","concerns":[],"verification":"rtk cargo test -p rollshot-agent --test provider_contract: 42 passed\nrtk cargo test -p rollshot-agent: 433 passed (3 suites)\ncontext_overflow tests: 2 passed"}
